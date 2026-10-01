@@ -6,9 +6,9 @@
 // then passwords, extensions and sync. The sites and the data are invented.
 
 import { board } from "blueprint/board.mjs";
-import { box, col, row, stack, text, icon, space, fill } from "blueprint/kit.mjs";
-import { action, badge, dot, hr, label, popover, seg, switcher } from "blueprint/ui.mjs";
-import { AMBER, DAYLIGHT, NOTES, horizonWindow, mark, noteRow, slug, startPage } from "../kit/horizon.mjs";
+import { box, col, row, stack, text, icon, space, fill, locate } from "blueprint/kit.mjs";
+import { action, badge, dot, hr, input, label, popover, seg, switcher } from "blueprint/ui.mjs";
+import { AMBER, DAYLIGHT, NOTES, horizonWindow, mark, noteRow, slug, startPage, tabStrip } from "../kit/horizon.mjs";
 
 // ---- invented sites ---------------------------------------------------------
 
@@ -162,6 +162,115 @@ const perfiles = () =>
       ),
     ],
   });
+
+// ---- tab groups ---------------------------------------------------------------------
+
+// The owner, 2026-10-01: tabs can be grouped, each group with its own name, colour
+// and icon: any colour from a picker, and any icon of the set, found by
+// search. The suggested colours are drawn for Amber; each theme gets its own
+// set at contrast when the task is built.
+const GROUP_COLORS = ["#7cc4a0", "#a4b6ff", "#ffb04a", "#ff8a8a", "#d7a4ff", "#f3c460", "#7fd1e0", "#c4b3b6"];
+
+// What a search for "viaje" finds: icons are tagged in Spanish and English.
+const TRIP_ICONS = ["map", "plane", "car", "route", "compass", "globe", "trees", "briefcase"];
+
+// The colour being picked, and where it sits in the picker: hue near 166
+// degrees on the strip, saturation and brightness in the area above it.
+const PICKED = "#4fb39a";
+
+const GROUPS = {
+  viaje: { name: "Viaje", color: "#7cc4a0", glyph: "map" },
+  cocina: { name: "Cocina", color: "#d7a4ff", glyph: "utensils" },
+};
+
+const GROUP_STRIP = {
+  tabs: [
+    SITE_TABS[0],
+    { ...SITE_TABS[1], group: "viaje" },
+    { title: "Hostería Lago Azul: tu reserva", color: "#1f5f8b", initial: "H", group: "viaje" },
+    { title: "El Chaltén: senderos abiertos en abril", color: "#5b7f3a", initial: "E", group: "viaje" },
+    { ...SITE_TABS[2], group: "cocina" },
+  ],
+  active: 1,
+  groups: GROUPS,
+  tabW: 168,
+};
+
+const swatch = (color, on) =>
+  stack(
+    { w: 26, h: 26, radius: "pill", stroke: on ? "title" : undefined, strokeWidth: 2, name: `color-${color.slice(1)}`, label: on ? "Color elegido" : "Color" },
+    box({ w: 18, h: 18, radius: "pill", fill: color, place: "center" }),
+  );
+
+const customSwatch = () =>
+  stack(
+    { w: 26, h: 26, radius: "pill", stroke: "line-strong", dash: "3 3", name: "color-custom", label: "Color propio" },
+    icon("plus", { size: 14, color: "soft", place: "center" }),
+  );
+
+const iconChoice = (glyph, on, color) =>
+  stack(
+    { w: 30, h: 30, radius: "sm", fill: on ? "surface-3" : undefined, name: `icon-${slug(glyph)}`, label: on ? "Ícono elegido" : "Ícono" },
+    icon(glyph, { size: 16, color: on ? color : "soft", place: "center" }),
+  );
+
+/** The custom colour picker: saturation and brightness, the hue strip, and the hex value. */
+function colorPicker(place) {
+  return popover(
+    {
+      w: 248,
+      pad: 14,
+      gap: 12,
+      place,
+      // The picker's gradients come from this repository's skin defs.
+      theme: { "sv-hue": "url(#rv-hz-sv-hue)", "sv-dark": "url(#rv-hz-sv-dark)", "hue-strip": "url(#rv-hz-hue)" },
+      name: "color-picker",
+      label: "Color propio",
+    },
+    stack(
+      { h: 150, radius: "md", clip: true, name: "color-area", label: "Saturación y brillo" },
+      box({ fill: "sv-hue" }),
+      box({ fill: "sv-dark" }),
+      stack({ w: 16, h: 16, radius: "pill", stroke: "#ffffff", strokeWidth: 2, place: { x: 115, y: 37 } }),
+    ),
+    stack(
+      { h: 16, name: "hue", label: "Tono" },
+      box({ w: 220, h: 10, radius: "pill", fill: "hue-strip", place: { x: 0, y: 3 } }),
+      stack({ w: 16, h: 16, radius: "pill", fill: "#00c2a0", stroke: "#ffffff", strokeWidth: 2, place: { x: 93, y: 0 } }),
+    ),
+    row(
+      { gap: 8 },
+      box({ w: 34, h: 34, radius: "md", fill: PICKED }),
+      input(PICKED, { glyph: null, value: PICKED, grow: 1 }),
+      action("Usar", { primary: true, ref: "use-color" }),
+    ),
+  );
+}
+
+function grupos() {
+  const group = GROUPS.viaje;
+  const at = locate(tabStrip(GROUP_STRIP), 1440, "group-viaje");
+  const top = at.y + at.h + 8;
+  return horizonWindow(AMBER, [routesSite()], {
+    ...GROUP_STRIP,
+    bar: SITE_BAR,
+    label: "Sitio",
+    overlays: [
+      popover(
+        { w: 316, pad: 14, gap: 10, place: { x: at.x, y: top }, name: "group-editor", label: "Editar grupo" },
+        label("Nombre"),
+        input("Nombre del grupo", { glyph: null, value: group.name }),
+        label("Color"),
+        row({ gap: 6 }, ...GROUP_COLORS.map((color) => swatch(color, color === group.color)), customSwatch()),
+        label("Ícono"),
+        input("Buscar ícono", { value: "viaje", focus: true }),
+        row({ gap: 6 }, ...TRIP_ICONS.map((glyph) => iconChoice(glyph, glyph === group.glyph, group.color))),
+        text("8 íconos para «viaje»", { size: "xs", color: "soft" }),
+      ),
+      colorPicker({ x: at.x + 316 + 8, y: top + 104 }),
+    ],
+  });
+}
 
 // ---- research -----------------------------------------------------------------------
 
@@ -386,13 +495,14 @@ export default board({
     { id: "escudo", title: "4. Bloqueo del sitio", col: 3, row: 0, root: escudo, note: "Si el sitio se rompe, apagás el bloqueo con un clic. También el modo oscuro y los permisos." },
     { id: "oscuro", title: "5. Modo oscuro", col: 4, row: 0, root: oscuro, note: "El sitio se ve oscuro aunque no lo tenga. Se elige por sitio." },
     { id: "perfiles", title: "6. Perfiles", col: 0, row: 1, root: perfiles, note: "Cada perfil tiene sus cookies, historial y cuentas. Personal y Trabajo no se mezclan." },
-    { id: "lyra-permiso", title: "7. Lyra pide permiso", col: 2, row: 1, root: lyraPermiso, note: "Lyra lee una página solo si se lo pedís. La primera vez en cada sitio, pide permiso." },
-    { id: "lyra-resumen", title: "8. Lyra resume", col: 3, row: 1, root: lyraResumen, note: "Resume o compara pestañas en tu máquina, y lo guardás en un notebook." },
-    { id: "captura", title: "9. Captura", col: 2, row: 2, root: captura, note: "Capturás un texto, una zona o la página entera. Va primero a un notebook." },
-    { id: "notebook", title: "10. Notebook", col: 4, row: 1, root: notebook, note: "Notas y capturas juntas. Desde acá mandás algo a Docs, Blueprint o Nova." },
-    { id: "vault", title: "11. Vault completa", col: 0, row: 3, root: vault, note: "Vault sugiere tu cuenta solo en el sitio correcto y pide huella o PIN antes de completar." },
-    { id: "extension", title: "12. Extensiones", col: 1, row: 3, root: extension, note: "Instalás desde la tienda de Chrome. Si una extensión usa algo que Horizon no tiene, avisa antes." },
-    { id: "sync", title: "13. Sync (tema Daylight)", col: 2, row: 3, root: sync, note: "Todo se sincroniza cifrado por la nube de Nebula. Apagás lo que no quieras." },
+    { id: "grupos", title: "7. Grupos de pestañas", col: 1, row: 1, root: grupos, note: "Agrupás pestañas con nombre, color e ícono propios. Buscás cualquier ícono y elegís cualquier color." },
+    { id: "lyra-permiso", title: "8. Lyra pide permiso", col: 2, row: 1, root: lyraPermiso, note: "Lyra lee una página solo si se lo pedís. La primera vez en cada sitio, pide permiso." },
+    { id: "lyra-resumen", title: "9. Lyra resume", col: 3, row: 1, root: lyraResumen, note: "Resume o compara pestañas en tu máquina, y lo guardás en un notebook." },
+    { id: "captura", title: "10. Captura", col: 2, row: 2, root: captura, note: "Capturás un texto, una zona o la página entera. Va primero a un notebook." },
+    { id: "notebook", title: "11. Notebook", col: 4, row: 1, root: notebook, note: "Notas y capturas juntas. Desde acá mandás algo a Docs, Blueprint o Nova." },
+    { id: "vault", title: "12. Vault completa", col: 0, row: 3, root: vault, note: "Vault sugiere tu cuenta solo en el sitio correcto y pide huella o PIN antes de completar." },
+    { id: "extension", title: "13. Extensiones", col: 1, row: 3, root: extension, note: "Instalás desde la tienda de Chrome. Si una extensión usa algo que Horizon no tiene, avisa antes." },
+    { id: "sync", title: "14. Sync (tema Daylight)", col: 2, row: 3, root: sync, note: "Todo se sincroniza cifrado por la nube de Nebula. Apagás lo que no quieras." },
   ],
   links: [
     { from: "inicio", to: "buscar", at: "search", label: "Escribir" },
@@ -400,6 +510,7 @@ export default board({
     { from: "sitio", to: "escudo", at: "shield", label: "Escudo" },
     { from: "escudo", to: "oscuro", at: "site-dark-switch", label: "Modo oscuro" },
     { from: "inicio", to: "perfiles", at: "profile", label: "Perfil" },
+    { from: "sitio", to: "grupos", at: "tabs", label: "Agrupar" },
     { from: "sitio", to: "lyra-permiso", at: "lyra", label: "Lyra" },
     { from: "lyra-permiso", to: "lyra-resumen", at: "allow-site", label: "Permitir" },
     { from: "lyra-resumen", to: "notebook", at: "save-note", label: "Guardar" },

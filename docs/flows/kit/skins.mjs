@@ -40,6 +40,14 @@ export function skinDefs(prefix) {
     `<stop offset="0" stop-color="#1b1830"/><stop offset="0.5" stop-color="#3b2448"/><stop offset="0.8" stop-color="#8e3f52"/><stop offset="1" stop-color="#e0844b"/></linearGradient>` +
     `<radialGradient id="${prefix}-hz-a3-sun" cx="0.5" cy="1" r="1">` +
     `<stop offset="0" stop-color="#ffb98a"/><stop offset="0.5" stop-color="#ffdcc3"/><stop offset="1" stop-color="#faf7f3"/></radialGradient>` +
+    // The tab groups' colour picker: white to the hue across, clear to black
+    // down, and the hue strip.
+    `<linearGradient id="${prefix}-hz-sv-hue" x1="0" y1="0" x2="1" y2="0">` +
+    `<stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#00c2a0"/></linearGradient>` +
+    `<linearGradient id="${prefix}-hz-sv-dark" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0" stop-color="#000000" stop-opacity="0"/><stop offset="1" stop-color="#000000"/></linearGradient>` +
+    `<linearGradient id="${prefix}-hz-hue" x1="0" y1="0" x2="1" y2="0">` +
+    `<stop offset="0" stop-color="#ff0000"/><stop offset="0.17" stop-color="#ffff00"/><stop offset="0.33" stop-color="#00ff00"/><stop offset="0.5" stop-color="#00ffff"/><stop offset="0.67" stop-color="#0000ff"/><stop offset="0.83" stop-color="#ff00ff"/><stop offset="1" stop-color="#ff0000"/></linearGradient>` +
     `<pattern id="${ids.dots}" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="12" cy="12" r="1" fill="#d0d0d0"/></pattern>`;
   return { ids, svg };
 }

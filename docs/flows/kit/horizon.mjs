@@ -95,19 +95,47 @@ export function windowControls() {
   );
 }
 
-export function tabStrip({ tabs = TABS, active = 0 } = {}) {
+/** `#rrggbb` as `rgba()` at the given opacity, for a group's tinted label. */
+const tint = (hex, alpha) => `rgba(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(", ")}, ${alpha})`;
+
+/** A tab group's label: its icon and name in its own colour. */
+export function groupLabel(group) {
+  return row(
+    { h: 26, pad: [0, 10], gap: 6, radius: "md", fill: tint(group.color, 0.16), name: `group-${slug(group.name)}`, label: `Grupo: ${group.name}` },
+    icon(group.glyph, { size: 13, color: group.color }),
+    text(group.name, { size: "xs", weight: 650, color: group.color }),
+  );
+}
+
+/**
+ * The tab strip. A tab naming a `group` (a key of `groups`, each with a name,
+ * a colour and a glyph) is drawn after its group's label, and the group's
+ * tabs share one underline in its colour.
+ */
+export function tabStrip({ tabs = TABS, active = 0, groups = {}, tabW = 224 } = {}) {
+  const tabNode = (tab, i) => {
+    const on = i === active;
+    return row(
+      { w: tabW, h: 32, pad: [0, 8, 0, 10], gap: 8, radius: "md", fill: on ? "page" : undefined, name: `tab-${slug(tab.title)}`, label: tab.title },
+      tabLead(tab, on),
+      text(tab.title, { size: "xs", weight: on ? 600 : 500, color: on ? "title" : "soft", lines: 1, grow: 1 }),
+      icon("x", { size: 13, color: "dim" }),
+    );
+  };
+  const runs = [];
+  tabs.forEach((tab, i) => {
+    const last = runs[runs.length - 1];
+    if (tab.group && last?.group === tab.group) last.nodes.push(tabNode(tab, i));
+    else runs.push({ group: tab.group, nodes: [tabNode(tab, i)] });
+  });
   return row(
     { h: 44, pad: [0, 0, 0, 10], gap: 6, fill: "chrome", name: "tabs", label: "Pestañas" },
     profile(),
     vr(20),
-    ...tabs.map((tab, i) => {
-      const on = i === active;
-      return row(
-        { w: 224, h: 32, pad: [0, 8, 0, 10], gap: 8, radius: "md", fill: on ? "page" : undefined, name: `tab-${slug(tab.title)}`, label: tab.title },
-        tabLead(tab, on),
-        text(tab.title, { size: "xs", weight: on ? 600 : 500, color: on ? "title" : "soft", lines: 1, grow: 1 }),
-        icon("x", { size: 13, color: "dim" }),
-      );
+    ...runs.map(({ group, nodes }) => {
+      const def = group && groups[group];
+      if (!def) return nodes;
+      return row({ pad: [2, 0, 2, 0], gap: 6, edge: { side: "bottom", color: def.color, width: 2 } }, groupLabel(def), ...nodes);
     }),
     btn("plus", { size: 28, g: 16, label: "Nueva pestaña" }),
     fill(),
@@ -188,11 +216,12 @@ function sideTabs() {
 }
 
 /**
- * The standalone window, painted with one theme. `tabs` and `active` set the
- * tab strip, `bar` the address bar, `side` a panel docked on the right of the
- * page, and `overlays` popovers placed over the whole window.
+ * The standalone window, painted with one theme. `tabs`, `active`, `groups`
+ * and `tabW` set the tab strip, `bar` the address bar, `side` a panel docked
+ * on the right of the page, and `overlays` popovers placed over the whole
+ * window.
  */
-export function horizonWindow(theme, page, { vertical = false, tabs, active, bar, side, overlays, label = "Página de inicio" } = {}) {
+export function horizonWindow(theme, page, { vertical = false, tabs, active, groups, tabW, bar, side, overlays, label = "Página de inicio" } = {}) {
   const content = stack({ grow: 1, clip: true, fill: "page", name: "start-page", label }, ...page);
   const body = side ? row({ grow: 1, align: "stretch" }, content, side) : content;
   if (vertical) {
@@ -202,7 +231,7 @@ export function horizonWindow(theme, page, { vertical = false, tabs, active, bar
       col({ grow: 1 }, toolbar({ controls: true, bar }), body),
     );
   }
-  const frame = col({ h: 900, fill: "page", theme: overlays ? undefined : theme, name: "window", label: "Ventana de Horizon" }, tabStrip({ tabs, active }), toolbar({ bar }), body);
+  const frame = col({ h: 900, fill: "page", theme: overlays ? undefined : theme, name: "window", label: "Ventana de Horizon" }, tabStrip({ tabs, active, groups, tabW }), toolbar({ bar }), body);
   return overlays ? stack({ h: 900, theme }, frame, ...overlays) : frame;
 }
 
