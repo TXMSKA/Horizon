@@ -1,29 +1,29 @@
 # Electron security checklist
 
-Source: [Electron security checklist](https://www.electronjs.org/docs/latest/tutorial/security), checked 2026-10-01. Applied means implemented in source and exercised by `npm run verify:window`, which passed on Windows on 2026-10-01 with Smart App Control off; Smart App Control blocks the unsigned development binary.
+Source: [Electron security checklist](https://www.electronjs.org/docs/latest/tutorial/security), checked 2026-10-01. Task 001's native shell passed `npm run verify:window` on Windows with Smart App Control off. Task 002 adds untrusted web views; its automated checks cover the source and mocked lifecycle, while native browsing, keyboard/focus, resize/theme rendering, downloads and Google sign-in await the seat's app inspection. The implementation agent does not launch the app.
 
 | Item | Status | Evidence or reason |
 | --- | --- | --- |
-| 1. Only load secure content | Applied | [electron/main.ts:22](../../electron/main.ts#L22) and [electron/protocol.ts:24](../../electron/protocol.ts#L24). Only built local assets are served over a secure custom scheme. No site loads. |
-| 2. Do not enable Node.js integration for remote content | Applied | [electron/main.ts:51](../../electron/main.ts#L51). Disabled in the renderer, workers, and subframes. |
-| 3. Enable context isolation in all renderers | Applied | [electron/main.ts:54](../../electron/main.ts#L54). |
-| 4. Enable process sandboxing | Applied | [electron/main.ts:21](../../electron/main.ts#L21) and [electron/main.ts:55](../../electron/main.ts#L55). |
-| 5. Handle session permission requests | Applied | [electron/security.ts:30](../../electron/security.ts#L30). Requests, checks, and devices are denied on the only session before load. |
-| 6. Do not disable webSecurity | Applied | [electron/main.ts:56](../../electron/main.ts#L56). |
-| 7. Define a restrictive Content Security Policy | Applied | [electron/security.ts:4](../../electron/security.ts#L4) and [electron/protocol.ts:17](../../electron/protocol.ts#L17). Same-origin external scripts and styles only; no evaluation, inline code, connections, frames, objects, forms, or base changes. |
-| 8. Do not enable allowRunningInsecureContent | Applied | [electron/main.ts:57](../../electron/main.ts#L57). |
-| 9. Do not enable experimental features | Applied | [electron/main.ts:58](../../electron/main.ts#L58). |
-| 10. Do not use enableBlinkFeatures | Not applicable | No Blink features are enabled; [electron/main.ts:49](../../electron/main.ts#L49) contains no override. |
-| 11. Do not use allowpopups for WebViews | Not applicable | There are no WebViews. [electron/main.ts:59](../../electron/main.ts#L59) disables them. |
-| 12. Verify WebView options before creation | Applied | [electron/main.ts:30](../../electron/main.ts#L30). Every attachment is refused. |
-| 13. Disable or limit navigation | Applied | [electron/main.ts:27](../../electron/main.ts#L27). Navigation, frame navigation, and redirects are refused. The skip link moves focus without changing the trusted URL. |
-| 14. Disable or limit creation of new windows | Applied | [electron/main.ts:31](../../electron/main.ts#L31). All renderer requests are denied. |
-| 15. Do not use shell.openExternal with untrusted content | Not applicable | No shell API is imported or exposed. No URL reaches the operating system. |
-| 16. Use a current version of Electron | Applied | [package.json:35](../../package.json#L35). Version 44.4.5 is exactly pinned in the current stable major. npm reported 44.5.1 on 2026-10-01; its 2026-09-30 publication misses the seven-day age floor. Task 002 moves to the newest 44.x that passes the floor before any site loads. |
-| 17. Validate the sender of all IPC messages | Applied | [electron/security.ts:18](../../electron/security.ts#L18) and [electron/main.ts:71](../../electron/main.ts#L71). Both handlers check WebContents identity, the exact main frame, and a parsed Horizon URL. Window actions also validate their value. |
-| 18. Avoid file:// and prefer custom protocols | Applied | [electron/main.ts:86](../../electron/main.ts#L86) and [electron/protocol.ts:13](../../electron/protocol.ts#L13). Canonical paths restrict serving to built assets and prevent traversal and junction escapes. |
+| 1. Only load secure content | Scoped | Chrome uses the secure custom protocol and restrictive CSP in [protocol.ts](../../electron/protocol.ts). Web tabs prefer HTTPS for bare hosts, and explicitly allow HTTP as required by task 002; insecure subcontent remains disabled. [browsing.ts](../../electron/browsing.ts), [browser.ts](../../electron/browser.ts). |
+| 2. Do not enable Node.js integration for remote content | Applied | [main.ts](../../electron/main.ts). Disabled in the renderer, workers, and subframes. |
+| 3. Enable context isolation in all renderers | Applied | [main.ts](../../electron/main.ts). |
+| 4. Enable process sandboxing | Applied | [main.ts](../../electron/main.ts) and [main.ts](../../electron/main.ts). |
+| 5. Handle session permission requests | Applied | [security.ts](../../electron/security.ts) denies requests, checks and devices in the chrome session. [browser.ts](../../electron/browser.ts) installs independent deny handlers on `persist:web` before loading sites. The one exception is HTML fullscreen, which Electron routes through the request handler: it is granted, as browsers do without a prompt, and Escape leaves it. Per-site permissions arrive in task 004. |
+| 6. Do not disable webSecurity | Applied | [main.ts](../../electron/main.ts). |
+| 7. Define a restrictive Content Security Policy | Applied | [security.ts](../../electron/security.ts) and [protocol.ts](../../electron/protocol.ts). Same-origin external scripts and styles only; `img-src 'self' blob:` permits local page snapshots. No evaluation, inline code, connections, frames, objects, forms, or base changes. |
+| 8. Do not enable allowRunningInsecureContent | Applied | [main.ts](../../electron/main.ts). |
+| 9. Do not enable experimental features | Applied | [main.ts](../../electron/main.ts). |
+| 10. Do not use enableBlinkFeatures | Not applicable | No Blink features are enabled; [main.ts](../../electron/main.ts) contains no override. |
+| 11. Do not use allowpopups for WebViews | Not applicable | There are no WebViews. [main.ts](../../electron/main.ts) disables them. |
+| 12. Verify WebView options before creation | Applied | [main.ts](../../electron/main.ts). Every attachment is refused. |
+| 13. Disable or limit navigation | Applied | [security.ts](../../electron/security.ts) keeps chrome navigation blocked. Top-level web navigation allows only HTTP, HTTPS and exact `about:blank`; subframes additionally allow exact `about:srcdoc`, `data:` and `blob:`. Both navigation events and the [web session request handler](../../electron/browser.ts) enforce these rules and block privileged schemes. |
+| 14. Disable or limit creation of new windows | Applied | Chrome popups remain denied. Allowed web URLs create Horizon tabs through `createWindow`, adopting the guest WebContents with secure preferences and preserving its opener and `persist:web` session, subject to the tab cap. Background tabs do not activate; destroyed guests are removed safely. [browser.ts](../../electron/browser.ts). |
+| 15. Do not use shell.openExternal with untrusted content | Applied | No URL is passed to the shell. The only shell operation is `showItemInFolder` for a known download ID whose stored path matches its filename in the Downloads folder. No download is executed. [browser.ts](../../electron/browser.ts). |
+| 16. Use a current version of Electron | Pinned | [package.json](../../package.json) retains installed Electron 44.4.5 as specified by task 002. No dependency or lockfile changes were required. Version updates remain subject to the seven-day npm release-age floor. |
+| 17. Validate the sender of all IPC messages | Applied | Every handler calls [validateSender](../../electron/security.ts) for WebContents identity, exact main frame and exact Horizon origin. [commands.ts](../../electron/commands.ts) checks object shapes, string limits, URL schemes and values; handlers check argument counts. |
+| 18. Avoid file:// and prefer custom protocols | Applied | [main.ts](../../electron/main.ts) and [protocol.ts](../../electron/protocol.ts). Canonical paths restrict serving to built assets and prevent traversal and junction escapes. |
 | 19. Check which fuses can be changed | Not applicable at the development stage | [scripts/fuses.mjs:12](../../scripts/fuses.mjs#L12) is prepared for task 012 integration after packaging and before signing. Smart App Control blocks unsigned development binaries, modified or not. ASAR-only loading requires packaging; Windows ASAR integrity requires embedded metadata. Linux skips unsupported embedded integrity. |
-| 20. Do not expose Electron APIs to untrusted web content | Applied | [electron/preload.ts:5](../../electron/preload.ts#L5) and [src/shared/api.ts:4](../../src/shared/api.ts#L4). Only locale retrieval and three window actions are exposed; no IPC primitives, callbacks, URLs, filesystem access, or Electron objects. |
+| 20. Do not expose Electron APIs to untrusted web content | Applied | [preload.ts](../../electron/preload.ts) exposes a typed browser API only to Horizon chrome. Every [web view](../../electron/browser.ts) has a separate persistent session, sandbox, context isolation, no Node and no preload. Web pages receive no bridge or IPC primitives. |
 
 ## Fuse boundary for task 012
 
@@ -33,6 +33,6 @@ The development binary lacks the browser-specific snapshot, so flipping that fus
 
 ## Verification
 
-Node tests exercise hostile IPC identities and URLs, default permission/device/download/network denial, and protocol host/method/type/traversal/junction restrictions and CSP headers. The Electron integration script checks the real renderer, isolation, permissions, CSP, navigation, popups, and theme captures when execution is permitted. Run npm run build, npm run test:security, and npm run verify:window.
+Node tests exercise hostile IPC identities and arguments, bounded page capture, chrome/web frame navigation boundaries, URL/search classification, error names, default permission/device denial, protocol traversal and CSP, store schema/recovery, debounced writes and shutdown flushes, download name collisions and transient tabs, shared shortcuts, popup adoption, destroyed tabs and fullscreen in a mocked browser lifecycle. Run `npm run lint`, `npm run typecheck`, `npm run build` and `npm run test:security`. Build checks the theme contrast pairs. The task 001 integration script covers the foundation; it is not a task 002 browsing acceptance test.
 
-Native startup and both themes were verified on Windows on 2026-10-01. Linux startup and the Windows and Linux CI jobs have not run yet.
+Task 001 native startup and both themes were verified on Windows on 2026-10-01. Task 002 native inspection, Google sign-in, Linux startup and CI execution remain unverified here.

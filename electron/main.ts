@@ -2,8 +2,9 @@ import { app, BrowserWindow, ipcMain, nativeTheme, protocol, screen, session } f
 import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { IPC } from '../src/shared/api';
-import { secureSession, START_URL, validateSender } from './security';
+import { hardenContents, secureSession, START_URL, validateSender } from './security';
 import { serveHorizon } from './protocol';
+import { createBrowser } from './browser';
 
 // The approved design frame: the window and the interface scale are both sized against it.
 const DESIGN_WIDTH = 1440;
@@ -24,11 +25,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 app.on('web-contents-created', (_event, contents) => {
-  contents.on('will-navigate', (event) => event.preventDefault());
-  contents.on('will-frame-navigate', (event) => event.preventDefault());
-  contents.on('will-redirect', (event) => event.preventDefault());
-  contents.on('will-attach-webview', (event) => event.preventDefault());
-  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  hardenContents(contents, contents.session === session.fromPartition('persist:web'));
 });
 
 app.whenReady().then(async () => {
@@ -61,19 +58,24 @@ app.whenReady().then(async () => {
     },
   });
   window.removeMenu();
+  const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'));
   // The interface draws at 92% of the design frame and shrinks with a smaller window, never below 75%, so text and targets stay usable.
   const fitScale = () => {
     const { width, height } = window.getContentBounds();
     window.webContents.setZoomFactor(Math.max(0.75, 0.92 * Math.min(1, width / DESIGN_WIDTH, height / DESIGN_HEIGHT)));
+    browser.layout();
   };
   window.on('resize', fitScale);
   window.webContents.on('did-finish-load', fitScale);
-  ipcMain.handle(IPC.language, (event) => {
+  ipcMain.handle(IPC.language, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
+    if (args.length) throw new Error('Unexpected language argument');
     return app.getLocale().toLowerCase().split('-')[0] === 'es' ? 'es' : 'en';
   });
-  ipcMain.handle(IPC.windowAction, (event, action: unknown) => {
+  ipcMain.handle(IPC.windowAction, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
+    if (args.length !== 1) throw new Error('Invalid window action arguments');
+    const action = args[0];
     if (action === 'minimize') window.minimize();
     else if (action === 'maximize') {
       if (window.isMaximized()) window.unmaximize();

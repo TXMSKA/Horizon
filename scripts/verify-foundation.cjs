@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { writeFileSync, mkdirSync } = require('node:fs');
 const { resolve } = require('node:path');
-const { app, BrowserWindow, nativeTheme, session } = require('electron');
+const { app, BrowserWindow, session } = require('electron');
 
 const timeout = setTimeout(() => { console.error('Foundation verification timed out.'); app.exit(1); }, 30000);
 app.on('browser-window-created', (_event, window) => {
@@ -11,11 +11,12 @@ app.on('browser-window-created', (_event, window) => {
         if (await window.webContents.executeJavaScript('Boolean(document.querySelector("h1"))')) break;
         await new Promise(done => setTimeout(done, 100));
       }
+      // The start page now waits for the browser state, so the first paint and ready-to-show can trail the heading.
+      for (let attempt = 0; attempt < 40 && !window.isVisible(); attempt++) await new Promise(done => setTimeout(done, 100));
       const initial = await window.webContents.executeJavaScript(`({
         url: location.href, title: document.title, language: document.documentElement.lang,
         heading: document.querySelector('h1')?.textContent,
         node: typeof require, process: typeof process, api: Object.keys(window.horizon).sort(),
-        readonly: [...document.querySelectorAll('input')].every(input => input.readOnly),
         overflow: document.documentElement.scrollWidth > innerWidth
       })`);
       assert.equal(initial.url, 'horizon://app/');
@@ -24,8 +25,7 @@ app.on('browser-window-created', (_event, window) => {
       assert.ok(['es', 'en'].includes(initial.language));
       assert.equal(initial.node, 'undefined');
       assert.equal(initial.process, 'undefined');
-      assert.deepEqual(initial.api, ['getLanguage', 'windowAction']);
-      assert.ok(initial.readonly);
+      assert.deepEqual(initial.api, ['capture', 'command', 'getLanguage', 'getState', 'onShortcut', 'onState', 'setContentArea', 'windowAction']);
       assert.equal(initial.overflow, false);
       assert.ok(window.isVisible());
       assert.equal(await window.webContents.executeJavaScript('document.querySelector(".skip-link").click(); location.href'), 'horizon://app/');
@@ -47,8 +47,14 @@ app.on('browser-window-created', (_event, window) => {
       assert.equal((await session.defaultSession.fetch('horizon://app/', { method: 'POST' })).status, 403);
       assert.equal((await session.defaultSession.fetch('horizon://app/missing.js')).status, 404);
       mkdirSync('.runtime/screenshots', { recursive: true });
-      for (const theme of ['dark', 'light']) {
-        nativeTheme.themeSource = theme;
+      // The theme is chosen in the browser menu since task 002; the system theme only sets the first one.
+      for (const [theme, name] of [['dark', 'Amber'], ['light', 'Daylight']]) {
+        await window.webContents.executeJavaScript(`(async () => {
+          document.querySelector('[aria-controls=browser-menu]').click();
+          await new Promise(done => setTimeout(done, 100));
+          [...document.querySelectorAll('#browser-menu .segmented button')].find(button => button.textContent === ${JSON.stringify(name)}).click();
+          document.querySelector('[aria-controls=browser-menu]').click();
+        })()`);
         await new Promise(done => setTimeout(done, 200));
         const colours = await window.webContents.executeJavaScript(`({
           page: getComputedStyle(document.body).backgroundColor,

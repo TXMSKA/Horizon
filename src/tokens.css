@@ -122,6 +122,9 @@
   --color-transparent: transparent;
 }
 
+:root[data-theme="amber"] { color-scheme: dark; }
+:root[data-theme="daylight"] { color-scheme: light; }
+
 :root {
   color-scheme: light dark;
   --surface-page: light-dark(var(--palette-daylight-page), var(--palette-amber-page));
