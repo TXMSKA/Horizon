@@ -1,0 +1,40 @@
+# Dependency and install review
+
+Checked 2026-10-01 with Node.js 26.8.2 and npm 11.19.1. All direct versions are exact; the first successful install produced package-lock.json. npm ci reproduced the tree; npm audit reported zero vulnerabilities.
+
+## Install policy
+
+[.npmrc:1](../../.npmrc#L1) disables lifecycle scripts before installation. [.npmrc:2](../../.npmrc#L2) sets seven days. npm 11.19.1 supports this setting in days, as documented in [npm configuration](https://docs.npmjs.com/cli/v11/using-npm/config/#min-release-age). No age exclusion or peer-resolution bypass is configured. [.npmrc:6](../../.npmrc#L6) refuses git dependencies, which the age floor cannot date.
+
+**Electron is the one package allowed to run an installer.** npm run setup:electron explicitly invokes node_modules/electron/install.js because Chromium and the executable are downloaded separately. The inspected package has no automatic install lifecycle hook; its standalone installer checks the archive against checksums.json. [scripts/setup-electron.mjs:1](../../scripts/setup-electron.mjs#L1) keeps its cache inside .npm-cache/electron. Every other lifecycle script stays disabled. The optional macOS fsevents package has an install script in the lockfile; it is neither installed nor allowed to build on the supported targets.
+
+## Direct npm packages
+
+Published distributions were inspected with npm pack --dry-run --json without scripts. The table lists complete top-level distribution paths, file counts, and all published install/prepare/pack lifecycle scripts. Nested dist and lib entries contain the published files beneath those directories. Tarball integrity is locked.
+
+| Package | Reason | Lifecycle scripts | Published files | Source |
+| --- | --- | --- | --- | --- |
+| lucide-react 1.48.0 | Approved Lucide set as inline currentColor SVG; the platform has no icon set. | None | 4282 files: LICENSE, README.md, dist/, dynamic.d.mts, dynamic.d.ts, dynamic.js, dynamic.mjs, dynamic.mjs.map, dynamicIconImports.d.mts, dynamicIconImports.d.ts, dynamicIconImports.mjs, package.json | [verified 1.48.0](https://github.com/lucide-icons/lucide/tree/1.48.0) |
+| react 19.3.0 | Required library for Horizon screens. | None | 27 files: LICENSE, README.md, cjs/, compiler-runtime.js, index.js, jsx-dev-runtime.js, jsx-dev-runtime.react-server.js, jsx-runtime.js, jsx-runtime.react-server.js, package.json, react.react-server.js | [verified v19.3.0](https://github.com/react/react/tree/v19.3.0) |
+| react-dom 19.3.0 | Mounts React in the renderer. | None | 43 files: LICENSE, README.md, cjs/, client.js, client.react-server.js, index.js, package.json, profiling.js, profiling.react-server.js, react-dom.react-server.js, server.browser.js, server.bun.js, server.edge.js, server.js, server.node.js, server.react-server.js, static.browser.js, static.edge.js, static.js, static.node.js, static.react-server.js, test-utils.js | [verified v19.3.0](https://github.com/react/react/tree/v19.3.0) |
+| @electron/fuses 2.1.3 | Official fuse editing and verification; the runtime has no fuse-editing API. | prepack: tsc; prepare: husky | 15 files: LICENSE, README.md, dist/, package.json | [verified v2.1.3](https://github.com/electron/fuses/tree/v2.1.3) |
+| @types/node 24.13.6 | Types for Node filesystem, path, process, and tooling APIs, on the Node 24 line that Electron 44 runs. | None | 88 files: node/ | DefinitelyTyped; declarations pinned by tarball integrity, no package release tag |
+| @types/react 19.3.0 | Type definitions that React does not ship. | None | 18 files: react/ | DefinitelyTyped; declarations pinned by tarball integrity, no package release tag |
+| @types/react-dom 19.3.0 | Type definitions that React DOM does not ship. | None | 19 files: react-dom/ | DefinitelyTyped; declarations pinned by tarball integrity, no package release tag |
+| electron 44.4.5 | Chromium engine, native window, isolated preload, sessions, and custom protocol. | None | 9 files: LICENSE, README.md, abi_version, checksums.json, cli.js, electron.d.ts, index.js, install.js, package.json | [verified v44.4.5](https://github.com/electron/electron/tree/v44.4.5) |
+| eslint 10.11.0 | Required source linting. | None | 421 files: LICENSE, README.md, bin/, conf/, lib/, messages/, package.json | [verified v10.11.0](https://github.com/eslint/eslint/tree/v10.11.0) |
+| typescript 6.0.3 | Strict renderer, preload, and main-process checking and compilation. Version 6.0.3 satisfies the ESLint parser peer range. | None | 140 files: LICENSE.txt, README.md, SECURITY.md, ThirdPartyNoticeText.txt, bin/, lib/, package.json | [verified v6.0.3](https://github.com/microsoft/TypeScript/tree/v6.0.3) |
+| typescript-eslint 8.70.1 | Parses and checks TypeScript with ESLint. | None | 13 files: LICENSE, README.md, dist/, package.json | [verified v8.70.1](https://github.com/typescript-eslint/typescript-eslint/tree/v8.70.1) |
+| vite 8.3.0 | Required renderer bundling and TypeScript/JSX transformation. | None | 37 files: LICENSE.md, README.md, bin/, client.d.ts, dist/, misc/, package.json, types/ | [verified v8.3.0](https://github.com/vitejs/vite/tree/v8.3.0) |
+
+## Scanner and hook
+
+Gitleaks 8.30.1 is a maintained scanner with upstream provider rules, staged-diff scanning, redaction, and native Windows/Linux releases. It avoids a Node dependency tree. Its [official release](https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1) and SHA-256 digests were checked. [scripts/setup-gitleaks.mjs:6](../../scripts/setup-gitleaks.mjs#L6) pins the archive and checksum; tar extracts only verified bytes into .runtime/tools. Published Windows files are the executable, LICENSE, and README.md. There are no package lifecycle scripts.
+
+[.githooks/pre-commit:3](../../.githooks/pre-commit#L3) scans the staged index and fails closed if Gitleaks is missing. The local hooks path is .githooks. [.gitleaks.toml:2](../../.gitleaks.toml#L2) retains upstream rules and excludes installed packages, caches, and generated artifacts. [.github/workflows/check.yml:20](../../.github/workflows/check.yml#L20) runs the history scan in CI, with read-only permissions and actions pinned to source commits. A synthetic random token was rejected with redacted output; the current staged index is empty.
+
+## Runtime and advisories
+
+Electron 44 is the current stable major. npm view electron version returned 44.5.1, published 2026-09-30; 44.4.5 from 2026-09-23 is the newest patch of that major meeting the age floor. [Electron advisories](https://github.com/electron/electron/security/advisories), [React advisories](https://github.com/react/react/security/advisories), and [Vite advisories](https://github.com/vitejs/vite/security/advisories) were checked independently of npm audit. Installed versions fall beyond the affected ranges reviewed; React server-function packages are absent, and dev exposes no Vite server. [Node's release calendar](https://nodejs.org/en/about/previous-releases) lists Node 26 as supported; CI pins verified tooling version 26.8.2.
+
+Fuse integration belongs to task 012. Native startup was verified on Windows with Smart App Control off, since it blocks the unsigned development binary. Linux execution and CI have not run yet.
