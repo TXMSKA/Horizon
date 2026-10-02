@@ -55,21 +55,30 @@ function browsingEntries(value: Record<string, unknown>): boolean {
 function legacyStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings'> & { version: 1 } {
   return object(value, ['version', 'history', 'bookmarks', 'downloads']) && value.version === 1 && browsingEntries(value);
 }
-export function validateStore(value: unknown): value is BrowserStore {
-  if (!object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings']) || value.version !== 2 || !browsingEntries(value)
-    || !object(value.siteSettings, ['blocking', 'permissions'])) return false;
-  const settings = value.siteSettings;
-  if (!Array.isArray(settings.blocking) || settings.blocking.length > SITE_SETTINGS_LIMIT
-    || !Array.isArray(settings.permissions) || settings.permissions.length > SITE_SETTINGS_LIMIT) return false;
-  const hosts = new Set<string>(), origins = new Set<string>();
-  return Array.from(settings.blocking).every(entry => {
+function hostChoices(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > SITE_SETTINGS_LIMIT) return false;
+  const hosts = new Set<string>();
+  return Array.from(value).every(entry => {
     if (!object(entry, ['host', 'enabled']) || !validHost(entry.host) || typeof entry.enabled !== 'boolean' || hosts.has(entry.host)) return false;
     hosts.add(entry.host); return true;
-  }) && Array.from(settings.permissions).every(entry => {
+  });
+}
+function siteEntries(settings: Record<string, unknown>): boolean {
+  if (!hostChoices(settings.blocking) || !Array.isArray(settings.permissions) || settings.permissions.length > SITE_SETTINGS_LIMIT) return false;
+  const origins = new Set<string>();
+  return Array.from(settings.permissions).every(entry => {
     if (!object(entry, ['origin', 'camera', 'microphone', 'location', 'notifications']) || !validOrigin(entry.origin) || origins.has(entry.origin)
       || !['camera', 'microphone', 'location', 'notifications'].every(key => isPermissionDecision(entry[key]))) return false;
     origins.add(entry.origin); return true;
   });
+}
+function legacySiteStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings'> & { version: 2; siteSettings: Omit<BrowserStore['siteSettings'], 'dark'> } {
+  return object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings']) && value.version === 2 && browsingEntries(value)
+    && object(value.siteSettings, ['blocking', 'permissions']) && siteEntries(value.siteSettings);
+}
+export function validateStore(value: unknown): value is BrowserStore {
+  return object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings']) && value.version === 3 && browsingEntries(value)
+    && object(value.siteSettings, ['blocking', 'dark', 'permissions']) && siteEntries(value.siteSettings) && hostChoices(value.siteSettings.dark);
 }
 
 export function writeStore(path: string, store: BrowserStore, cipher?: StoreCipher): void {
@@ -92,7 +101,7 @@ export function writeStore(path: string, store: BrowserStore, cipher?: StoreCiph
 }
 
 export function readStore(path: string, cipher?: StoreCipher, status: StoreReadStatus = { readError: false, memoryOnly: false }): BrowserStore {
-  const empty: BrowserStore = { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } };
+  const empty: BrowserStore = { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } };
   try {
     if (!existsSync(path)) {
       writeStore(path, empty, cipher);
@@ -111,7 +120,9 @@ export function readStore(path: string, cipher?: StoreCipher, status: StoreReadS
       const json = encrypted ? cipher!.decryptString(bytes.subarray(encryptedHeader.length)) : bytes.toString('utf8');
       const value: unknown = JSON.parse(json);
       if (legacyStore(value)) {
-        store = { ...value, version: 2, siteSettings: { blocking: [], permissions: [] } }; upgrade = true;
+        store = { ...value, version: 3, siteSettings: { blocking: [], dark: [], permissions: [] } }; upgrade = true;
+      } else if (legacySiteStore(value)) {
+        store = { ...value, version: 3, siteSettings: { ...value.siteSettings, dark: [] } }; upgrade = true;
       } else {
         if (!validateStore(value)) throw new Error('Invalid browser store');
         store = value;

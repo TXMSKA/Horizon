@@ -9,11 +9,13 @@ const { validateStore, readStore, writeStore, reserveDownloadPath } = require('.
 const { validateCommand, validateContentArea } = require('../dist/electron/commands.js');
 const { createSettings, readSettings, writeSettings, validateSettings } = require('../dist/electron/settings.js');
 const { fetchFavicon, readFavicon, isFaviconURL, FAVICON_LIMIT } = require('../dist/electron/favicon.js');
+const { darkPagesActive, darkPagesCSS, DARK_FILTERS, MEDIAWIKI_DARK_CSS, setDarkPagesSwitch } = require('../dist/electron/dark-pages.js');
 const { browserShortcut } = require('../dist/src/shared/shortcuts.js');
 const { cleanupPartitions, makeProfile, migrateStore, profileStorePath, readRegistry, validateRegistry, writeRegistry, removeProfileDirectory } = require('../dist/electron/profiles.js');
 const { randomUUID, createCipheriv, createDecipheriv } = require('node:crypto');
 const { contextMenuGroups, PageMenuSession } = require('../dist/electron/context-menu.js');
-const { PermissionQueue, defaultPermissions, requestedPermissions, setPermission, setBlocking, siteSettings, stripCookieHeaders, cookieSite, secureOrigin, SITE_SETTINGS_LIMIT } = require('../dist/electron/site-settings.js');
+const { PermissionQueue, defaultPermissions, requestedPermissions, setPermission, setBlocking, setSiteDark, siteSettings, stripCookieHeaders, cookieSite, secureOrigin, SITE_SETTINGS_LIMIT } = require('../dist/electron/site-settings.js');
+const testTemporaryRoot = resolve(process.env.HORIZON_TEST_TEMP ?? '.runtime');
 
 function menuParams(overrides = {}) {
   return {
@@ -121,10 +123,10 @@ test('session rejects requests, checks, devices, downloads, and network traffic'
 });
 
 test('custom protocol enforces its host, method, asset types, paths, and CSP', async (t) => {
-  mkdirSync('.runtime', { recursive: true });
-  const parent = mkdtempSync(resolve('.runtime/protocol-'));
+  mkdirSync(testTemporaryRoot, { recursive: true });
+  const parent = mkdtempSync(join(testTemporaryRoot, 'protocol-'));
   t.after(() => {
-    assert.ok(parent.startsWith(resolve('.runtime') + require('node:path').sep));
+    assert.ok(parent.startsWith(testTemporaryRoot + require('node:path').sep));
     rmSync(parent, { recursive: true, force: true });
   });
   const root = join(parent, 'renderer');
@@ -231,6 +233,131 @@ test('shared menus clamp through CSSOM, focus by input source and keep the enabl
   }
 });
 
+function interfaceModule(filename, dependencies = {}) {
+  const { compileFunction } = require('node:vm');
+  const { transpileModule, ModuleKind, JsxEmit } = require('typescript');
+  const source = transpileModule(readFileSync(filename, 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS, jsx: JsxEmit.ReactJSX } }).outputText;
+  const exported = {}, jsx = (type, props) => ({ type, props });
+  compileFunction(source, ['exports', 'require'])(exported, name => {
+    if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
+    assert.ok(Object.hasOwn(dependencies, name), `Unexpected interface import: ${name}`);
+    return dependencies[name];
+  });
+  return exported;
+}
+
+function interfaceChildren(node) {
+  return [node.props.children].flat(Infinity).filter(child => child && typeof child === 'object');
+}
+
+test('dark page copy includes the approved English and Rioplatense Spanish labels, hints and announcements', () => {
+  const { copy, text } = interfaceModule('src/copy.ts');
+  const expected = {
+    darkPages: ['Dark pages', 'Páginas oscuras'], off: ['Off', 'No'], on: ['On', 'Sí'],
+    darkStrength: ['Strength', 'Intensidad'], soft: ['Soft', 'Suave'], standard: ['Standard', 'Normal'], deep: ['Deep', 'Fuerte'],
+    darkTone: ['Tone', 'Tono'], neutral: ['Neutral', 'Neutro'], warm: ['Warm', 'Cálido'],
+    darkModeOnSite: ['Dark mode on this site', 'Modo oscuro en este sitio'],
+    darkPagesOff: ['Dark pages are off. Turn them on in the menu.', 'Las páginas oscuras están apagadas. Activalas en el menú.'],
+    darkPagesSystemLight: ['Dark pages follow the system, which is light now.', 'Las páginas oscuras siguen al sistema, que ahora está en claro.'],
+    darkModeEnabled: ['Dark mode on for {host}', 'Modo oscuro activado en {host}'],
+    darkModeDisabled: ['Dark mode off for {host}', 'Modo oscuro desactivado en {host}'],
+  };
+  for (const [key, [en, es]] of Object.entries(expected)) {
+    assert.deepEqual(copy[key], { en, es }, key);
+    assert.equal(text(key, 'en'), en); assert.equal(text(key, 'es'), es);
+  }
+  assert.ok(copy.system.en); assert.ok(copy.system.es);
+});
+
+test('dark page menu rows are labelled radio groups with immediate commands and mode-dependent options', () => {
+  const { compileFunction } = require('node:vm');
+  const ts = require('typescript'), { text } = interfaceModule('src/copy.ts');
+  const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let menu;
+  const visit = node => {
+    if (ts.isJsxElement(node) && node.openingElement.attributes.properties.some(property => ts.isJsxAttribute(property) && property.name.getText(source) === 'id' && property.initializer?.text === 'browser-menu')) menu = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(source); assert.ok(menu);
+  const compiled = ts.transpileModule(`export function render(state, t, run) { return ${menu.getText(source)}; }`, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const exported = {}, jsx = (type, props) => ({ type, props });
+  compileFunction(compiled, ['exports', 'require', 'Menu', 'Plus', 'History', 'Star', 'Download', 'Search', 'Switch', 'menuByKeyboard', 'menuButtonRef', 'activeUrl', 'active', 'window'])(exported,
+    name => { assert.equal(name, 'react/jsx-runtime'); return { jsx, jsxs: jsx, Fragment: 'fragment' }; },
+    'menu', 'plus', 'history', 'star', 'download', 'search', 'switch', { current: false }, { current: null }, '', undefined, { horizon: { initialTheme: 'system', initialContrast: 'standard' } });
+  for (const language of ['en', 'es']) for (const mode of [undefined, 'off', 'on', 'system']) for (const strength of ['soft', 'standard', 'deep']) for (const tone of ['neutral', 'warm']) {
+    const commands = [], state = mode ? { darkPages: { mode, strength, tone } } : null;
+    const rendered = exported.render(state, key => text(key, language), command => commands.push(command));
+    const rows = interfaceChildren(rendered).flatMap(child => child.type === 'fragment' ? interfaceChildren(child) : [child]).filter(child => child.props.className === 'menu-theme');
+    const visible = mode && mode !== 'off';
+    assert.deepEqual(rows.map(row => row.props['aria-label']), (visible ? ['theme', 'darkPages', 'darkStrength', 'darkTone'] : ['theme', 'darkPages']).map(key => text(key, language)));
+    for (const [index, type, values, selected] of [[1, 'dark-pages', ['off', 'on', 'system'], mode ?? 'off'], ...(visible ? [[2, 'dark-strength', ['soft', 'standard', 'deep'], strength], [3, 'dark-tone', ['neutral', 'warm'], tone]] : [])]) {
+      const row = rows[index]; assert.equal(row.props.role, 'group');
+      const [label, group] = interfaceChildren(row);
+      assert.equal(label.props.children, row.props['aria-label']); assert.equal(group.props.className, 'segmented');
+      const buttons = interfaceChildren(group); assert.equal(buttons.length, values.length);
+      buttons.forEach((button, position) => {
+        assert.equal(button.type, 'button'); assert.equal(button.props.type, 'button'); assert.equal(button.props.role, 'menuitemradio');
+        assert.equal(button.props.tabIndex, -1); assert.equal(button.props['aria-checked'], values[position] === selected);
+        assert.equal(button.props.children, text(values[position], language));
+        button.props.onClick(); assert.deepEqual(commands.at(-1), { type, value: values[position] });
+      });
+    }
+  }
+});
+
+test('site dark switches preserve row order, accessible hints and focus while refusing repeated pending commands', async () => {
+  const copy = interfaceModule('src/copy.ts'), switchModule = interfaceModule('src/Switch.tsx');
+  const react = { useId: () => 'site', useRef: current => ({ current }), useState: current => [current, () => {}], useEffect() {}, useLayoutEffect() {} };
+  const { ShieldPopover } = interfaceModule('src/SiteControls.tsx', { react, './copy': copy, './Switch': switchModule, './Menu': { Menu: 'menu' },
+    'lucide-react': { Bell: 'bell', Camera: 'camera', Check: 'check', Map: 'map', Mic: 'mic' }, './shared/api': { SITE_PERMISSIONS: ['camera', 'microphone', 'location', 'notifications'] } });
+  for (const language of ['en', 'es']) for (const [mode, active] of [['off', false], ['system', false], ['system', true], ['on', true]]) for (const dark of [false, true]) {
+    const commands = []; let finish;
+    const popover = ShieldPopover({ site: { host: 'example.com', blocking: true, dark, permissions: { camera: 'ask', microphone: 'ask', location: 'ask', notifications: 'ask' } },
+      counts: { ads: 0, trackers: 0, cookies: 0 }, ready: true, darkPages: { mode, active, strength: 'standard', tone: 'neutral' }, language, initial: 'E', opener: { current: null }, onDismiss() {}, onTabOut() {},
+      run: command => { commands.push(command); return new Promise(done => { finish = done; }); } });
+    const rows = interfaceChildren(popover), blockingIndex = rows.findIndex(row => row.props.className === 'site-blocking-row'), darkRow = rows[blockingIndex + 1];
+    assert.equal(darkRow.props.className, active ? 'site-dark-row' : 'site-dark-row with-hint'); assert.equal(rows[blockingIndex + 2].type, 'hr');
+    const [description, control] = interfaceChildren(darkRow), [label, hint] = interfaceChildren(description);
+    assert.equal(description.props.className, 'site-blocking-copy'); assert.equal(label.props.children, copy.text('darkModeOnSite', language));
+    const button = switchModule.Switch(control.props);
+    assert.equal(button.type, 'button'); assert.equal(button.props.role, 'switch'); assert.equal(button.props['aria-checked'], active && dark);
+    assert.equal(button.props.disabled, !active); assert.equal(button.props['aria-labelledby'], label.props.id);
+    if (active) { assert.equal(hint, undefined); assert.equal(button.props['aria-describedby'], undefined); }
+    else { assert.equal(button.props['aria-describedby'], hint.props.id); assert.equal(hint.props.children, copy.text(mode === 'off' ? 'darkPagesOff' : 'darkPagesSystemLight', language)); }
+    const blockingControl = interfaceChildren(rows[blockingIndex])[1];
+    if (active) {
+      button.props.onClick(); button.props.onClick(); blockingControl.props.onChange(false);
+      assert.deepEqual(commands, [{ type: 'set-site-dark', enabled: !dark }]); assert.equal(button.props.disabled, false);
+      finish(true); await Promise.resolve();
+      blockingControl.props.onChange(false); button.props.onClick();
+      assert.deepEqual(commands.at(-1), { type: 'set-blocking', enabled: false }); assert.equal(commands.length, 2);
+      finish(true); await Promise.resolve(); button.props.onClick(); assert.equal(commands.length, 3); finish(true); await Promise.resolve();
+    }
+    assert.ok(rows.slice(blockingIndex + 3).filter(row => row.type === 'button').every(row => row.props.className === 'site-permission-row'));
+  }
+  const app = readFileSync('src/App.tsx', 'utf8');
+  assert.match(app, /if \(darkChanged && next\.siteSettings\) announce\(text\(next\.siteSettings\.dark \? 'darkModeEnabled' : 'darkModeDisabled', language\)\.replace\('\{host\}', next\.siteSettings\.host\)\)/);
+  assert.match(app, /aria-live="polite"[^>]*>\{announcement\}/);
+  assert.match(readFileSync('src/SiteControls.tsx', 'utf8'), /button:not\(:disabled\):not\(\[tabindex="-1"\]\)/);
+});
+
+test('site dark hints wrap without truncation and menu rows retain internal scrolling at minimum window zoom', () => {
+  const css = readFileSync('src/styles.css', 'utf8'), tokens = readFileSync('src/tokens.css', 'utf8');
+  assert.match(tokens, /--height-site-dark:\s*var\(--size-40\)/); assert.match(tokens, /--size-40:\s*2\.5rem/);
+  assert.match(tokens, /--height-site-blocking:\s*var\(--size-52\)/); assert.match(tokens, /--size-52:\s*3\.25rem/);
+  assert.match(tokens, /--gap-site-popover:\s*var\(--space-12\)/); assert.match(tokens, /--space-12:\s*0\.75rem/);
+  assert.match(css, /\.site-dark-row\s*\{[^}]*gap:\s*var\(--gap-site-popover\);[^}]*min-height:\s*var\(--height-site-dark\)/);
+  assert.match(css, /\.site-dark-row\.with-hint\s*\{[^}]*min-height:\s*var\(--height-site-blocking\)/);
+  const hintRules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(match => /site-dark-row|site-blocking-copy/.test(match[1]));
+  assert.ok(hintRules.length >= 4);
+  for (const [, selector, declarations] of hintRules) {
+    assert.doesNotMatch(declarations, /text-overflow:\s*ellipsis|white-space:\s*nowrap|line-clamp:|overflow(?:-y)?:\s*(?:hidden|clip)|(?:^|;)\s*(?:max-)?height:/, selector);
+  }
+  assert.match(css, /\.site-blocking-copy small\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(css, /\.browser-menu\s*\{[^}]*max-height:\s*calc\(100vh - var\(--height-tabs\) - var\(--height-toolbar\)\);[^}]*overflow-y:\s*auto/);
+  assert.match(css, /\.menu-theme\s*\{[^}]*flex-shrink:\s*0/);
+});
+
 test('subframes permit local document schemes without allowing privileged navigation', () => {
   for (const url of ['http://example.com/', 'https://example.com/', 'about:blank', 'about:srcdoc', 'data:text/html,<p>frame</p>', 'blob:https://example.com/id', `data:text/html,${'x'.repeat(8192)}`]) {
     assert.equal(isAllowedSubframeURL(url), true, url);
@@ -282,10 +409,10 @@ test('address input classifies hosts and URLs locally, and searches other text o
 });
 
 function temporaryDirectory(t, prefix) {
-  mkdirSync('.runtime', { recursive: true });
-  const directory = mkdtempSync(resolve(`.runtime/${prefix}-`));
+  mkdirSync(testTemporaryRoot, { recursive: true });
+  const directory = mkdtempSync(join(testTemporaryRoot, `${prefix}-`));
   t.after(() => {
-    assert.ok(directory.startsWith(resolve('.runtime') + require('node:path').sep));
+    assert.ok(directory.startsWith(testTemporaryRoot + require('node:path').sep));
     rmSync(directory, { recursive: true, force: true });
   });
   return directory;
@@ -293,8 +420,8 @@ function temporaryDirectory(t, prefix) {
 
 function sampleStore(directory) {
   return {
-    version: 2,
-    siteSettings: { blocking: [], permissions: [] },
+    version: 3,
+    siteSettings: { blocking: [], dark: [], permissions: [] },
     history: [{ url: 'https://example.com/', title: 'Example', lastVisit: 1, visitCount: 2 }],
     bookmarks: [{ url: 'https://example.com/', title: 'Example', createdAt: 1 }],
     downloads: [{ id: 'download-1', url: 'https://example.com/file', filename: 'file.txt', path: join(directory, 'file.txt'), received: 3, total: 3, status: 'completed', startedAt: 1 }],
@@ -304,7 +431,7 @@ function sampleStore(directory) {
 test('store schema rejects unsafe URLs, shapes, statuses, paths, and unbounded fields', (t) => {
   const directory = temporaryDirectory(t, 'schema');
   assert.equal(validateStore(sampleStore(directory)), true);
-  assert.equal(validateStore({ version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } }), true);
+  assert.equal(validateStore({ version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } }), true);
   for (const invalid of [null, [], {}, { version: 2, history: [], bookmarks: [], downloads: [] }]) assert.equal(validateStore(invalid), false);
   const mutations = [
     store => { store.extra = true; },
@@ -342,17 +469,17 @@ test('store schema rejects unsafe URLs, shapes, statuses, paths, and unbounded f
 test('store writes atomically, recovers invalid files, and preserves corrupt originals', (t) => {
   const directory = temporaryDirectory(t, 'store');
   const path = join(directory, 'profile', 'browser.json');
-  assert.deepEqual(readStore(path), { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } });
+  assert.deepEqual(readStore(path), { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
   assert.ok(existsSync(path));
   const store = sampleStore(directory);
   writeStore(path, store);
   assert.deepEqual(readStore(path), store);
   assert.equal(readdirSync(join(directory, 'profile')).some(name => name.endsWith('.tmp')), false);
-  assert.throws(() => writeStore(path, { ...store, version: 3 }));
+  assert.throws(() => writeStore(path, { ...store, version: 4 }));
   assert.deepEqual(readStore(path), store);
-  for (const corrupt of ['{broken json', JSON.stringify({ ...store, version: 3 })]) {
+  for (const corrupt of ['{broken json', JSON.stringify({ ...store, version: 4 })]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readStore(path), { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } });
+    assert.deepEqual(readStore(path), { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
     const backups = readdirSync(join(directory, 'profile')).filter(name => name.startsWith('browser.json.corrupt-'));
     assert.ok(backups.some(name => readFileSync(join(directory, 'profile', name), 'utf8') === corrupt));
     assert.equal(validateStore(JSON.parse(readFileSync(path, 'utf8'))), true);
@@ -467,6 +594,52 @@ test('chrome and web content share the same browser shortcut mapping', () => {
   }
 });
 
+async function navigationVisibilityTests(t, view, state) {
+  const contents = view.webContents, url = state().tabs.find(tab => tab.id === state().activeId).url;
+  const start = target => contents.emit('did-start-navigation', {}, target, false, true);
+  const abort = target => contents.emit('did-fail-load', {}, -3, 'ERR_ABORTED', target, true);
+  const settle = () => new Promise(done => setImmediate(done));
+  contents.emit('did-stop-loading');
+  await t.test('main-frame ERR_ABORTED restores the current document without an error', () => {
+    start(url + '?download'); assert.equal(view.visible, false);
+    contents.emit('did-fail-load', {}, -3, 'ERR_ABORTED', url + '?download', false);
+    assert.equal(view.visible, false, 'A subframe cannot reveal a pending main frame');
+    contents.emit('did-redirect-navigation', {}, url + '?attachment', false, true);
+    abort(url + '?attachment');
+    assert.equal(view.visible, true); assert.equal(state().tabs.find(tab => tab.id === state().activeId).error, null);
+    assert.equal(state().tabs.find(tab => tab.id === state().activeId).url, url);
+    contents.emit('did-stop-loading');
+  });
+  await t.test('loading stopped without a main-frame commit restores the current document', () => {
+    start(url + '?download'); assert.equal(view.visible, false);
+    contents.emit('did-stop-loading'); assert.equal(view.visible, true);
+    assert.equal(state().tabs.find(tab => tab.id === state().activeId).error, null);
+  });
+  await t.test('an older abort keeps the newer navigation hidden until its cosmetic CSS resolves', async subtest => {
+    let finishCSS;
+    subtest.mock.method(contents, 'insertCSS', (_css, options) => {
+      assert.equal(options.cssOrigin, 'user'); return new Promise(done => { finishCSS = done; });
+    });
+    subtest.mock.method(contents, 'isLoading', () => contents.loading);
+    for (const first of [url + '?older', url]) {
+      start(first); start(url); contents.loading = true;
+      abort(first); assert.equal(view.visible, false);
+      contents.emit('did-stop-loading'); assert.equal(view.visible, false, 'A stale stop cannot reveal a still-loading navigation');
+      contents.emit('did-navigate', {}, url); assert.equal(view.visible, false);
+      contents.loading = false; contents.emit('did-stop-loading'); assert.equal(view.visible, false);
+      finishCSS('cosmetic-key'); await settle(); assert.equal(view.visible, true);
+    }
+  });
+  await t.test('a committed main frame stays hidden until cosmetic CSS insertion resolves', async subtest => {
+    let finishCSS;
+    subtest.mock.method(contents, 'insertCSS', () => new Promise(done => { finishCSS = done; }));
+    start(url); assert.equal(view.visible, false);
+    contents.emit('did-navigate', {}, url); contents.emit('did-stop-loading');
+    abort(url); await settle(); assert.equal(view.visible, false);
+    finishCSS('cosmetic-key'); await settle(); assert.equal(view.visible, true);
+  });
+}
+
 test('browser lifecycle keeps pages isolated, scales bounds, records visits and handles downloads', async (t) => {
   const { EventEmitter } = require('node:events');
   const { createRequire } = require('node:module');
@@ -508,7 +681,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
       this.destroyed = false;
       this.loading = false;
       this.sent = [];
-      this.navigationHistory = { canGoBack: () => false, canGoForward: () => false };
+      this.navigationHistory = { canGoBack: () => false, canGoForward: () => false, getAllEntries: () => [], getActiveIndex: () => -1, restore: async () => {} };
     }
     get session() { return this.targetSession || webSession; }
     isDestroyed() { return this.destroyed; }
@@ -528,6 +701,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     reload() { this.reloads = (this.reloads || 0) + 1; }
     reloadIgnoringCache() { this.reloads = (this.reloads || 0) + 1; this.bypassedCache = (this.bypassedCache || 0) + 1; }
     insertCSS(css, options) { this.css = { css, options }; return Promise.resolve("css-key"); }
+    removeInsertedCSS() { return Promise.resolve(); }
     undo() { this.edited = 'undo'; }
     redo() { this.edited = 'redo'; }
     cut() { this.edited = 'cut'; }
@@ -561,7 +735,8 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   };
   sessions.set('persist:web', prepareMockSession(webSession));
   const electron = {
-    app: Object.assign(new EventEmitter(), { getLocale: () => 'en', getPath: () => directory }),
+    nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }),
+    app: Object.assign(new EventEmitter(), { commandLine: { appendSwitch() {}, removeSwitch() {} }, getLocale: () => 'en', getPath: () => directory }),
     nativeImage: { createFromBuffer() { assert.fail('Privileged favicon decoding is forbidden'); } },
     ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
     session: { fromPartition(name) { if (!sessions.has(name)) sessions.set(name, prepareMockSession(new EventEmitter())); return sessions.get(name); } },
@@ -990,6 +1165,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(view.visible, false, 'The view waits for CSS installation');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(view.visible, true); assert.equal(view.webContents.css.options.cssOrigin, 'user');
+  await navigationVisibilityTests(t, view, state);
   assert.equal(state().blockingReady, true);
   const callsBeforeScheme = blockingCalls.length;
   assert.equal(network('file:///blocked-ad').cancel, true);
@@ -1165,7 +1341,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.throws(() => menuAction(oldMenu, 'reload'));
   assert.equal(state().activeProfileId, work.id);
   assert.equal(readRegistry(join(directory, 'profiles.json'), 'en').activeId, work.id);
-  assert.deepEqual(state().store, { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } });
+  assert.deepEqual(state().store, { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
   assert.equal(state().tabs.length, 1);
   assert.equal(view.visible, false); assert.equal(view.webContents.destroyed, false);
   assert.equal(sessions.size, 2);
@@ -1344,19 +1520,250 @@ test('settings validate themes, write atomically and preserve corrupt or oversiz
   assert.equal(settings.theme, 'system');
   assert.equal(createSettings(path, () => {}).migrationAllowed, false);
   assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
-  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 1, theme, contrast: 'standard' }), true);
+  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 2, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' }), true);
   for (const value of [null, [], {}, { version: 2, theme: 'system' }, { version: 1, theme: 'dark' }, { version: 1, theme: 'amber', extra: true }, { version: 1, theme: 'amber' }, { version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', contrast: null }, { version: 1, theme: 'amber', contrast: 'high', extra: true }]) {
     assert.equal(validateSettings(value), false);
     assert.throws(() => writeSettings(path, value));
   }
   for (const corrupt of ['{broken', JSON.stringify({ version: 2, theme: 'amber' }), ' '.repeat(4097)]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readSettings(path), { version: 1, theme: 'system', contrast: 'standard' });
+    assert.deepEqual(readSettings(path), { version: 2, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
     assert.ok(readdirSync(directory).filter(name => name.startsWith('settings.json.corrupt-')).some(name => readFileSync(join(directory, name), 'utf8') === corrupt));
   }
   const existing = createSettings(path, () => {});
   existing.setTheme('amber', true);
   assert.equal(existing.theme, 'system');
+});
+
+test('dark page flips replace views in every profile without closing tabs and site choices update only matching profile hosts', async t => {
+  const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
+  const directory = temporaryDirectory(t, 'dark-browser'), views = [], handlers = new Map(), sessions = new Map(), switchCalls = [], order = [];
+  const nativeTheme = Object.assign(new EventEmitter(), { shouldUseDarkColors: false });
+  const app = Object.assign(new EventEmitter(), { getLocale: () => 'en', getPath: () => directory, commandLine: {
+    appendSwitch(...args) { switchCalls.push(['append', ...args]); order.push('switch-on'); },
+    removeSwitch(...args) { switchCalls.push(['remove', ...args]); order.push('switch-off'); },
+  } });
+  let nextId = 0;
+  let mockCosmetics = false;
+  class Contents extends EventEmitter {
+    constructor(targetSession) {
+      super(); this.id = ++nextId; this.session = targetSession; this.mainFrame = { url: 'horizon://app/' }; this.zoom = 1;
+      this.sent = []; this.entries = []; this.index = -1; this.styles = new Map(); this.insertions = []; this.removals = [];
+      this.navigationHistory = { getAllEntries: () => structuredClone(this.entries), getActiveIndex: () => this.index,
+        canGoBack: () => this.index > 0, canGoForward: () => this.index >= 0 && this.index < this.entries.length - 1,
+        restore: async value => { this.restored = structuredClone(value); this.entries = value.entries; this.index = value.index; this.url = value.entries[value.index].url; },
+      };
+    }
+    isDestroyed() { return !!this.destroyed; }
+    send(...args) { this.sent.push(args); }
+    focus() {}
+    setZoomMode() {}
+    setZoomFactor(value) { this.zoom = value; }
+    getZoomFactor() { return this.zoom; }
+    setWindowOpenHandler(value) { this.popup = value; }
+    loadURL(url) { this.url = url; this.loads = (this.loads || 0) + 1; return Promise.resolve(); }
+    getTitle() { return ''; }
+    isLoading() { return false; }
+    close() { this.destroyed = true; this.emit('destroyed'); }
+    findInPage() { return 7; }
+    stopFindInPage(value) { this.stoppedFind = value; }
+    insertCSS(css, options) {
+      assert.equal(options, undefined, 'Dark CSS uses the removable default author origin');
+      const key = `css-${this.id}-${this.insertions.length}`; this.insertions.push({ css, options, key });
+      if (this.rejectCSS) return Promise.reject(new Error('CSS unavailable'));
+      const install = () => { this.styles.set(key, css); assert.equal(this.styles.size, 1, 'Dark CSS never accumulates'); return key; };
+      return this.deferCSS ? new Promise(done => { this.finishCSS = () => done(install()); }) : Promise.resolve(install());
+    }
+    removeInsertedCSS(key) { assert.ok(this.styles.has(key), 'Dark CSS is removed by its insertion key'); this.removals.push(key); this.styles.delete(key); return Promise.resolve(); }
+  }
+  class View {
+    constructor(options) { this.options = options; this.webContents = new Contents(sessions.get(options.webPreferences.partition)); views.push(this); order.push('view'); }
+    setVisible(value) { this.visible = value; }
+    setBounds(value) { this.bounds = value; }
+    getBounds() { return this.bounds; }
+  }
+  const electron = { app, nativeTheme, WebContentsView: View, safeStorage: { isEncryptionAvailable: () => false },
+    ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
+    session: { fromPartition(partition) {
+      if (!sessions.has(partition)) {
+        const target = new EventEmitter(); target.setPermissionRequestHandler = fn => { target.request = fn; };
+        target.setPermissionCheckHandler = () => {}; target.setDevicePermissionHandler = () => {};
+        target.webRequest = Object.fromEntries(['onBeforeRequest', 'onBeforeSendHeaders', 'onHeadersReceived', 'onCompleted', 'onErrorOccurred'].map(name => [name, () => {}]));
+        sessions.set(partition, target);
+      }
+      return sessions.get(partition);
+    } },
+  };
+  const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? electron : name === './blocking' ? {
+    createBlockingEngine: () => ({ ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '', match: () => undefined }),
+  } : localRequire(name), require('node:path').dirname(filename));
+  const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
+    getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen(value) { this.fullscreen = value; }, contentView: { addChildView() {}, removeChildView() {} },
+  });
+  const settings = createSettings(join(directory, 'settings.json'), () => {});
+  exported.createBrowser(window, directory, join(directory, 'downloads'), settings);
+  t.after(() => window.emit('closed'));
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }, state = () => handlers.get('horizon:state')(event);
+  const command = value => handlers.get('horizon:command')(event, value), settle = () => new Promise(done => setImmediate(done));
+  const commit = (view, url = view.webContents.url) => { view.webContents.mainFrame.url = url; view.webContents.emit('did-navigate', {}, url); };
+  handlers.get('horizon:content-area')(event, { top: 96, hidden: false });
+  assert.deepEqual(state().darkPages, { mode: 'off', strength: 'standard', tone: 'neutral', active: false });
+  assert.throws(() => command({ type: 'set-site-dark', enabled: false }), /SITE_UNAVAILABLE/);
+  command({ type: 'navigate', input: 'https://same.test/first' }); const personal = state().activeProfileId, first = views.at(-1); commit(first);
+  mockCosmetics = true;
+  await navigationVisibilityTests(t, first, state);
+  mockCosmetics = false;
+  const firstId = state().activeId;
+  first.webContents.entries = [{ url: 'https://same.test/back', title: 'Back' }, { url: 'https://same.test/first', title: 'Current' }, { url: 'https://same.test/forward', title: 'Forward' }]; first.webContents.index = 1;
+  command({ type: 'zoom', delta: 1 });
+  command({ type: 'new-tab', input: 'http://same.test/second', background: true }); const second = views.at(-1); commit(second);
+  command({ type: 'new-tab', input: 'https://other.test/', background: true }); const other = views.at(-1); commit(other);
+  command({ type: 'new-tab', background: true }); const blankId = state().tabs.at(-1).id;
+  const personalTabs = state().tabs.map(tab => tab.id), work = state().profiles.find(profile => profile.id !== personal);
+  command({ type: 'switch-profile', id: work.id }); command({ type: 'navigate', input: 'https://same.test/work' }); const workView = views.at(-1); commit(workView);
+  workView.webContents.entries = [{ url: 'https://same.test/previous-work', title: 'Previous' }, { url: 'https://same.test/work', title: 'Work' }]; workView.webContents.index = 1;
+  workView.webContents.emit('render-process-gone', {}, { reason: 'crashed' }); assert.equal(state().tabs[0].error, 'RENDERER_GONE');
+  const workId = state().activeId; command({ type: 'switch-profile', id: personal });
+  command({ type: 'find', text: 'dark', forward: true, next: false }); first.webContents.emit('found-in-page', {}, { requestId: 7, activeMatchOrdinal: 1, matches: 2 });
+  first.webContents.emit('enter-html-full-screen'); assert.equal(window.fullscreen, true);
+  sessions.get('persist:web').request(first.webContents, 'geolocation', allowed => { window.permissionResult = allowed; }, {});
+  const prompt = state().permissionPrompt; assert.ok(prompt);
+  const beforeFlip = views.length, oldViews = [first, second, other, workView]; order.length = 0;
+  command({ type: 'dark-pages', value: 'on' });
+  assert.equal(order[0], 'switch-on'); assert.equal(views.length, beforeFlip + oldViews.length);
+  assert.deepEqual(switchCalls, [['append', 'blink-settings', 'forceDarkModeEnabled=true']]);
+  assert.deepEqual(state().tabs.map(tab => tab.id), personalTabs); assert.equal(state().activeId, firstId);
+  assert.equal(state().tabs.find(tab => tab.id === blankId).url, ''); assert.equal(window.fullscreen, false);
+  assert.equal(first.webContents.stoppedFind, 'clearSelection'); assert.deepEqual(state().tabs[0].find, { active: 0, total: 0 });
+  assert.equal(state().permissionPrompt, null); assert.equal(window.permissionResult, false);
+  assert.throws(() => command({ type: 'answer-permission', id: prompt.id, answer: 'allow' }), /STALE/);
+  const fresh = views.slice(beforeFlip), [newFirst, newSecond, newOther, newWork] = fresh;
+  assert.deepEqual(newFirst.webContents.restored, { entries: first.webContents.entries, index: 1 }); assert.equal(newFirst.webContents.zoom, 1.1);
+  assert.equal(newFirst.visible, true); assert.equal(newSecond.visible, false); assert.equal(newWork.visible, false);
+  for (const [index, old] of oldViews.entries()) {
+    assert.equal(old.webContents.destroyed, true); assert.equal(fresh[index].options.webPreferences.partition, old.options.webPreferences.partition);
+    old.webContents.emit('destroyed'); old.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
+    old.webContents.emit('did-navigate', {}, 'https://stale.test/'); old.webContents.emit('page-title-updated', {}, 'Stale');
+  }
+  assert.deepEqual(state().tabs.map(tab => tab.id), personalTabs); assert.equal(state().tabs[0].url, 'https://same.test/first'); assert.equal(state().tabs[0].error, null);
+  assert.equal(newWork.webContents.url, 'https://same.test/work');
+  assert.deepEqual(newWork.webContents.restored, { entries: workView.webContents.entries, index: 1 }, 'Restoring the crashed renderer history loads its active entry normally');
+  fresh.forEach(view => commit(view)); await settle();
+  for (const view of fresh) assert.deepEqual([...view.webContents.styles.values()], [MEDIAWIKI_DARK_CSS]);
+  command({ type: 'dark-strength', value: 'soft' }); command({ type: 'dark-tone', value: 'warm' }); await settle();
+  assert.equal(views.length, beforeFlip + oldViews.length); assert.equal(switchCalls.length, 1);
+  const filtered = `:root { filter: brightness(1.15) contrast(0.9) sepia(0.12) !important; }\n${MEDIAWIKI_DARK_CSS}`;
+  for (const view of fresh) { assert.deepEqual([...view.webContents.styles.values()], [filtered]); assert.equal(view.webContents.insertions.at(-1).options, undefined); }
+  const insertionCounts = fresh.map(view => view.webContents.insertions.length);
+  command({ type: 'set-site-dark', enabled: false }); await settle();
+  assert.equal(state().siteSettings.dark, false);
+  for (const view of [newFirst, newSecond]) assert.deepEqual([...view.webContents.styles.values()], [':root { color-scheme: only light !important; }']);
+  assert.equal(newOther.webContents.insertions.length, insertionCounts[2]); assert.equal(newWork.webContents.insertions.length, insertionCounts[3]);
+  assert.deepEqual([...newWork.webContents.styles.values()], [filtered]);
+  command({ type: 'set-site-dark', enabled: true }); await settle();
+  assert.deepEqual([...newFirst.webContents.styles.values()], [filtered]); assert.equal(state().store.siteSettings.dark.length, 1);
+  command({ type: 'dark-strength', value: 'standard' }); command({ type: 'dark-tone', value: 'neutral' }); await settle();
+  for (const view of fresh) {
+    assert.deepEqual([...view.webContents.styles.values()], [MEDIAWIKI_DARK_CSS]);
+    assert.deepEqual(view.webContents.removals, view.webContents.insertions.slice(0, -1).map(insertion => insertion.key), 'Every previous dark stylesheet is removed on subsequent strength, tone or site changes');
+  }
+  newFirst.webContents.deferCSS = true;
+  command({ type: 'dark-tone', value: 'warm' }); await settle(); assert.equal(newFirst.visible, true, 'Pending dark CSS does not hide the page');
+  command({ type: 'dark-tone', value: 'neutral' }); newFirst.webContents.deferCSS = false; newFirst.webContents.finishCSS(); await settle();
+  assert.deepEqual([...newFirst.webContents.styles.values()], [MEDIAWIKI_DARK_CSS], 'A late insertion is replaced by the newest choice');
+  assert.deepEqual(newFirst.webContents.removals, newFirst.webContents.insertions.slice(0, -1).map(insertion => insertion.key));
+  newFirst.webContents.rejectCSS = true; command({ type: 'dark-strength', value: 'deep' }); await settle();
+  assert.equal(newFirst.visible, true); assert.equal(state().tabs[0].error, null); newFirst.webContents.rejectCSS = false;
+  command({ type: 'dark-pages', value: 'system' }); assert.equal(views.length, beforeFlip + oldViews.length * 2); assert.equal(state().darkPages.active, false);
+  assert.deepEqual(switchCalls.at(-1), ['remove', 'blink-settings']);
+  const afterOff = views.length; nativeTheme.emit('updated'); assert.equal(views.length, afterOff);
+  nativeTheme.shouldUseDarkColors = true; nativeTheme.emit('updated'); assert.equal(views.length, afterOff + oldViews.length); assert.equal(state().darkPages.active, true);
+  nativeTheme.emit('updated'); assert.equal(views.length, afterOff + oldViews.length);
+  command({ type: 'dark-pages', value: 'on' }); const finalCount = views.length;
+  nativeTheme.shouldUseDarkColors = false; nativeTheme.emit('updated'); assert.equal(views.length, finalCount); assert.equal(state().darkPages.active, true);
+  command({ type: 'switch-profile', id: work.id }); assert.equal(state().activeId, workId); assert.equal(state().tabs.length, 1); assert.equal(state().tabs[0].error, null); assert.equal(state().siteSettings.dark, true);
+  window.emit('closed'); assert.equal(nativeTheme.listenerCount('updated'), 0); assert.equal(handlers.size, 0);
+});
+
+test('dark page settings validate exact values, migrate version 1 and retain valid data when migration cannot be saved', t => {
+  const directory = temporaryDirectory(t, 'dark-settings'), path = join(directory, 'settings.json');
+  const defaults = { version: 2, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' };
+  assert.deepEqual(readSettings(path), defaults);
+  for (const darkPages of ['off', 'on', 'system']) for (const darkStrength of ['soft', 'standard', 'deep']) for (const darkTone of ['neutral', 'warm']) {
+    const valid = { ...defaults, darkPages, darkStrength, darkTone };
+    assert.equal(validateSettings(valid), true); writeSettings(path, valid); assert.deepEqual(readSettings(path), valid);
+  }
+  for (const key of Object.keys(defaults)) {
+    const missing = { ...defaults }; delete missing[key]; assert.equal(validateSettings(missing), false);
+  }
+  for (const key of ['darkPages', 'darkStrength', 'darkTone']) for (const value of [null, true, 1, [], {}, 'invalid', { toString: () => defaults[key] }]) {
+    const invalid = { ...defaults, [key]: value };
+    assert.equal(validateSettings(invalid), false); assert.throws(() => writeSettings(path, invalid));
+  }
+  const settings = createSettings(path, () => {});
+  for (const [setter, key, value] of [['setDarkPages', 'darkPages', 'on'], ['setDarkStrength', 'darkStrength', 'deep'], ['setDarkTone', 'darkTone', 'warm']]) {
+    settings[setter](value); assert.equal(settings[key], value); assert.equal(readSettings(path)[key], value);
+    for (const invalid of [null, true, 1, {}, 'invalid']) assert.throws(() => settings[setter](invalid));
+    assert.equal(settings[key], value);
+  }
+  for (const contrast of ['standard', 'high']) for (const theme of ['system', 'amber', 'daylight']) {
+    const legacy = { version: 1, theme, contrast }, migrated = { ...defaults, theme, contrast };
+    writeFileSync(path, JSON.stringify(legacy)); assert.deepEqual(readSettings(path), migrated);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), migrated);
+  }
+  const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
+  writeFileSync(path, JSON.stringify({ version: 1, theme: 'daylight', contrast: 'high' }));
+  const original = readFileSync(path, 'utf8');
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...localRequire(name), writeFileSync() { throw new Error('Read-only settings'); } } : localRequire(name));
+  assert.deepEqual(exported.readSettings(path), { ...defaults, theme: 'daylight', contrast: 'high' });
+  assert.equal(readFileSync(path, 'utf8'), original);
+  assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
+  for (const corrupt of [{ version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', extra: true }, { ...defaults, darkTone: 'blue' }]) {
+    const bytes = JSON.stringify(corrupt); writeFileSync(path, bytes); assert.deepEqual(readSettings(path), defaults);
+    assert.ok(readdirSync(directory).some(name => name.startsWith('settings.json.corrupt-') && readFileSync(join(directory, name), 'utf8') === bytes));
+  }
+});
+
+test('dark page effective state, tunable filter table and CSS cover every mode, site, strength and tone', () => {
+  for (const systemDark of [false, true]) {
+    assert.equal(darkPagesActive('off', systemDark), false); assert.equal(darkPagesActive('on', systemDark), true);
+    assert.equal(darkPagesActive('system', systemDark), systemDark);
+  }
+  assert.deepEqual(DARK_FILTERS, { strength: { soft: 'brightness(1.15) contrast(0.9)', standard: '', deep: 'brightness(0.85) contrast(1.05)' }, tone: { neutral: '', warm: 'sepia(0.12)' } });
+  assert.equal(MEDIAWIKI_DARK_CSS, '.skin-invert, .mw-invert { color-scheme: only light !important; filter: invert(1) hue-rotate(180deg) !important; }\nimg.mw-file-element { color-scheme: only light !important; }');
+  for (const active of [false, true]) for (const enabled of [false, true]) for (const strength of ['soft', 'standard', 'deep']) for (const tone of ['neutral', 'warm']) {
+    const filter = [DARK_FILTERS.strength[strength], DARK_FILTERS.tone[tone]].filter(Boolean).join(' ');
+    const expected = !active ? '' : !enabled ? ':root { color-scheme: only light !important; }' : filter ? `:root { filter: ${filter} !important; }\n${MEDIAWIKI_DARK_CSS}` : MEDIAWIKI_DARK_CSS;
+    assert.equal(darkPagesCSS(active, enabled, strength, tone), expected, `${active}/${enabled}/${strength}/${tone}`);
+  }
+  const calls = [], commandLine = { appendSwitch(...args) { calls.push(['append', ...args]); }, removeSwitch(...args) { calls.push(['remove', ...args]); } };
+  setDarkPagesSwitch(commandLine, true); setDarkPagesSwitch(commandLine, false);
+  assert.deepEqual(calls, [['append', 'blink-settings', 'forceDarkModeEnabled=true'], ['remove', 'blink-settings']]);
+});
+
+test('chrome opts light palettes out of forced dark before CSS loads and preserves the system dark scheme', () => {
+  const tokens = readFileSync('src/tokens.css', 'utf8'), html = readFileSync('index.html', 'utf8');
+  assert.match(html, /<meta name="color-scheme" content="only light"\s*\/>/);
+  assert.match(tokens, /:root\[data-theme="daylight"\]\s*\{\s*color-scheme:\s*only light;/);
+  assert.match(tokens, /:root\[data-theme="amber"\]\s*\{\s*color-scheme:\s*dark;/);
+  assert.match(tokens, /:root\s*\{\s*color-scheme:\s*only light;/);
+  assert.match(tokens, /@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root:not\(\[data-theme="daylight"\]\):not\(\[data-theme="amber"\]\)\s*\{\s*color-scheme:\s*dark;/);
+  for (const match of tokens.matchAll(/[\s{]color-scheme:\s*([^;]+);/g)) assert.ok(['only light', 'dark'].includes(match[1]), match[1]);
+});
+
+test('dark page commands accept exact keys and reject missing or invalid values', () => {
+  for (const [type, values] of [['dark-pages', ['off', 'on', 'system']], ['dark-strength', ['soft', 'standard', 'deep']], ['dark-tone', ['neutral', 'warm']]]) {
+    for (const value of values) {
+      const command = { type, value }; assert.deepEqual(validateCommand(command), command);
+      assert.throws(() => validateCommand({ ...command, extra: true }));
+    }
+    for (const value of [undefined, null, false, 1, '', {}, [], 'invalid', { toString: () => values[0] }]) assert.throws(() => validateCommand({ type, value }));
+    assert.throws(() => validateCommand({ type }));
+  }
+  for (const enabled of [true, false]) assert.deepEqual(validateCommand({ type: 'set-site-dark', enabled }), { type: 'set-site-dark', enabled });
+  for (const enabled of [undefined, null, 1, 'false', {}, []]) assert.throws(() => validateCommand({ type: 'set-site-dark', enabled }));
+  assert.throws(() => validateCommand({ type: 'set-site-dark' })); assert.throws(() => validateCommand({ type: 'set-site-dark', enabled: false, host: 'example.com' }));
 });
 
 test('favicon URLs exclude privileged schemes, credentials and unbounded inputs', () => {
@@ -1454,25 +1861,25 @@ test('contrast defaults follow the OS only on first run and legacy settings migr
   const directory = temporaryDirectory(t, 'contrast');
   const first = join(directory, 'first.json');
   const settings = createSettings(first, () => {}, true);
-  assert.deepEqual(readSettings(first), { version: 1, theme: 'system', contrast: 'high' });
+  assert.deepEqual(readSettings(first), { version: 2, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
   settings.setTheme('amber', true);
   assert.equal(settings.contrast, 'high');
   settings.setContrast('standard');
   assert.equal(settings.theme, 'amber');
-  assert.deepEqual(readSettings(first, true), { version: 1, theme: 'amber', contrast: 'standard' });
+  assert.deepEqual(readSettings(first, true), { version: 2, theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
   assert.throws(() => settings.setContrast('invalid'));
   assert.equal(settings.contrast, 'standard');
   for (const theme of ['system', 'amber', 'daylight']) {
     const legacy = join(directory, theme + '.json');
     writeFileSync(legacy, JSON.stringify({ version: 1, theme }));
-    assert.deepEqual(readSettings(legacy, true), { version: 1, theme, contrast: 'standard' });
-    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 1, theme, contrast: 'standard' });
+    assert.deepEqual(readSettings(legacy, true), { version: 2, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
+    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 2, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
     assert.equal(createSettings(legacy, () => {}, true).migrationAllowed, false);
   }
   assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
   const blocked = join(directory, 'blocked');
   writeFileSync(blocked, 'file');
-  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 1, theme: 'system', contrast: 'high' });
+  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 2, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
   const unavailable = createSettings(join(blocked, 'settings.json'), () => {}, true);
   assert.throws(() => unavailable.setContrast('standard'));
   assert.equal(unavailable.contrast, 'high');
@@ -1505,14 +1912,16 @@ test('main paints the resolved palette and passes both settings before loading c
   const filename = resolve('dist/electron/main.js');
   const directory = temporaryDirectory(t, 'first-paint');
   const localRequire = require('node:module').createRequire(filename);
-  for (const theme of ['system', 'amber', 'daylight']) for (const contrast of ['standard', 'high']) for (const dark of [false, true]) {
+  for (const theme of ['system', 'amber', 'daylight']) for (const contrast of ['standard', 'high']) for (const dark of [false, true]) for (const mode of ['off', 'on', 'system']) {
     const windows = [];
     let painted;
-    const settings = { theme, contrast, migrationAllowed: false };
+    const settings = { theme, contrast, darkPages: mode, darkStrength: 'standard', darkTone: 'neutral', migrationAllowed: false };
     const nativeTheme = new EventEmitter();
     nativeTheme.shouldUseDarkColors = dark;
     nativeTheme.shouldUseHighContrastColors = true;
     const app = new EventEmitter();
+    const switchCalls = [];
+    app.commandLine = { appendSwitch(...args) { switchCalls.push(['append', ...args]); }, removeSwitch(...args) { switchCalls.push(['remove', ...args]); } };
     app.isPackaged = true;
     app.enableSandbox = () => {};
     app.whenReady = () => Promise.resolve();
@@ -1528,6 +1937,7 @@ test('main paints the resolved palette and passes both settings before loading c
       BrowserWindow: class extends EventEmitter {
         constructor(options) {
           super(); windows.push(this); this.options = options;
+          assert.deepEqual(switchCalls, mode === 'on' || mode === 'system' && dark ? [['append', 'blink-settings', 'forceDarkModeEnabled=true']] : [], 'The switch is configured before chrome creates a renderer');
           this.webContents = new EventEmitter();
         }
         setBackgroundColor(value) { painted = value; }
@@ -1668,10 +2078,10 @@ test('profile stores encrypt through an injected cipher and retain tampered or i
   const tampered = Buffer.from(encrypted); tampered[tampered.length - 1] ^= 1;
   writeFileSync(path, tampered);
   const readStatus = { readError: false, memoryOnly: false };
-  assert.deepEqual(readStore(path, cipher, readStatus), { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } });
+  assert.deepEqual(readStore(path, cipher, readStatus), { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
   assert.deepEqual(readStatus, { readError: true, memoryOnly: false });
   assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(tampered)));
-  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 3 }))]);
+  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 4 }))]);
   writeFileSync(path, invalid);
   assert.equal(readStore(path, cipher).history.length, 0);
   assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(invalid)));
@@ -1769,7 +2179,7 @@ test('all profile commands reject extra keys, invalid names, ids, colours and un
   }
 });
 
-test('site settings migrate strict version 1 stores and validate bounded canonical origins and hosts', t => {
+test('site settings migrate strict version 1 and 2 stores to version 3 and validate bounded canonical origins and hosts', t => {
   const directory = temporaryDirectory(t, 'site-settings');
   const path = join(directory, 'store.json'), sample = sampleStore(directory);
   const legacy = { version: 1, history: sample.history, bookmarks: sample.bookmarks, downloads: sample.downloads };
@@ -1782,8 +2192,18 @@ test('site settings migrate strict version 1 stores and validate bounded canonic
   const cipher = authenticatedCipher(), encryptedLegacy = join(directory, 'encrypted.json');
   writeFileSync(encryptedLegacy, Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify(legacy))]));
   assert.deepEqual(readStore(encryptedLegacy, cipher), sample);
+  const second = { ...sample, version: 2, siteSettings: { blocking: [{ host: 'example.com', enabled: false }], permissions: [{ origin: 'https://example.com', ...defaultPermissions(), camera: 'allow' }] } };
+  const expected = { ...second, version: 3, siteSettings: { ...second.siteSettings, dark: [] } };
+  writeFileSync(path, JSON.stringify(second)); assert.deepEqual(readStore(path), expected);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), expected);
+  writeFileSync(encryptedLegacy, Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify(second))]));
+  assert.deepEqual(readStore(encryptedLegacy, cipher), expected);
   const settings = sample.siteSettings;
   setBlocking(settings, 'example.com', false);
+  assert.equal(siteSettings(settings, 'https://example.com/').dark, true);
+  setSiteDark(settings, 'example.com', false);
+  assert.equal(siteSettings(settings, 'https://example.com/').dark, false); assert.equal(siteSettings(settings, 'http://example.com/path').dark, false);
+  assert.equal(siteSettings(settings, 'https://other.example/').dark, true);
   setPermission(settings, 'https://example.com', 'camera', 'allow');
   assert.equal(validateStore(sample), true);
   assert.equal(siteSettings(settings, 'http://example.com/').blocking, false);
@@ -1792,6 +2212,8 @@ test('site settings migrate strict version 1 stores and validate bounded canonic
   for (const host of ['', 'Example.com', 'user@example.com', 'example.com:443', 'example.com/path', 'example.com.', 'x'.repeat(254), '\0']) {
     const invalid = structuredClone(sample); invalid.siteSettings.blocking[0].host = host;
     assert.equal(validateStore(invalid), false, host);
+    const invalidDark = structuredClone(sample); invalidDark.siteSettings.dark[0].host = host;
+    assert.equal(validateStore(invalidDark), false, host); assert.throws(() => setSiteDark(settings, host, false), /SITE_UNAVAILABLE/);
   }
   for (const origin of ['https://example.com/', 'http://user@example.com', 'file:///private', 'about:blank', 'https://EXAMPLE.com', 'https://example.com/path', 'https://example.com#part', 'https://' + 'a'.repeat(2048)]) {
     const invalid = structuredClone(sample); invalid.siteSettings.permissions[0].origin = origin;
@@ -1803,7 +2225,21 @@ test('site settings migrate strict version 1 stores and validate bounded canonic
     value => { value.siteSettings.permissions[0].extra = true; }, value => { value.siteSettings.blocking.push(value.siteSettings.blocking[0]); },
     value => { value.siteSettings.permissions.push(value.siteSettings.permissions[0]); }, value => { value.siteSettings.blocking = new Array(1); },
     value => { value.siteSettings.permissions = new Array(SITE_SETTINGS_LIMIT + 1); },
+    value => { delete value.siteSettings.dark; }, value => { value.siteSettings.dark = null; },
+    value => { value.siteSettings.dark[0].enabled = 'false'; }, value => { value.siteSettings.dark[0].extra = true; },
+    value => { value.siteSettings.dark.push(value.siteSettings.dark[0]); }, value => { value.siteSettings.dark = new Array(1); },
+    value => { value.siteSettings.dark = new Array(SITE_SETTINGS_LIMIT + 1); },
   ]) { const invalid = structuredClone(sample); change(invalid); assert.equal(validateStore(invalid), false); }
+  const bounded = { blocking: [], dark: Array.from({ length: SITE_SETTINGS_LIMIT }, (_, index) => ({ host: `host${index}.test`, enabled: false })), permissions: [] };
+  assert.equal(validateStore({ ...sample, siteSettings: bounded }), true);
+  setSiteDark(bounded, 'host0.test', true); assert.equal(bounded.dark.length, SITE_SETTINGS_LIMIT);
+  assert.equal(siteSettings(bounded, 'https://host0.test/').dark, true);
+  assert.throws(() => setSiteDark(bounded, 'overflow.test', false), /SITE_SETTINGS_LIMIT/);
+  assert.equal(bounded.dark.length, SITE_SETTINGS_LIMIT);
+  for (const invalid of [{ ...second, extra: true }, { ...second, siteSettings: { ...second.siteSettings, dark: [] } }, { ...second, siteSettings: { ...second.siteSettings, blocking: [{ host: 'Example.com', enabled: false }] } }]) {
+    const bytes = JSON.stringify(invalid); writeFileSync(path, bytes); assert.equal(readStore(path).history.length, 0);
+    assert.ok(readdirSync(directory).some(name => name.startsWith('store.json.corrupt-') && readFileSync(join(directory, name), 'utf8') === bytes));
+  }
   writeFileSync(path, JSON.stringify({ ...legacy, extra: true }));
   assert.equal(readStore(path).history.length, 0, 'Invalid legacy files are not migrated');
 });
@@ -1830,7 +2266,7 @@ test('site commands accept exact keys and known values only', () => {
 });
 
 test('permission queues combine media callbacks, remember decisions, dismiss once and refuse dropped requests', () => {
-  const settings = { blocking: [], permissions: [] }, results = [];
+  const settings = { blocking: [], dark: [], permissions: [] }, results = [];
   let remembered = 0, changed = 0;
   const queue = new PermissionQueue(settings, () => changed++, () => remembered++);
   const request = (tab, origin, permissions) => queue.request(tab, origin, permissions, allowed => results.push(allowed));
@@ -1890,9 +2326,9 @@ const {
 const list = 'https://raw.githubusercontent.com/ghostery/adblocker/master/packages/adblocker/assets/easylist/easylist.txt';
 
 function blockingDirectory(t) {
-  mkdirSync('.runtime', { recursive: true });
-  const root = mkdtempSync(resolve('.runtime/blocking-test-'));
-  t.after(() => { assert.ok(root.startsWith(resolve('.runtime') + require('node:path').sep)); rmSync(root, { recursive: true, force: true }); });
+  mkdirSync(testTemporaryRoot, { recursive: true });
+  const root = mkdtempSync(join(testTemporaryRoot, 'blocking-test-'));
+  t.after(() => { assert.ok(root.startsWith(testTemporaryRoot + require('node:path').sep)); rmSync(root, { recursive: true, force: true }); });
   return root;
 }
 

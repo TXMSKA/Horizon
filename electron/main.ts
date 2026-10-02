@@ -7,6 +7,7 @@ import { serveHorizon } from './protocol';
 import { createBrowser, isProfileSession } from './browser';
 import { cleanupPartitions, readRegistry } from './profiles';
 import { createSettings } from './settings';
+import { darkPagesActive, setDarkPagesSwitch } from './dark-pages';
 
 // The approved design frame: the window and the interface scale are both sized against it.
 const DESIGN_WIDTH = 1440;
@@ -37,6 +38,7 @@ app.whenReady().then(async () => {
   secureSession(session.defaultSession);
   const tokens = readFileSync(resolve(__dirname, '../tokens.css'), 'utf8');
   const settings = createSettings(resolve(app.getPath('userData'), 'settings.json'), () => { window.setBackgroundColor(background()); }, nativeTheme.shouldUseHighContrastColors);
+  if (darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors)) setDarkPagesSwitch(app.commandLine, true);
   const background = () => {
     const resolved = settings.theme === 'system' ? nativeTheme.shouldUseDarkColors ? 'amber' : 'daylight' : settings.theme;
     const palette = settings.contrast === 'high' ? resolved === 'amber' ? 'contrast-dark' : 'contrast-light' : resolved;

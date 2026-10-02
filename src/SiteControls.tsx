@@ -5,7 +5,7 @@ import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { SITE_PERMISSIONS } from './shared/api';
-import type { BlockedCounts, BrowserCommand, Language, PermissionDecision, PermissionPrompt, SitePermission, SiteSettings } from './shared/api';
+import type { BlockedCounts, BrowserCommand, DarkPagesState, Language, PermissionDecision, PermissionPrompt, SitePermission, SiteSettings } from './shared/api';
 import { Menu } from './Menu';
 import { Switch } from './Switch';
 
@@ -64,8 +64,8 @@ function SitePopover({ id, label, labelledBy, describedBy, opener, onDismiss, on
   }}>{children}</div>;
 }
 
-export function ShieldPopover({ site, counts, ready, language, favicon, initial, opener, onDismiss, onTabOut, run }: {
-  site: SiteSettings; counts: BlockedCounts; ready: boolean; language: Language; favicon?: string; initial: string;
+export function ShieldPopover({ site, counts, ready, darkPages, language, favicon, initial, opener, onDismiss, onTabOut, run }: {
+  site: SiteSettings; counts: BlockedCounts; ready: boolean; darkPages: DarkPagesState; language: Language; favicon?: string; initial: string;
   opener: RefObject<HTMLButtonElement | null>; onDismiss: (reason: 'escape' | 'outside') => void; onTabOut: (backward: boolean) => void; run: (command: BrowserCommand) => Promise<boolean>;
 }) {
   const t = (key: CopyKey) => text(key, language);
@@ -78,6 +78,7 @@ export function ShieldPopover({ site, counts, ready, language, favicon, initial,
   useEffect(() => { switchRef.current?.focus(); }, []);
   const closeMenu = () => { setPermission(null); rowRef.current?.focus(); };
   const hint = !site.blocking ? t('blockingOffSite') : !ready && !blockedTotal(counts) ? t('blockingNotReady') : blockingBreakdown(counts, language);
+  const darkHint = darkPages.active ? null : t(darkPages.mode === 'off' ? 'darkPagesOff' : 'darkPagesSystemLight');
   return <SitePopover id="shield-popover" label={t('blockingOnSite')} opener={opener} onDismiss={onDismiss} onTabOut={onTabOut}>
     <SiteHeading host={site.host} favicon={favicon} initial={initial} />
     <hr />
@@ -85,6 +86,11 @@ export function ShieldPopover({ site, counts, ready, language, favicon, initial,
       if (pending.current) return;
       pending.current = true;
       void run({ type: 'set-blocking', enabled }).finally(() => { pending.current = false; });
+    }} /></div>
+    <div className={`site-dark-row${darkHint ? ' with-hint' : ''}`}><div className="site-blocking-copy"><span id={`${id}-dark`}>{t('darkModeOnSite')}</span>{darkHint && <small id={`${id}-dark-hint`}>{darkHint}</small>}</div><Switch checked={darkPages.active && site.dark} disabled={!darkPages.active} labelledBy={`${id}-dark`} describedBy={darkHint ? `${id}-dark-hint` : undefined} onChange={enabled => {
+      if (pending.current) return;
+      pending.current = true;
+      void run({ type: 'set-site-dark', enabled }).finally(() => { pending.current = false; });
     }} /></div>
     <hr />
     <span className="site-permissions-label">{t('sitePermissions')}</span>

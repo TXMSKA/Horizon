@@ -1,4 +1,4 @@
-import { app, clipboard, ipcMain, safeStorage, screen, session, shell, WebContentsView } from 'electron';
+import { app, clipboard, ipcMain, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
 import type { BrowserWindow, DownloadItem, Session, WebContents, WebPreferences } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
@@ -16,9 +16,10 @@ import { PageMenuSession } from './context-menu';
 import { cleanupPartitions, makeProfile, migrateStore, PROFILE_LIMIT, profileName, profileStorePath, readRegistry, removeProfileDirectory, writeRegistry } from './profiles';
 import type { ProfileRegistry } from './profiles';
 import { createBlockingEngine } from './blocking';
-import { PermissionQueue, requestedPermissions, secureOrigin, setBlocking, setPermission, siteSettings, stripCookieHeaders } from './site-settings';
+import { PermissionQueue, requestedPermissions, secureOrigin, setBlocking, setPermission, setSiteDark, siteSettings, stripCookieHeaders } from './site-settings';
+import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages';
 
-interface Tab { state: TabState; view?: WebContentsView; findRequest?: number; navigation?: number; committed?: boolean; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean }
+interface Tab { state: TabState; view?: WebContentsView; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
 
 
 const profileSessions = new Set<Session>();
@@ -32,6 +33,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const storageFailure = (error: unknown) => { registryError = true; console.error('Profile storage error', error); };
   try { migrateStore(userData, registry, safeStorage); } catch { registryError = true; }
   const runtimes = new Map<string, ReturnType<typeof createRuntime>>();
+  let darkActive = darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors);
   let closing = false;
   let deleting = false;
   let area: ContentArea = { top: 96, hidden: true };
@@ -44,6 +46,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     ...current().state(), activeProfileId: registry.activeId,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
+    darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
   });
   const publish = () => {
     if (!current() || closing || window.isDestroyed() || window.webContents.isDestroyed()) return;
@@ -71,8 +74,21 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!next.tabs.length) next.newTab();
     layout(); publish();
   };
+  const updateDarkPages = () => {
+    const active = darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors);
+    if (active !== darkActive) {
+      setDarkPagesSwitch(app.commandLine, active); darkActive = active;
+      for (const runtime of runtimes.values()) runtime.replaceViews();
+    } else for (const runtime of runtimes.values()) for (const tab of runtime.tabs) runtime.applyDarkCSS(tab);
+    layout(); publish();
+  };
+  const systemDarkPages = () => { if (settings.darkPages === 'system') updateDarkPages(); };
+  nativeTheme.on('updated', systemDarkPages);
   const run = (command: BrowserCommand) => {
     switch (command.type) {
+      case 'dark-pages': settings.setDarkPages(command.value); updateDarkPages(); return;
+      case 'dark-strength': settings.setDarkStrength(command.value); updateDarkPages(); return;
+      case 'dark-tone': settings.setDarkTone(command.value); updateDarkPages(); return;
       case 'switch-profile': switchProfile(command.id); return;
       case 'create-profile': case 'update-profile': {
         const name = profileName(command.name);
@@ -252,6 +268,27 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       }
     };
     const update = () => { layout(); publish(); };
+    const applyDarkCSS = (tab: Tab) => {
+      const contents = page(tab.view), generation = tab.pageLoad;
+      if (!contents) return;
+      // Serialize replacement so a late insertion cannot leave a second stylesheet behind.
+      tab.darkCSSWork = (tab.darkCSSWork ?? Promise.resolve()).then(async () => {
+        const current = () => !disposed && !closing && tabs.includes(tab) && page(tab.view) === contents && tab.pageLoad === generation;
+        if (!current()) return;
+        if (tab.darkCSS?.contents === contents) {
+          const key = tab.darkCSS.key; tab.darkCSS = undefined;
+          await contents.removeInsertedCSS(key).catch(() => undefined);
+        }
+        if (!current()) return;
+        const site = siteSettings(store.siteSettings, tab.committedURL ?? tab.state.url);
+        const css = site ? darkPagesCSS(darkActive, site.dark, settings.darkStrength, settings.darkTone) : '';
+        if (!css) return;
+        // Electron cannot remove user-origin stylesheets.
+        const key = await contents.insertCSS(css);
+        if (current()) tab.darkCSS = { contents, key };
+        else if (!contents.isDestroyed()) await contents.removeInsertedCSS(key).catch(() => undefined);
+      }).catch(() => undefined);
+    };
     const leaveFullscreen = (tab: Tab) => {
       if (!tab.state.fullscreen) return;
       tab.state.fullscreen = false;
@@ -280,6 +317,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       invalidateMenu(tab.state.id);
       if (tab.faviconSite !== (isWebURL(url) ? new URL(url).origin : '')) clearFavicon(tab, url);
       tab.state.url = url;
+      tab.committedURL = url;
       tab.state.title = page(tab.view)?.getTitle().slice(0, 1024) || url;
       tab.state.find = { active: 0, total: 0 };
       tab.findRequest = undefined;
@@ -349,6 +387,35 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!tabs.length && isCurrent()) newTab();
       update();
     };
+    const replaceViews = () => {
+      for (const tab of tabs) {
+        const view = tab.view;
+        if (!view) continue;
+        leaveFullscreen(tab); invalidateMenu(tab.state.id); permissions.drop(tab.state.id);
+        const contents = page(view);
+        const entries = contents?.navigationHistory.getAllEntries() ?? [], index = contents?.navigationHistory.getActiveIndex() ?? -1;
+        const url = tab.committedURL ?? entries[index]?.url ?? tab.state.url;
+        contents?.stopFindInPage('clearSelection');
+        tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; clearFavicon(tab);
+        view.setVisible(false);
+        try { window.contentView.removeChildView(view); } catch { /* A crashed view may already be detached. */ }
+        tab.view = undefined; tab.darkCSS = undefined; tab.darkCSSWork = undefined;
+        tab.pageLoad++; tab.navigation = (tab.navigation ?? 0) + 1; tab.cosmeticPending = false; tab.navigating = false;
+        contents?.close();
+        ensureView(tab);
+        tab.state.error = null;
+        const next = page(tab.view)!;
+        if (entries.length && index >= 0 && index < entries.length) {
+          tab.state.url = entries[index]!.url; tab.state.loading = true; tab.navigating = true;
+          const navigation = tab.navigation;
+          void next.navigationHistory.restore({ entries, index }).catch((error: unknown) => {
+            if (error instanceof Error && error.message.includes('ERR_ABORTED')) return;
+            if (!disposed && tabs.includes(tab) && page(tab.view) === next && tab.navigation === navigation) fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
+          });
+        } else if (isAllowedURL(url)) load(tab, url);
+        refresh(tab);
+      }
+    };
     function ensureView(tab: Tab, guest?: WebContents) {
       if (guest && guest.session !== webSession) throw new Error('Popup session mismatch');
       if (page(tab.view)) return;
@@ -359,10 +426,19 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       view.setVisible(false);
       window.contentView.addChildView(view);
       const contents = view.webContents;
+      const navigations: { generation: number; urls: Set<string> }[] = [];
+      let pendingNavigation: number | undefined;
+      const finishUncommitted = (generation: number | undefined) => {
+        if (tab.view !== view || generation === undefined || pendingNavigation !== generation || tab.pageLoad !== generation) return;
+        pendingNavigation = undefined;
+        tab.cosmeticPending = false; tab.navigating = false;
+        tab.topURL = tab.committedURL ?? contents.mainFrame.url;
+        update();
+      };
       contents.setZoomMode('manual');
       contents.setZoomFactor(tab.state.zoom);
       contents.on('context-menu', (_event, params) => {
-        if (!isCurrent() || tab.state.id !== activeId || tab.state.error) return;
+        if (tab.view !== view || !isCurrent() || tab.state.id !== activeId || tab.state.error) return;
         invalidateMenu();
         const menu = pageMenu.open(tab.state.id, params, {
           back: contents.navigationHistory.canGoBack(), forward: contents.navigationHistory.canGoForward(), reload: Boolean(tab.state.url),
@@ -372,7 +448,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         window.webContents.send(IPC.contextMenu, menu);
       });
       contents.setWindowOpenHandler(details => {
-        if (disposed || closing || !isAllowedURL(details.url) || tabs.length >= 200) return { action: 'deny' };
+        if (tab.view !== view || disposed || closing || !isAllowedURL(details.url) || tabs.length >= 200) return { action: 'deny' };
         return {
           action: 'allow', outlivesOpener: true, overrideBrowserWindowOptions: { webPreferences },
           createWindow: options => {
@@ -383,27 +459,40 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           },
         };
       });
-      contents.on('destroyed', () => closeTab(tab));
-      contents.on('did-start-loading', () => { tab.state.loading = true; publish(); });
+      contents.on('destroyed', () => { if (tab.view === view) closeTab(tab); });
+      contents.on('did-start-loading', () => { if (tab.view === view) { tab.state.loading = true; publish(); } });
       // A reload behind an open overlay hands the keyboard to the hidden page; once Chromium has finished moving it, it goes back to chrome.
       contents.on('focus', () => setImmediate(() => {
-        if (!disposed && !closing && !window.isDestroyed() && area.hidden && isCurrent() && tab.state.id === activeId && window.isFocused()) window.webContents.focus();
+        if (tab.view === view && !disposed && !closing && !window.isDestroyed() && area.hidden && isCurrent() && tab.state.id === activeId && window.isFocused()) window.webContents.focus();
       }));
-      contents.on('did-stop-loading', () => { tab.state.loading = false; tab.navigating = false; refresh(tab); update(); });
+      contents.on('did-stop-loading', () => {
+        if (tab.view !== view || contents.isLoading()) return;
+        finishUncommitted(pendingNavigation); navigations.length = 0;
+        tab.state.loading = false; tab.navigating = false; refresh(tab); update();
+      });
       contents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+        if (tab.view !== view) return;
         invalidateMenu(tab.state.id);
         if (isMainFrame) permissions.drop(tab.state.id);
         if (isMainFrame && !isInPlace) {
           tab.navigating = true;
           tab.pageLoad++; tab.topURL = url; tab.refusedCookies = new Set(); tab.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
+          pendingNavigation = tab.pageLoad;
+          navigations.push({ generation: tab.pageLoad, urls: new Set([url]) });
           tab.cosmeticPending = blocker.ready && !!siteSettings(store.siteSettings, url)?.blocking;
           clearFavicon(tab, url); tab.state.error = null; tab.state.find = { active: 0, total: 0 }; tab.findRequest = undefined; update();
         }
       });
+      contents.on('did-redirect-navigation', (_event, url, _isInPlace, isMainFrame) => {
+        if (tab.view === view && isMainFrame) navigations.find(navigation => navigation.generation === pendingNavigation)?.urls.add(url);
+      });
       contents.on('will-redirect', (event) => {
+        if (tab.view !== view) return;
         if (event.isMainFrame && !isAllowedURL(event.url)) fail(tab, 'ERR_UNSAFE_REDIRECT');
       });
       contents.on('did-navigate', (_event, url) => {
+        if (tab.view !== view) return;
+        pendingNavigation = undefined;
         permissions.drop(tab.state.id); tab.navigating = false;
         tab.topURL = url;
         const generation = tab.pageLoad;
@@ -412,47 +501,54 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (css) {
           tab.cosmeticPending = true;
           void contents.insertCSS(css, { cssOrigin: 'user' }).catch(() => undefined).finally(() => {
-            if (disposed || closing || !tabs.includes(tab) || tab.pageLoad !== generation) return;
+            if (disposed || closing || !tabs.includes(tab) || tab.view !== view || tab.pageLoad !== generation) return;
             tab.cosmeticPending = false; update();
           });
         } else tab.cosmeticPending = false;
         tab.committed = true;
         record(tab, url);
+        applyDarkCSS(tab);
       });
-      contents.on('did-navigate-in-page', (_event, url, mainFrame) => { if (mainFrame) record(tab, url); });
+      contents.on('did-navigate-in-page', (_event, url, mainFrame) => { if (tab.view === view && mainFrame) record(tab, url); });
       contents.on('page-favicon-updated', (_event, candidates) => {
+        if (tab.view !== view) return;
         tab.faviconRequest?.abort();
         const request = new AbortController(); tab.faviconRequest = request;
         void fetchFavicon(contents.session, candidates, request.signal, tab.state.url).then(bytes => {
-          if (closing || disposed || request.signal.aborted || !tabs.includes(tab) || !page(tab.view)) return;
+          if (closing || disposed || request.signal.aborted || !tabs.includes(tab) || tab.view !== view || !page(tab.view)) return;
           tab.faviconBytes = bytes ?? undefined;
           tab.state.favicon = bytes ? createHash('sha256').update(bytes).digest('hex').slice(0, 32) : null;
           publish();
         });
       });
       contents.on('page-title-updated', (_event, title) => {
+        if (tab.view !== view) return;
         tab.state.title = title.slice(0, 1024);
         const entry = store.history.find(entry => entry.url === tab.state.url);
         if (entry) { entry.title = tab.state.title; persist(); }
         publish();
       });
       contents.on('did-fail-load', (_event, code, description, url, mainFrame) => {
-        if (!mainFrame || code === -3) return;
+        if (tab.view !== view || !mainFrame) return;
+        // Failure events have no navigation ID; retain start order even when two loads use the same URL.
+        const index = navigations.findIndex(navigation => navigation.urls.has(url));
+        const navigation = index < 0 ? undefined : navigations.splice(index, 1)[0];
+        if (code === -3) { finishUncommitted(navigation?.generation); return; }
         if (isAllowedURL(url)) tab.state.url = url;
         fail(tab, description);
       });
-      contents.on('render-process-gone', () => fail(tab, 'RENDERER_GONE'));
+      contents.on('render-process-gone', () => { if (tab.view === view) fail(tab, 'RENDERER_GONE'); });
       contents.on('enter-html-full-screen', () => {
-        if (!isCurrent() || tab.state.id !== activeId) return;
+        if (tab.view !== view || !isCurrent() || tab.state.id !== activeId) return;
         tab.state.fullscreen = true; window.setFullScreen(true); update();
       });
-      contents.on('leave-html-full-screen', () => { leaveFullscreen(tab); update(); });
+      contents.on('leave-html-full-screen', () => { if (tab.view === view) { leaveFullscreen(tab); update(); } });
       contents.on('found-in-page', (_event, result) => {
-        if (tab.findRequest !== result.requestId) return;
+        if (tab.view !== view || tab.findRequest !== result.requestId) return;
         tab.state.find = { active: result.activeMatchOrdinal, total: result.matches }; publish();
       });
       contents.on('before-input-event', (event, input) => {
-        if (!isCurrent() || tab.state.id !== activeId) return;
+        if (tab.view !== view || !isCurrent() || tab.state.id !== activeId) return;
         if (input.type !== 'keyDown' || input.isComposing) return;
         const shortcut = browserShortcut(input);
         if (!shortcut) return;
@@ -462,7 +558,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (['focus-address', 'find', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
         window.webContents.send(IPC.shortcut, shortcut);
       });
-      contents.on('zoom-changed', (_event, direction) => { if (isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
+      contents.on('zoom-changed', (_event, direction) => { if (tab.view === view && isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
     }
 
     const downloadHandler = (event: Electron.Event, item: DownloadItem, contents: WebContents) => {
@@ -504,6 +600,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!tab) return;
       const contents = page(tab.view);
       switch (command.type) {
+        case 'set-site-dark': {
+          const site = siteSettings(store.siteSettings, tab.topURL ?? tab.state.url);
+          if (!site) throw new Error('SITE_UNAVAILABLE');
+          setSiteDark(store.siteSettings, site.host, command.enabled); persist();
+          for (const target of tabs) if (siteSettings(store.siteSettings, target.committedURL ?? target.state.url)?.host === site.host) applyDarkCSS(target);
+          break;
+        }
         case 'set-blocking': {
           const site = siteSettings(store.siteSettings, tab.topURL ?? tab.state.url);
           if (!site) throw new Error('SITE_UNAVAILABLE');
@@ -660,7 +763,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       profileSessions.delete(webSession);
       requests.clear();
     };
-    return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession };
+    return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS };
 
   }
   ipcMain.handle(IPC.state, (event, ...args: unknown[]) => {
@@ -716,6 +819,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   window.on('closed', () => {
     closing = true; invalidateMenu();
     blocker.stop();
+    nativeTheme.removeListener('updated', systemDarkPages);
     for (const runtime of runtimes.values()) runtime.dispose();
     app.removeListener('before-quit', flush);
     for (const channel of [IPC.state, IPC.capture, IPC.favicon, IPC.command, IPC.contentArea]) ipcMain.removeHandler(channel);

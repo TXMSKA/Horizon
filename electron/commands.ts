@@ -1,6 +1,6 @@
 import type { BrowserCommand, ContentArea } from '../src/shared/api';
 import { isWebURL } from './browsing';
-import { isContrast, isTheme } from './settings';
+import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission } from './site-settings';
@@ -20,7 +20,7 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
   const type = command.type;
   let valid = false;
   switch (type) {
-    case 'set-blocking': keys(command, ['type', 'enabled']); valid = Object.keys(command).length === 2 && typeof command.enabled === 'boolean'; break;
+    case 'set-blocking': case 'set-site-dark': keys(command, ['type', 'enabled']); valid = Object.keys(command).length === 2 && typeof command.enabled === 'boolean'; break;
     case 'set-site-permission':
       keys(command, ['type', 'permission', 'decision']); valid = Object.keys(command).length === 3 && isSitePermission(command.permission) && isPermissionDecision(command.decision); break;
     case 'answer-permission':
@@ -35,6 +35,9 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
         && (type === 'create-profile' || isProfileId(command.id) && (!profileIds || profileIds.has(command.id))); break;
     case 'theme': case 'migrate-theme': keys(command, ['type', 'value']); valid = isTheme(command.value); break;
     case 'contrast': keys(command, ['type', 'value']); valid = isContrast(command.value); break;
+    case 'dark-pages': keys(command, ['type', 'value']); valid = Object.keys(command).length === 2 && isDarkPagesMode(command.value); break;
+    case 'dark-strength': keys(command, ['type', 'value']); valid = Object.keys(command).length === 2 && isDarkStrength(command.value); break;
+    case 'dark-tone': keys(command, ['type', 'value']); valid = Object.keys(command).length === 2 && isDarkTone(command.value); break;
     case 'new-tab':
       keys(command, ['type', 'input', 'background']);
       valid = (command.input === undefined || string(command.input, 8192)) && (command.background === undefined || typeof command.background === 'boolean');

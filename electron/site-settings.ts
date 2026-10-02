@@ -28,7 +28,7 @@ export function siteSettings(settings: SiteSettingsStore, url: string): SiteSett
   if (!origin || !host) return null;
   const stored = settings.permissions.find(entry => entry.origin === origin);
   const permissions = stored ? Object.fromEntries(SITE_PERMISSIONS.map(key => [key, stored[key]])) as PermissionDecisions : defaultPermissions();
-  return { host, origin, blocking: settings.blocking.find(entry => entry.host === host)?.enabled ?? true, permissions };
+  return { host, origin, blocking: settings.blocking.find(entry => entry.host === host)?.enabled ?? true, dark: settings.dark.find(entry => entry.host === host)?.enabled ?? true, permissions };
 }
 export function setBlocking(settings: SiteSettingsStore, host: string, enabled: boolean): void {
   if (!validHost(host)) throw new Error('SITE_UNAVAILABLE');
@@ -37,6 +37,15 @@ export function setBlocking(settings: SiteSettingsStore, host: string, enabled: 
   else {
     if (settings.blocking.length >= SITE_SETTINGS_LIMIT) throw new Error('SITE_SETTINGS_LIMIT');
     settings.blocking.push({ host, enabled });
+  }
+}
+export function setSiteDark(settings: SiteSettingsStore, host: string, enabled: boolean): void {
+  if (!validHost(host)) throw new Error('SITE_UNAVAILABLE');
+  const entry = settings.dark.find(entry => entry.host === host);
+  if (entry) entry.enabled = enabled;
+  else {
+    if (settings.dark.length >= SITE_SETTINGS_LIMIT) throw new Error('SITE_SETTINGS_LIMIT');
+    settings.dark.push({ host, enabled });
   }
 }
 export function setPermission(settings: SiteSettingsStore, origin: string, permission: SitePermission, decision: PermissionDecision): void {

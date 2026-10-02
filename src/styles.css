@@ -127,7 +127,7 @@ button:disabled:not(.profile) { color: var(--text-placeholder); }
 .page-context-menu > button > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .browser-menu hr { border: 0; border-top: var(--border-width) solid var(--border-subtle); margin: 0; flex-shrink: 0; }
 kbd { border-radius: var(--radius-badge); color: var(--text-secondary); font-family: inherit; font-size: var(--type-caption); }
-.menu-theme { line-height: var(--line-label); display: flex; align-items: center; justify-content: space-between; gap: var(--gap-control); min-height: var(--size-36); padding: 0 var(--gap-control); font-size: var(--type-label); }
+.menu-theme { line-height: var(--line-label); display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: var(--gap-control); min-height: var(--size-36); padding: 0 var(--gap-control); font-size: var(--type-label); }
 .segmented { display: flex; padding: var(--padding-segment); gap: var(--gap-popover); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--surface-canvas); }
 .segmented button { min-height: var(--target-control); padding: 0 var(--gap-control); border-radius: var(--radius-small); color: var(--text-secondary); font-size: var(--type-caption); font-weight: var(--weight-label); line-height: var(--line-caption); }
 .segmented button:hover { color: var(--text-primary); }
@@ -213,7 +213,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 :root[data-contrast="high"] .profile::before { border: var(--border-width) solid var(--outline-profile); }
 :root[data-contrast="high"] .tab.active { box-shadow: inset 0 0 0 var(--border-width) var(--outline-tab); }
 :root[data-contrast="high"] .address-bar { border-color: var(--outline-address); }
-.menu-contrast { display: flex; align-items: center; justify-content: space-between; gap: var(--gap-control); min-height: var(--size-36); padding: 0 var(--gap-control); font-size: var(--type-label); }
+.menu-contrast { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: var(--gap-control); min-height: var(--size-36); padding: 0 var(--gap-control); font-size: var(--type-label); }
 .control-switch { display: grid; place-items: center; flex-shrink: 0; padding: 0; min-width: var(--width-switch); height: var(--target-control); border-radius: var(--radius-small); }
 .switch-track { display: block; position: relative; width: var(--width-switch); height: var(--height-switch); border-radius: var(--radius-pill); background: var(--surface-pressed); border: var(--border-width) solid var(--border-control); box-shadow: inset 0 0 0 var(--border-width) var(--switch-edge); }
 .switch-thumb { position: absolute; top: 50%; transform: translateY(-50%); left: calc(var(--gap-switch-thumb) - var(--border-width)); width: var(--size-switch-thumb); height: var(--size-switch-thumb); border-radius: var(--radius-pill); background: var(--text-secondary); transition: left var(--duration-switch) ease; }
@@ -288,6 +288,8 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .site-icon { flex: none; width: var(--size-site-icon); height: var(--size-site-icon); border-radius: var(--radius-small); font-size: var(--type-caption); }
 .site-popover > hr { margin: 0; border: 0; border-top: var(--border-width) solid var(--border-subtle); }
 .site-blocking-row { display: flex; align-items: center; gap: var(--gap-site-popover); min-height: var(--height-site-blocking); }
+.site-dark-row { display: flex; align-items: center; gap: var(--gap-site-popover); min-height: var(--height-site-dark); }
+.site-dark-row.with-hint { min-height: var(--height-site-blocking); }
 .site-blocking-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: var(--gap-popover); font-size: var(--type-label); line-height: var(--line-label); }
 .site-blocking-copy small { font-size: var(--type-caption); line-height: var(--line-caption); color: var(--text-secondary); overflow-wrap: anywhere; }
 .site-permissions-label { font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--line-caption); color: var(--text-secondary); }

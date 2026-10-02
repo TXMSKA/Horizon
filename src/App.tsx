@@ -182,6 +182,7 @@ export function App({ language }: { language: Language }) {
       const before = previous?.tabs.find(tab => tab.id === previous?.activeId);
       const announce = (message: string) => setAnnouncement(last => last === message ? last : message);
       const blockingChanged = previous?.activeProfileId === next.activeProfileId && before?.id === current?.id && previous?.siteSettings?.origin === next.siteSettings?.origin && previous?.siteSettings?.blocking !== next.siteSettings?.blocking && Boolean(next.siteSettings);
+      const darkChanged = previous?.activeProfileId === next.activeProfileId && before?.id === current?.id && previous?.siteSettings?.origin === next.siteSettings?.origin && previous?.siteSettings?.dark !== next.siteSettings?.dark && Boolean(next.siteSettings);
       if (before?.id !== current?.id) blockingReload = null;
       if (blockingChanged) blockingReload = current?.id ?? null;
       if (current && before?.id === current.id) {
@@ -200,6 +201,7 @@ export function App({ language }: { language: Language }) {
         }
       }
       if (blockingChanged && next.siteSettings) announce(text(next.siteSettings.blocking ? 'blockingEnabled' : 'blockingDisabled', language).replace('{host}', next.siteSettings.host));
+      if (darkChanged && next.siteSettings) announce(text(next.siteSettings.dark ? 'darkModeEnabled' : 'darkModeDisabled', language).replace('{host}', next.siteSettings.host));
       previous = next;
       applyTheme(next.theme, next.contrast);
       document.title = current?.url && current.url !== 'about:blank' ? `${current.title || current.url} - ${text('product', language)}` : text('product', language);
@@ -428,7 +430,7 @@ export function App({ language }: { language: Language }) {
       {(error || state?.storageReadError || state?.storageError) && <div className="shell-status" role="alert"><span>{error || t(state?.storageReadError ? 'storageReadError' : 'storageError')}</span>{error && iconButton(X, 'close', () => setError(''))}</div>}
       <div className={`loading-line${active?.loading ? ' loading' : ''}`} aria-hidden="true" />
     </header>
-    {shieldOpen && site && active && <ShieldPopover key={siteScope} site={site} counts={active.blocked} ready={state?.blockingReady ?? false} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}
+    {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} counts={active.blocked} ready={state.blockingReady} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}
     {permissionOpen && permissionPrompt && <PermissionDialog key={`${siteScope}:${permissionPrompt.id}`} prompt={permissionPrompt} language={language} favicon={siteFavicon} initial={siteInitial} onAnswer={answerPermission} />}
     {profileOpen === 'menu' && state && <ProfilesMenu state={state} language={language} keyboard={profileByKeyboard.current} opener={profileButtonRef} onDismiss={reason => { setProfileOpen(null); if (reason === 'escape') profileButtonRef.current?.focus(); }} onSwitch={profile => {
       setProfileOpen(null); profileButtonRef.current?.focus();
@@ -445,6 +447,11 @@ export function App({ language }: { language: Language }) {
       <button type="button" role="menuitem" tabIndex={-1} disabled={!activeUrl || Boolean(active?.error)} onClick={() => { setMenuOpen(false); shortcut('find'); }}><Search aria-hidden="true" /><span>{t('find')}</span><kbd>Ctrl+F</kbd></button>
       <hr />
       <div className="menu-theme" role="group" aria-label={t('theme')}><span>{t('theme')}</span><div className="segmented">{(['system', 'amber', 'daylight'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={(state?.theme ?? window.horizon.initialTheme) === value} onClick={() => { void run({ type: 'theme', value }); }}>{t(value)}</button>)}</div></div>
+      <div className="menu-theme" role="group" aria-label={t('darkPages')}><span>{t('darkPages')}</span><div className="segmented">{(['off', 'on', 'system'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={(state?.darkPages.mode ?? 'off') === value} onClick={() => { void run({ type: 'dark-pages', value }); }}>{t(value)}</button>)}</div></div>
+      {(state?.darkPages.mode ?? 'off') !== 'off' && <>
+        <div className="menu-theme" role="group" aria-label={t('darkStrength')}><span>{t('darkStrength')}</span><div className="segmented">{(['soft', 'standard', 'deep'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={state?.darkPages.strength === value} onClick={() => { void run({ type: 'dark-strength', value }); }}>{t(value)}</button>)}</div></div>
+        <div className="menu-theme" role="group" aria-label={t('darkTone')}><span>{t('darkTone')}</span><div className="segmented">{(['neutral', 'warm'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={state?.darkPages.tone === value} onClick={() => { void run({ type: 'dark-tone', value }); }}>{t(value)}</button>)}</div></div>
+      </>}
       <div className="menu-contrast"><span id="contrast-label">{t('highContrast')}</span><Switch labelledBy="contrast-label" tabIndex={-1} checked={(state?.contrast ?? window.horizon.initialContrast) === 'high'} onChange={checked => { void run({ type: 'contrast', value: checked ? 'high' : 'standard' }); }} /></div>
     </Menu>}
     {contextMenu && <Menu key={contextMenu.id} id="page-context-menu" label={t('pageMenu')} keyboard={contextMenu.keyboard} point={contextMenu} onDismiss={reason => closeContextMenu(reason === 'escape')}>

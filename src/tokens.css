@@ -221,10 +221,14 @@
 }
 
 :root[data-theme="amber"] { color-scheme: dark; }
-:root[data-theme="daylight"] { color-scheme: light; }
+:root[data-theme="daylight"] { color-scheme: only light; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="daylight"]):not([data-theme="amber"]) { color-scheme: dark; }
+}
 
 :root {
-  color-scheme: light dark;
+  color-scheme: only light;
   --surface-page: light-dark(var(--palette-daylight-page), var(--palette-amber-page));
   --surface-chrome: light-dark(var(--palette-daylight-chrome), var(--palette-amber-chrome));
   --surface-raised: light-dark(var(--palette-daylight-surface), var(--palette-amber-surface));
@@ -299,6 +303,7 @@
   --gap-site-popover: var(--space-12);
   --size-site-icon: var(--space-24);
   --height-site-blocking: var(--size-52);
+  --height-site-dark: var(--size-40);
   --height-site-permission: var(--size-32);
   --height-switch: 1.25rem;
   --size-switch-thumb: 0.875rem;
