@@ -1,4 +1,4 @@
 [
-  { "id": "identity", "letter": "ID", "short": "Identidad", "title": "Identidad visual: tres direcciones, tres variantes cada una" },
-  { "id": "flows", "letter": "FL", "short": "Flujos", "title": "Flujos: cómo se usa Horizon, paso a paso" }
+  { "id": "identity", "letter": "ID", "short": "Identity", "title": "Visual identity: Amber, Daylight and high contrast" },
+  { "id": "flows", "letter": "FL", "short": "Flows", "title": "Flows: how Horizon is used, step by step" }
 ]
