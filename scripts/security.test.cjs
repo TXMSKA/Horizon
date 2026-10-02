@@ -7,7 +7,78 @@ const { serveHorizon } = require('../dist/electron/protocol.js');
 const { classifyInput, isAllowedURL, isAllowedSubframeURL, isWebURL, parseErrorName } = require('../dist/electron/browsing.js');
 const { validateStore, readStore, writeStore, reserveDownloadPath } = require('../dist/electron/store.js');
 const { validateCommand, validateContentArea } = require('../dist/electron/commands.js');
+const { createSettings, readSettings, writeSettings, validateSettings } = require('../dist/electron/settings.js');
+const { fetchFavicon, readFavicon, isFaviconURL, FAVICON_LIMIT } = require('../dist/electron/favicon.js');
 const { browserShortcut } = require('../dist/src/shared/shortcuts.js');
+const { cleanupPartitions, makeProfile, migrateStore, profileStorePath, readRegistry, validateRegistry, writeRegistry, removeProfileDirectory } = require('../dist/electron/profiles.js');
+const { randomUUID, createCipheriv, createDecipheriv } = require('node:crypto');
+const { contextMenuGroups, PageMenuSession } = require('../dist/electron/context-menu.js');
+
+function menuParams(overrides = {}) {
+  return {
+    x: 25, y: 50, linkURL: '', srcURL: '', mediaType: 'none', selectionText: '', isEditable: false,
+    dictionarySuggestions: [], menuSourceType: 'mouse',
+    editFlags: { canUndo: false, canRedo: false, canCut: false, canCopy: true, canPaste: true, canSelectAll: true },
+    ...overrides,
+  };
+}
+const menuNavigation = { back: true, forward: false, reload: true };
+
+test('page menus contain only applicable groups and preserve enabled edit and navigation flags', () => {
+  const rows = (ids, enabled = true) => ids.map(id => ({ id, enabled }));
+  assert.deepEqual(contextMenuGroups(menuParams({ linkURL: 'https://example.com/' }), menuNavigation), [rows(['open-link', 'copy-link'])]);
+  assert.deepEqual(contextMenuGroups(menuParams({ mediaType: 'image', srcURL: 'http://example.com/image.png' }), menuNavigation), [rows(['open-image', 'save-image', 'copy-image', 'copy-image-address'])]);
+  assert.deepEqual(contextMenuGroups(menuParams({ selectionText: 'Selected text' }), menuNavigation), [rows(['copy', 'search-selection'])]);
+  assert.deepEqual(contextMenuGroups(menuParams({ isEditable: true, selectionText: 'In a field', dictionarySuggestions: ['word', 'ward', 'word'] }), menuNavigation), [
+    rows(['spell:word', 'spell:ward']), [...rows(['undo', 'redo', 'cut'], false), ...rows(['copy', 'paste', 'select-all'])],
+  ]);
+  const flags = { canUndo: true, canRedo: false, canCut: true, canCopy: false, canPaste: false, canSelectAll: false };
+  assert.deepEqual(contextMenuGroups(menuParams({ isEditable: true, editFlags: flags }), menuNavigation), [[
+    { id: 'undo', enabled: true }, { id: 'redo', enabled: false }, { id: 'cut', enabled: true },
+    { id: 'copy', enabled: false }, { id: 'paste', enabled: false }, { id: 'select-all', enabled: false },
+  ]]);
+  assert.deepEqual(contextMenuGroups(menuParams(), menuNavigation), [[{ id: 'back', enabled: true }, { id: 'forward', enabled: false }, { id: 'reload', enabled: true }]]);
+  const combined = menuParams({ linkURL: 'https://example.com/', mediaType: 'image', srcURL: 'https://example.com/photo', selectionText: 'caption' });
+  assert.deepEqual(contextMenuGroups(combined, menuNavigation), [rows(['open-link', 'copy-link']), rows(['open-image', 'save-image', 'copy-image', 'copy-image-address']), rows(['copy', 'search-selection'])]);
+});
+
+test('page menus drop every URL action for unsafe links and images', () => {
+  for (const url of ['javascript:alert(1)', 'file:///private', 'horizon://app/', 'data:image/png,bytes', 'blob:https://example.com/image', 'about:blank', 'https://user@example.com/', ' https://example.com/', 'https://example.com/' + 'a'.repeat(8192)]) {
+    assert.deepEqual(contextMenuGroups(menuParams({ linkURL: url }), menuNavigation), [], url);
+    assert.deepEqual(contextMenuGroups(menuParams({ mediaType: 'image', srcURL: url }), menuNavigation), [], url);
+    assert.deepEqual(contextMenuGroups(menuParams({ linkURL: url, selectionText: 'Keep this selection' }), menuNavigation).flat().map(row => row.id), ['copy', 'search-selection']);
+  }
+});
+
+test('page menu sessions expose only display data and reject stale, unknown, disabled or mismatched actions', () => {
+  const session = new PageMenuSession();
+  const original = menuParams({ linkURL: 'https://private.example/path', selectionText: '😀'.repeat(45), menuSourceType: 'keyboard' });
+  const first = session.open('tab', original, menuNavigation, { x: 5, y: 100 }, 0.75);
+  assert.deepEqual(Object.keys(first).sort(), ['groups', 'id', 'keyboard', 'selection', 'x', 'y']);
+  assert.equal(first.x, 40); assert.equal(first.y, 200); assert.equal(first.keyboard, true);
+  assert.equal(Array.from(first.selection).length, 40);
+  assert.equal(JSON.stringify(first).includes('private.example'), false);
+  assert.throws(() => session.take('unknown', 'copy-link', 'tab'));
+  assert.throws(() => session.take(first.id, 'unknown', 'tab'));
+  assert.throws(() => session.take(first.id, 'copy-link', 'other'));
+  original.linkURL = 'https://changed.example/';
+  first.groups[0][0].enabled = false;
+  assert.equal(session.take(first.id, 'open-link', 'tab').linkURL, 'https://private.example/path');
+  assert.throws(() => session.take(first.id, 'copy-link', 'tab'));
+  const second = session.open('tab', menuParams(), menuNavigation, { x: 0, y: 0 }, 1);
+  assert.notEqual(second.id, first.id);
+  assert.throws(() => session.take(second.id, 'forward', 'tab'));
+  const third = session.open('tab', menuParams({ isEditable: true, dictionarySuggestions: ['word'] }), menuNavigation, { x: 0, y: 0 }, 1);
+  assert.throws(() => session.take(second.id, 'back', 'tab'));
+  assert.throws(() => session.take(third.id, 'spell:other', 'tab'));
+  assert.equal(session.invalidate('other'), false);
+  assert.equal(session.invalidate('tab'), true);
+  assert.throws(() => session.take(third.id, 'spell:word', 'tab'));
+  const fourth = session.open('tab', menuParams(), menuNavigation, { x: 0, y: 0 }, 1);
+  assert.throws(() => session.dismiss('unknown'));
+  session.dismiss(fourth.id);
+  assert.throws(() => session.take(fourth.id, 'back', 'tab'));
+});
 
 test('IPC authorizes only the exact top-level Horizon frame', () => {
   const frame = { url: 'horizon://app/' };
@@ -108,6 +179,55 @@ test('navigation hardening isolates trusted chrome from untrusted web tabs', () 
 
 test('chrome CSP permits blob images without widening other directives', () => {
   assert.equal(CONTENT_SECURITY_POLICY, "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; font-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'");
+});
+
+test('shared menus clamp through CSSOM, focus by input source and keep the enabled keyboard path', () => {
+  const { compileFunction } = require('node:vm');
+  const { transpileModule, ModuleKind, JsxEmit } = require('typescript');
+  const source = transpileModule(readFileSync('src/Menu.tsx', 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS, jsx: JsxEmit.ReactJSX } }).outputText;
+  for (const keyboard of [false, true]) for (const profile of [false, true]) {
+    const callbacks = new Map(), styles = new Map(), effects = [], cleanups = [], dismissed = [];
+    const document = { activeElement: null, addEventListener(name, handler) { callbacks.set(name, handler); }, removeEventListener(name) { callbacks.delete(name); } };
+    const items = [0, 1, 2].map(id => ({ id, focus() { document.activeElement = this; } }));
+    const menu = {
+      focus() { document.activeElement = this; }, contains(target) { return target === this || items.includes(target); },
+      querySelector(selector) { if (selector === '[aria-checked=true]') return items[1]; assert.ok(selector.includes(':not(:disabled)')); return items[0]; },
+      querySelectorAll(selector) { assert.ok(selector.includes(':not(:disabled)')); return items; },
+      getBoundingClientRect() { return { width: 300, height: 200 }; },
+      style: { setProperty(name, value) { styles.set(name, value); } },
+      setAttribute() { assert.fail('Inline style attributes are forbidden'); },
+    };
+    const window = { addEventListener(name, handler) { callbacks.set(name, handler); }, removeEventListener(name) { callbacks.delete(name); } };
+    const react = { useRef(value) { return { current: value === null ? menu : value }; }, useEffect(effect) { effects.push(effect); }, useLayoutEffect(effect) { effects.push(effect); } };
+    class ResizeObserver { constructor(callback) { this.callback = callback; } observe() { this.callback(); } disconnect() {} }
+    const exported = {};
+    compileFunction(source, ['exports', 'require', 'document', 'window', 'ResizeObserver', 'innerWidth', 'innerHeight'])(exported, name => {
+      if (name === 'react') return react;
+      assert.equal(name, 'react/jsx-runtime'); return { jsx(type, props) { return { type, props }; } };
+    }, document, window, ResizeObserver, 800, 600);
+    const opener = {};
+    const rendered = exported.Menu({ id: 'page-menu', label: 'Page menu', keyboard, initialFocus: profile ? '[aria-checked=true]' : undefined, className: profile ? 'profiles-menu' : undefined, point: { x: 790, y: 590 }, opener: { current: { contains: target => target === opener } }, onDismiss: reason => dismissed.push(reason), children: [] });
+    effects.forEach(effect => { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); });
+    assert.equal(rendered.props.role, 'menu'); assert.equal(rendered.props['aria-label'], 'Page menu');
+    assert.equal(document.activeElement, keyboard ? items[profile ? 1 : 0] : menu);
+    assert.equal(styles.get('left'), '490px'); assert.equal(styles.get('top'), '390px');
+    const press = key => {
+      const event = { key, prevented: false, stopped: false, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } };
+      rendered.props.onKeyDown(event); return event;
+    };
+    document.activeElement = menu;
+    assert.equal(press('ArrowUp').prevented, true); assert.equal(document.activeElement, items[2]);
+    press('ArrowDown'); assert.equal(document.activeElement, items[0]);
+    press('End'); assert.equal(document.activeElement, items[2]);
+    press('Home'); assert.equal(document.activeElement, items[0]);
+    assert.equal(press('Enter').prevented, false); assert.equal(press(' ').prevented, false);
+    const escape = press('Escape'); assert.equal(escape.prevented, true); assert.equal(escape.stopped, true);
+    assert.equal(press('Tab').prevented, false);
+    callbacks.get('pointerdown')({ target: menu }); callbacks.get('pointerdown')({ target: opener });
+    assert.deepEqual(dismissed, ['escape', 'tab']);
+    callbacks.get('pointerdown')({ target: {} }); assert.deepEqual(dismissed, ['escape', 'tab', 'outside']);
+    cleanups.forEach(cleanup => cleanup()); assert.equal(callbacks.size, 0);
+  }
 });
 
 test('subframes permit local document schemes without allowing privileged navigation', () => {
@@ -275,7 +395,8 @@ test('download paths avoid existing and concurrent filenames and sanitize platfo
 
 test('browser IPC arguments reject unknown actions, extra fields, and invalid values', () => {
   const commands = [
-    { type: 'new-tab' }, { type: 'new-tab', input: 'example.com' },
+    { type: 'new-tab' }, { type: 'new-tab', input: 'example.com' }, { type: 'new-tab', input: 'example.com', background: true }, { type: 'new-tab', background: false },
+    { type: 'context-menu', id: 'menu', item: 'open-link' }, { type: 'context-menu', id: 'menu', item: 'spell:word' }, { type: 'dismiss-context-menu', id: 'menu' }, { type: 'open-downloads-folder' },
     { type: 'navigate', input: 'bread recipes' },
     { type: 'activate-tab', id: 'tab-1' }, { type: 'close-tab', id: 'tab-1' },
     { type: 'zoom', delta: -1 }, { type: 'zoom', delta: 0 }, { type: 'zoom', delta: 1 },
@@ -285,13 +406,15 @@ test('browser IPC arguments reject unknown actions, extra fields, and invalid va
     ...['back', 'forward', 'reload', 'stop', 'bookmark', 'focus-page', 'stop-find', 'clear-history'].map(type => ({ type })),
     ...['delete-history', 'delete-bookmark'].map(type => ({ type, url: 'https://example.com/' })),
     ...['cancel-download', 'show-download', 'remove-download'].map(type => ({ type, id: 'download-1' })),
+    ...['standard', 'high'].map(value => ({ type: 'contrast', value })),
+    ...['system', 'amber', 'daylight'].flatMap(value => [{ type: 'theme', value }, { type: 'migrate-theme', value }]),
     ...['history', 'bookmarks', 'downloads'].map(kind => ({ type: 'restore', kind })),
   ];
   for (const command of commands) {
     assert.deepEqual(validateCommand(command), command);
     assert.throws(() => validateCommand({ ...command, unexpected: true }));
   }
-  const invalid = [null, [], {}, { type: 'execute' }, { type: 'new-tab', input: '' },
+  const invalid = [{ type: 'contrast' }, { type: 'contrast', value: true }, { type: 'contrast', value: 'dark' }, { type: 'theme', value: 'dark' }, { type: 'migrate-theme', value: null }, { type: 'theme' }, null, [], {}, { type: 'execute' }, { type: 'new-tab', input: '' },
     { type: 'navigate', input: 1 }, { type: 'navigate', input: 'x'.repeat(8193) },
     { type: 'navigate', input: '\0' }, { type: 'close-tab', id: '' },
     { type: 'close-tab', id: 'x'.repeat(129) }, { type: 'zoom', delta: 2 },
@@ -308,6 +431,12 @@ test('browser IPC arguments reject unknown actions, extra fields, and invalid va
     { type: 'restore', kind: 'bookmarks', url: 'https://example.com/' },
     { type: 'restore', kind: 'downloads', id: 'download-1' },
     { type: 'show-download', path: 'C:\\private\\file' }];
+  invalid.push(...[null, 1, 'true', {}, []].map(background => ({ type: 'new-tab', background })),
+    { type: 'context-menu', id: '', item: 'copy' }, { type: 'context-menu', id: 'x'.repeat(129), item: 'copy' },
+    { type: 'context-menu', id: 'menu', item: 'unknown' }, { type: 'context-menu', id: 'menu', item: 'spell:' },
+    { type: 'context-menu', id: 'menu', item: 'spell:' + 'x'.repeat(257) }, { type: 'context-menu', id: 'menu', item: 'spell:\0' },
+    { type: 'context-menu', id: 'menu', item: 'copy', url: 'https://evil.example/' }, { type: 'dismiss-context-menu' },
+    { type: 'open-downloads-folder', path: 'C:\\private' });
   for (const command of invalid) assert.throws(() => validateCommand(command));
   assert.deepEqual(validateContentArea({ top: 96, hidden: true }), { top: 96, hidden: true });
   assert.deepEqual(validateContentArea({ top: 2048, hidden: false }), { top: 2048, hidden: false });
@@ -344,9 +473,15 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const handlers = new Map();
   const views = [];
   const shown = [];
+  const clipboardText = [];
+  const openedFolders = [];
   const timers = new Map();
   const writes = [];
   let writeFailure = false;
+  let registryWriteFailure = false;
+  let cleanupFailure = false;
+  const storageErrors = [];
+  t.mock.method(console, 'error', (...args) => storageErrors.push(args));
   let nextTimer = 0;
   const schedule = (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; };
   const clear = id => timers.delete(id);
@@ -358,8 +493,9 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     }
   };
   class Contents extends EventEmitter {
-    constructor() {
+    constructor(targetSession) {
       super();
+      this.targetSession = targetSession;
       this.mainFrame = { url: 'horizon://app/' };
       this.zoom = 0.75;
       this.destroyed = false;
@@ -367,6 +503,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
       this.sent = [];
       this.navigationHistory = { canGoBack: () => false, canGoForward: () => false };
     }
+    get session() { return this.targetSession || webSession; }
     isDestroyed() { return this.destroyed; }
     send(...args) { this.sent.push(args); }
     focus() { this.focused = true; }
@@ -382,23 +519,42 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     stopFindInPage() {}
     findInPage(text, options) { this.find = { text, options }; return 7; }
     reload() {}
+    undo() { this.edited = 'undo'; }
+    redo() { this.edited = 'redo'; }
+    cut() { this.edited = 'cut'; }
+    copy() { this.edited = 'copy'; }
+    paste() { this.edited = 'paste'; }
+    selectAll() { this.edited = 'select-all'; }
+    replaceMisspelling(word) { this.replacement = word; }
+    copyImageAt(x, y) { this.copiedImage = { x, y }; }
+    downloadURL(url) { this.downloaded = url; }
   }
   class View {
-    constructor(options) { this.options = options; this.webContents = options.webContents || new Contents(); views.push(this); }
+    constructor(options) { this.options = options; this.webContents = options.webContents || new Contents(sessions.get(options.webPreferences.partition)); views.push(this); }
     setVisible(visible) { this.visible = visible; }
     setBounds(bounds) { this.bounds = bounds; }
     getBounds() { return this.bounds; }
   }
+  const sessions = new Map();
   const webSession = new EventEmitter();
-  webSession.setPermissionRequestHandler = handler => { webSession.request = handler; };
-  webSession.setPermissionCheckHandler = handler => { webSession.check = handler; };
-  webSession.setDevicePermissionHandler = handler => { webSession.device = handler; };
-  webSession.webRequest = { onBeforeRequest(handler) { webSession.network = handler; } };
+  const prepareMockSession = target => {
+    target.cleared = [];
+    target.setPermissionRequestHandler = handler => { target.request = handler; };
+    target.setPermissionCheckHandler = handler => { target.check = handler; };
+    target.setDevicePermissionHandler = handler => { target.device = handler; };
+    target.webRequest = { onBeforeRequest(handler) { target.network = handler; } };
+    for (const name of ['clearStorageData', 'closeAllConnections', 'clearCache', 'clearAuthCache', 'clearCodeCaches']) target[name] = async () => { target.cleared.push(name); };
+    return target;
+  };
+  sessions.set('persist:web', prepareMockSession(webSession));
   const electron = {
-    app: new EventEmitter(),
+    app: Object.assign(new EventEmitter(), { getLocale: () => 'en', getPath: () => directory }),
+    nativeImage: { createFromBuffer() { assert.fail('Privileged favicon decoding is forbidden'); } },
     ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
-    session: { fromPartition(name) { assert.equal(name, 'persist:web'); return webSession; } },
-    shell: { showItemInFolder(path) { shown.push(path); } },
+    session: { fromPartition(name) { if (!sessions.has(name)) sessions.set(name, prepareMockSession(new EventEmitter())); return sessions.get(name); } },
+    safeStorage: { isEncryptionAvailable: () => false },
+    shell: { showItemInFolder(path) { shown.push(path); }, async openPath(path) { openedFolders.push(path); return ''; } },
+    clipboard: { writeText(value) { clipboardText.push(value); } },
     screen: { getDisplayMatching() { return { scaleFactor: 2 }; } },
     WebContentsView: View,
   };
@@ -406,22 +562,44 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const localRequire = createRequire(filename);
   const loaded = { exports: {} };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'module', '__filename', '__dirname', 'setTimeout', 'clearTimeout'])(loaded.exports,
-    name => name === 'electron' ? electron : name === './store' ? { ...localRequire(name), writeStore(path, store) {
+    name => name === 'electron' ? electron : name === './store' ? { ...localRequire(name), writeStore(path, store, cipher) {
       if (writeFailure) throw new Error('Disk unavailable');
-      writes.push(structuredClone(store)); localRequire(name).writeStore(path, store);
+      writes.push(structuredClone(store)); localRequire(name).writeStore(path, store, cipher);
+    } } : name === './profiles' ? { ...localRequire(name), writeRegistry(path, registry) {
+      if (registryWriteFailure) throw new Error('Registry unavailable');
+      localRequire(name).writeRegistry(path, registry);
+    }, removeProfileDirectory(root, id) {
+      if (cleanupFailure) throw new Error('Store folder unavailable');
+      localRequire(name).removeProfileDirectory(root, id);
     } } : localRequire(name), loaded, filename, require('node:path').dirname(filename), schedule, clear);
   const window = new EventEmitter();
   window.webContents = new Contents();
   window.isDestroyed = () => false;
   window.getContentBounds = () => ({ width: 800, height: 600 });
   window.setFullScreen = fullscreen => { window.fullscreen = fullscreen; };
+  window.setTitle = title => { window.title = title; };
   window.contentView = { addChildView() {}, removeChildView() {} };
-  const browser = loaded.exports.createBrowser(window, directory, join(directory, 'downloads'));
+  const themes = [];
+  const settings = createSettings(join(directory, 'settings.json'), value => themes.push(value));
+  const browser = loaded.exports.createBrowser(window, directory, join(directory, 'downloads'), settings);
   const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
   const state = () => handlers.get('horizon:state')(event);
   const command = value => handlers.get('horizon:command')(event, value);
   const capture = (...args) => handlers.get('horizon:capture')(event, ...args);
   assert.equal(state().tabs.length, 1);
+  assert.equal(window.title, 'Horizon');
+  assert.equal(state().theme, 'system');
+  command({ type: 'theme', value: 'amber' });
+  assert.equal(state().theme, 'amber');
+  assert.deepEqual(themes, ['amber']);
+  assert.equal(state().contrast, 'standard');
+  command({ type: 'contrast', value: 'high' });
+  assert.equal(state().contrast, 'high');
+  assert.equal(readSettings(join(directory, 'settings.json')).contrast, 'high');
+  command({ type: 'contrast', value: 'standard' });
+  assert.equal(state().contrast, 'standard');
+  command({ type: 'migrate-theme', value: 'daylight' });
+  assert.equal(state().theme, 'amber');
   assert.equal(views.length, 0);
   assert.equal(await capture(), null);
   await assert.rejects(async () => handlers.get('horizon:capture')({ ...event, sender: {} }));
@@ -450,6 +628,83 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   handlers.get('horizon:content-area')(event, { top: 120, hidden: true });
   assert.equal(view.visible, false);
   handlers.get('horizon:content-area')(event, { top: 120, hidden: false });
+  const originalTab = state().activeId;
+  const openMenu = (params = menuParams()) => {
+    view.webContents.emit('context-menu', {}, params);
+    const [channel, menu] = window.webContents.sent.at(-1);
+    assert.equal(channel, 'horizon:context-menu');
+    return menu;
+  };
+  const menuAction = (menu, item) => command({ type: 'context-menu', id: menu.id, item });
+  let menu = openMenu(menuParams({ linkURL: 'https://example.com/link', menuSourceType: 'keyboard' }));
+  assert.equal(menu.keyboard, true);
+  assert.equal(menu.x, 25 / 0.92); assert.equal(menu.y, (50 + 111) / 0.92);
+  assert.equal(window.webContents.focused, true);
+  assert.equal(Object.hasOwn(menu, 'linkURL'), false);
+  assert.throws(() => command({ type: 'context-menu', id: 'unknown', item: 'copy-link' }));
+  assert.throws(() => menuAction(menu, 'copy-image'));
+  menuAction(menu, 'copy-link');
+  assert.equal(clipboardText.at(-1), 'https://example.com/link');
+  assert.throws(() => menuAction(menu, 'copy-link'));
+  menu = openMenu(menuParams({ linkURL: 'https://example.com/background-link' }));
+  menuAction(menu, 'open-link');
+  assert.equal(state().activeId, originalTab);
+  assert.equal(views.at(-1).webContents.url, 'https://example.com/background-link');
+  command({ type: 'close-tab', id: state().tabs.at(-1).id });
+  menu = openMenu(menuParams({ mediaType: 'image', srcURL: 'https://example.com/photo.png' }));
+  menuAction(menu, 'open-image');
+  assert.notEqual(state().activeId, originalTab);
+  assert.equal(views.at(-1).webContents.url, 'https://example.com/photo.png');
+  command({ type: 'close-tab', id: state().activeId });
+  for (const action of ['save-image', 'copy-image', 'copy-image-address']) {
+    menuAction(openMenu(menuParams({ mediaType: 'image', srcURL: 'https://example.com/photo.png' })), action);
+  }
+  assert.equal(view.webContents.downloaded, 'https://example.com/photo.png');
+  assert.deepEqual(view.webContents.copiedImage, { x: 25, y: 50 });
+  assert.equal(clipboardText.at(-1), 'https://example.com/photo.png');
+  menuAction(openMenu(menuParams({ selectionText: 'selected text' })), 'copy');
+  assert.equal(clipboardText.at(-1), 'selected text');
+  menuAction(openMenu(menuParams({ selectionText: 'https://example.com/search & mañana' })), 'search-selection');
+  assert.equal(views.at(-1).webContents.url, 'https://duckduckgo.com/?q=https%3A%2F%2Fexample.com%2Fsearch%20%26%20ma%C3%B1ana');
+  assert.notEqual(state().activeId, originalTab);
+  command({ type: 'close-tab', id: state().activeId });
+  menuAction(openMenu(menuParams({ selectionText: '😀'.repeat(20000) })), 'search-selection');
+  assert.ok(views.at(-1).webContents.url.length <= 8192);
+  command({ type: 'close-tab', id: state().activeId });
+  const editFlags = { canUndo: true, canRedo: true, canCut: true, canCopy: true, canPaste: true, canSelectAll: true };
+  for (const action of ['undo', 'redo', 'cut', 'copy', 'paste', 'select-all']) {
+    menuAction(openMenu(menuParams({ isEditable: true, editFlags })), action);
+    assert.equal(view.webContents.edited, action);
+  }
+  menu = openMenu(menuParams({ isEditable: true, dictionarySuggestions: ['correct', 'another'] }));
+  assert.throws(() => menuAction(menu, 'spell:injected'));
+  menuAction(menu, 'spell:correct');
+  assert.equal(view.webContents.replacement, 'correct');
+  menu = openMenu();
+  assert.throws(() => menuAction(menu, 'back'));
+  const stale = menu;
+  menu = openMenu(menuParams({ selectionText: 'new selection' }));
+  assert.throws(() => menuAction(stale, 'reload'));
+  command({ type: 'dismiss-context-menu', id: menu.id });
+  assert.throws(() => menuAction(menu, 'copy'));
+  for (const navigation of [() => view.webContents.emit('did-start-navigation', {}, 'https://example.com/next', false, true), () => view.webContents.emit('did-start-navigation', {}, 'https://example.com/#part', true, true), () => view.webContents.emit('did-start-navigation', {}, 'https://frame.example/', false, false)]) {
+    menu = openMenu(); navigation();
+    assert.deepEqual(window.webContents.sent.findLast(([channel]) => channel === 'horizon:context-menu'), ['horizon:context-menu', null]);
+    assert.throws(() => menuAction(menu, 'reload'));
+  }
+  menu = openMenu();
+  command({ type: 'new-tab' });
+  assert.throws(() => menuAction(menu, 'reload'));
+  command({ type: 'close-tab', id: state().activeId });
+  command({ type: 'new-tab', input: 'https://example.com/background', background: true });
+  assert.equal(state().activeId, originalTab);
+  const backgroundId = state().tabs.at(-1).id;
+  menu = openMenu();
+  command({ type: 'activate-tab', id: backgroundId });
+  assert.throws(() => menuAction(menu, 'reload'));
+  command({ type: 'close-tab', id: backgroundId });
+  await command({ type: 'open-downloads-folder' });
+  assert.deepEqual(openedFolders, [join(directory, 'downloads')]);
   let resized;
   let jpegQuality;
   const image = (width, height) => ({
@@ -496,6 +751,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   view.webContents.emit('did-navigate', {}, 'https://example.com/', 200);
   view.webContents.title = 'Example';
   view.webContents.emit('page-title-updated', {}, 'Example');
+  assert.equal(window.title, 'Example - Horizon');
   view.webContents.emit('did-navigate-in-page', {}, 'https://example.com/', true);
   assert.equal(state().store.history[0].visitCount, 2);
   assert.equal(state().store.history[0].title, 'Example');
@@ -505,6 +761,29 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(writes.length, 1);
   assert.equal(writes[0].history[0].title, 'Example');
   assert.equal(timers.size, 0);
+
+  const favicon = (...args) => handlers.get('horizon:favicon')(event, ...args);
+  for (const args of [[], ['tab'], ['', 'a'.repeat(32)], [state().activeId, 'invalid'], [state().activeId, 'a'.repeat(32), 'extra']]) assert.throws(() => favicon(...args));
+  assert.throws(() => handlers.get('horizon:favicon')({ ...event, sender: {} }, state().activeId, 'a'.repeat(32)));
+  assert.throws(() => favicon('unknown', 'a'.repeat(32)));
+  webSession.fetch = async () => new Response(faviconPNG);
+  view.webContents.emit('page-favicon-updated', {}, ['https://example.com/icon.png']);
+  await new Promise(resolve => setImmediate(resolve));
+  const hash = state().tabs[0].favicon;
+  assert.match(hash, /^[a-f0-9]{32}$/);
+  assert.deepEqual(favicon(state().activeId, hash), faviconPNG);
+  assert.equal(favicon(state().activeId, 'a'.repeat(32)), null);
+  let delayed;
+  webSession.fetch = () => new Promise(resolve => { delayed = resolve; });
+  view.webContents.emit('page-favicon-updated', {}, ['https://example.com/slow.png']);
+  command({ type: 'navigate', input: 'other.example' });
+  assert.equal(state().tabs[0].favicon, null);
+  assert.equal(favicon(state().activeId, hash), null);
+  delayed(new Response(faviconPNG));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state().tabs[0].favicon, null);
+  webSession.fetch = async () => new Response(faviconPNG);
+  view.webContents.emit('did-navigate', {}, 'https://example.com/', 200);
   view.webContents.emit('page-title-updated', {}, 'Latest title');
   view.webContents.emit('page-title-updated', {}, 'Final title');
   assert.equal(timers.size, 1);
@@ -554,13 +833,13 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     assert.equal(removed.length, destructive.type === 'clear-history' ? 0 : 2);
     assert.equal([...timers.values()].filter(timer => timer.delay === 8000).length, 1);
     tick();
-    assert.deepEqual(readStore(join(directory, 'browser-store.json'))[kind], removed);
+    assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[kind], removed);
     if (removed.length) state().store[kind][0].url = 'https://changed.example/';
     command({ type: 'restore', kind });
     assert.deepEqual(state().store[kind], restoreStore[kind]);
     assert.equal([...timers.values()].some(timer => timer.delay === 8000), false);
     tick();
-    assert.deepEqual(readStore(join(directory, 'browser-store.json'))[kind], restoreStore[kind]);
+    assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[kind], restoreStore[kind]);
     const writesAfterRestore = writes.length;
     command({ type: 'restore', kind });
     assert.deepEqual(state().store[kind], restoreStore[kind]);
@@ -604,7 +883,9 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(state().activeId, openerId);
   assert.equal(views.at(-1).visible, false);
   guest.emit('did-navigate', {}, 'https://example.com/background', 200);
+  const activeWindowTitle = window.title;
   guest.emit('page-title-updated', {}, 'Guest title');
+  assert.equal(window.title, activeWindowTitle);
   assert.equal(state().tabs.at(-1).title, 'Guest title');
   guest.close(); guest.emit('destroyed');
   assert.equal(state().tabs.length, 1);
@@ -626,6 +907,13 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(window.fullscreen, true);
   assert.equal(state().tabs[0].fullscreen, true);
   assert.deepEqual(view.bounds, { x: 0, y: 0, width: 800, height: 600 });
+  menu = openMenu();
+  assert.equal(menu.y, 50 / 0.92);
+  handlers.get('horizon:content-area')(event, { top: 120, hidden: true });
+  assert.equal(view.visible, false);
+  command({ type: 'dismiss-context-menu', id: menu.id });
+  assert.equal(view.visible, true);
+  handlers.get('horizon:content-area')(event, { top: 120, hidden: false });
   view.webContents.emit('leave-html-full-screen');
   assert.equal(window.fullscreen, false);
   assert.equal(state().tabs[0].fullscreen, false);
@@ -719,11 +1007,124 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(state().tabs[0].error, 'RENDERER_GONE');
   command({ type: 'reload' });
   assert.equal(state().tabs[0].error, null);
+  const personalId = state().activeProfileId;
+  const work = state().profiles.find(profile => profile.name === 'Work');
+  assert.equal(state().profiles.length, 2);
+  assert.equal(sessions.size, 1, 'Work stays lazy until its first switch');
+  assert.equal(loaded.exports.isProfileSession(webSession), true);
+  assert.equal(loaded.exports.isProfileSession(new EventEmitter()), false);
+  const personalState = structuredClone(state());
+  const livePersonalDownload = new Download();
+  webSession.emit('will-download', allowed, livePersonalDownload, view.webContents);
+  command({ type: 'delete-history', url: state().store.history[0].url }); tick();
+  const deletedHistory = structuredClone(state().store.history);
+  const oldMenu = openMenu();
+  command({ type: 'switch-profile', id: work.id });
+  assert.throws(() => menuAction(oldMenu, 'reload'));
+  assert.equal(state().activeProfileId, work.id);
+  assert.equal(readRegistry(join(directory, 'profiles.json'), 'en').activeId, work.id);
+  assert.deepEqual(state().store, { version: 1, history: [], bookmarks: [], downloads: [] });
+  assert.equal(state().tabs.length, 1);
+  assert.equal(view.visible, false); assert.equal(view.webContents.destroyed, false);
+  assert.equal(sessions.size, 2);
+  const workPartition = readRegistry(join(directory, 'profiles.json'), 'en').profiles.find(profile => profile.id === work.id).partition;
+  const workSession = sessions.get(workPartition);
+  assert.ok(workPartition.startsWith('persist:profile-')); assert.notEqual(workSession, webSession);
+  assert.equal(loaded.exports.isProfileSession(workSession), true);
+  command({ type: 'navigate', input: 'https://work.example/' });
+  const workView = views.at(-1);
+  assert.equal(workView.options.webPreferences.partition, workPartition);
+  assert.equal(workView.webContents.session, workSession);
+  assert.deepEqual({ ...workView.options.webPreferences, partition: 'persist:web' }, view.options.webPreferences);
+  assert.equal(workView.visible, true);
+  workView.webContents.emit('did-navigate', {}, 'https://work.example/'); command({ type: 'bookmark' });
+  assert.equal(state().store.history[0].url, 'https://work.example/');
+  assert.equal(state().store.bookmarks[0].url, 'https://work.example/');
+  const workDownload = new Download();
+  workSession.emit('will-download', allowed, workDownload, workView.webContents);
+  assert.equal(state().store.downloads[0].path, workDownload.path);
+  assert.notEqual(workDownload.path, livePersonalDownload.path, 'Concurrent downloads reserve paths across profiles');
+  const workGuest = new Contents(workSession);
+  const workPopup = workView.webContents.popup({ url: 'https://work.example/popup', disposition: 'background-tab' });
+  assert.equal(workPopup.overrideBrowserWindowOptions.webPreferences.partition, workPartition);
+  assert.equal(workPopup.createWindow({ webContents: workGuest }), workGuest);
+  assert.equal(views.at(-1).options.webPreferences.partition, workPartition); assert.equal(views.at(-1).visible, false);
+  command({ type: 'switch-profile', id: personalId });
+  assert.equal(view.visible, true); assert.equal(workView.visible, false);
+  assert.deepEqual(state().store.history, deletedHistory);
+  command({ type: 'restore', kind: 'history' });
+  assert.deepEqual(state().store.history, deletedHistory, 'Undo cannot cross a profile switch');
+  assert.deepEqual(state().store.bookmarks, personalState.store.bookmarks);
+  assert.equal(state().store.downloads.some(entry => entry.path === workDownload.path), false);
+  workDownload.emit('updated', {}, 'progressing');
+  assert.equal(state().store.downloads.some(entry => entry.path === workDownload.path), false);
+  const beforeBackgroundShortcut = window.webContents.sent.length;
+  workView.webContents.emit('before-input-event', { preventDefault() { assert.fail('Background shortcut'); } }, shortcutInput('F6'));
+  workView.webContents.emit('zoom-changed', {}, 'in');
+  assert.equal(workView.webContents.zoom, 1); assert.equal(window.webContents.sent.length, beforeBackgroundShortcut);
+  const latePopup = workView.webContents.popup({ url: 'https://work.example/late', disposition: 'foreground-tab' });
+  const lateGuest = new Contents(workSession); latePopup.createWindow({ webContents: lateGuest });
+  assert.equal(state().activeProfileId, personalId); assert.equal(views.at(-1).visible, false);
+  assert.equal(state().profiles.find(profile => profile.id === work.id).tabCount, 3);
+  command({ type: 'switch-profile', id: work.id });
+  assert.equal(state().store.downloads[0].received, 50);
+  workGuest.close(); lateGuest.close(); workView.webContents.close();
+  assert.equal(state().tabs.length, 1, 'The current profile retains a blank tab');
+  command({ type: 'navigate', input: 'https://work.example/last' });
+  const lastWorkView = views.at(-1); command({ type: 'switch-profile', id: personalId }); lastWorkView.webContents.close();
+  assert.equal(state().profiles.find(profile => profile.id === work.id).tabCount, 0);
+  command({ type: 'switch-profile', id: work.id }); assert.equal(state().tabs.length, 1);
+  command({ type: 'navigate', input: 'https://work.example/delete' }); const deleteView = views.at(-1);
+  assert.throws(() => command({ type: 'update-profile', id: work.id, name: ' personal ', color: 'cyan' }), /PROFILE_NAME_DUPLICATE/);
+  assert.throws(() => command({ type: 'create-profile', name: 'WORK', color: 'red' }), /PROFILE_NAME_DUPLICATE/);
+  command({ type: 'update-profile', id: work.id, name: '  Studio  ', color: 'cyan' });
+  assert.equal(state().profiles.find(profile => profile.id === work.id).name, 'Studio');
+  assert.equal(state().profiles.find(profile => profile.id === work.id).color, 'cyan');
+  const beforeDeletion = structuredClone(state());
+  registryWriteFailure = true;
+  assert.throws(() => command({ type: 'delete-profile', id: work.id }), /Registry unavailable/);
+  assert.deepEqual(state(), beforeDeletion);
+  assert.equal(deleteView.webContents.destroyed, false); assert.equal(workDownload.cancelled, undefined);
+  assert.deepEqual(workSession.cleared, []);
+  registryWriteFailure = false;
+  cleanupFailure = true;
+  workSession.clearStorageData = async () => { workSession.cleared.push('clearStorageData'); throw new Error('Session unavailable'); };
+  const deletion = command({ type: 'delete-profile', id: work.id });
+  assert.equal(readRegistry(join(directory, 'profiles.json'), 'en').profiles.some(profile => profile.id === work.id), false);
+  assert.deepEqual(readRegistry(join(directory, 'profiles.json'), 'en').tombstones, [workPartition]);
+  assert.equal(state().activeProfileId, personalId);
+  assert.throws(() => command({ type: 'new-tab' }), /deletion/); await deletion;
+  assert.equal(deleteView.webContents.destroyed, true); assert.equal(workDownload.cancelled, true);
+  assert.deepEqual(workSession.cleared.sort(), ['clearStorageData', 'closeAllConnections', 'clearCache', 'clearAuthCache', 'clearCodeCaches'].sort());
+  assert.equal(existsSync(join(directory, 'profiles', work.id)), true);
+  assert.equal(state().storageError, true);
+  assert.equal(storageErrors.length, 2);
+  assert.ok(storageErrors.every(([message]) => message === 'Profile storage error'));
+  cleanupFailure = false;
+  assert.deepEqual(readRegistry(join(directory, 'profiles.json'), 'en').tombstones, [workPartition]);
+  assert.equal(state().profiles.length, 1);
+  assert.equal(loaded.exports.isProfileSession(workSession), false);
+  assert.throws(() => command({ type: 'delete-profile', id: personalId }), /PROFILE_LAST/);
+  for (let index = 1; index < 20; index++) command({ type: 'create-profile', name: 'Profile ' + index, color: 'purple' });
+  assert.equal(state().profiles.length, 20);
+  assert.throws(() => command({ type: 'create-profile', name: 'Too many', color: 'blue' }), /PROFILE_LIMIT/);
+  assert.throws(() => command({ type: 'switch-profile', id: work.id }));
+  assert.throws(() => command({ type: 'delete-profile', id: work.id }));
+  command({ type: 'switch-profile', id: personalId }); tick();
+  assert.equal(state().theme, 'amber'); assert.equal(state().contrast, 'standard');
   view.webContents.emit('enter-html-full-screen');
+  view.webContents.emit('page-favicon-updated', {}, ['https://example.com/icon.png']);
+  await new Promise(resolve => setImmediate(resolve));
+  const closedId = state().activeId, closedHash = state().tabs[0].favicon;
+  assert.deepEqual(favicon(closedId, closedHash), faviconPNG);
+  menu = openMenu();
   view.webContents.close();
+  assert.throws(() => menuAction(menu, 'reload'));
+  assert.throws(() => favicon(closedId, closedHash));
   assert.equal(window.fullscreen, false);
   assert.equal(state().tabs.length, 1);
   assert.equal(state().tabs[0].url, '');
+  assert.equal(window.title, 'Horizon');
   const replacementId = state().activeId;
   view.webContents.emit('destroyed');
   assert.equal(state().activeId, replacementId);
@@ -739,11 +1140,489 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   for (let index = state().tabs.length; index < 200; index++) command({ type: 'new-tab' });
   assert.deepEqual(view.webContents.popup({ url: 'https://example.com/' }), { action: 'deny' });
   assert.equal(state().tabs.length, 200);
+  const resumeProfile = state().profiles.find(profile => profile.id !== personalId);
+  command({ type: 'switch-profile', id: resumeProfile.id });
   window.emit('closed');
   assert.equal(timers.size, 0);
-  assert.equal(writes.at(-1).downloads[0].status, 'cancelled');
+  assert.equal(readStore(profileStorePath(directory, personalId)).downloads[0].status, 'cancelled');
   assert.equal(shutdownDownload.cancelled, true);
   assert.equal(electron.app.listenerCount('before-quit'), 0);
   assert.equal(view.webContents.destroyed, true);
   assert.equal(handlers.size, 0);
+  assert.equal(loaded.exports.isProfileSession(webSession), false);
+  const freshWindow = new EventEmitter();
+  freshWindow.webContents = new Contents();
+  for (const key of ['isDestroyed', 'getContentBounds', 'setFullScreen', 'setTitle', 'contentView']) freshWindow[key] = window[key];
+  loaded.exports.createBrowser(freshWindow, directory, join(directory, 'downloads'), settings);
+  assert.equal(existsSync(join(directory, 'profiles', work.id)), false, 'Tombstone cleanup retries the store folder');
+  const freshEvent = { sender: freshWindow.webContents, senderFrame: freshWindow.webContents.mainFrame };
+  const resumed = handlers.get('horizon:state')(freshEvent);
+  assert.equal(resumed.activeProfileId, resumeProfile.id);
+  assert.equal(resumed.tabs.length, 1); assert.equal(resumed.tabs[0].url, '');
+  assert.equal(resumed.profiles.find(profile => profile.id === personalId).tabCount, 0);
+  freshWindow.emit('closed');
+  assert.equal(handlers.size, 0); assert.equal(timers.size, 0);
+  for (const unavailable of [true, false]) {
+    const path = profileStorePath(directory, resumeProfile.id), cipher = authenticatedCipher();
+    writeStore(path, sampleStore(directory), cipher);
+    const original = readFileSync(path);
+    if (!unavailable) { original[original.length - 1] ^= 1; writeFileSync(path, original); }
+    electron.safeStorage = unavailable ? { isEncryptionAvailable: () => false } : cipher;
+    loaded.exports.createBrowser(freshWindow, directory, join(directory, 'downloads'), settings);
+    const recovered = handlers.get('horizon:state')(freshEvent);
+    assert.equal(recovered.storageReadError, true);
+    assert.equal(recovered.storageError, false);
+    handlers.get('horizon:command')(freshEvent, { type: 'navigate', input: 'https://session.example/' });
+    views.at(-1).webContents.emit('did-navigate', {}, 'https://session.example/');
+    tick();
+    assert.equal(handlers.get('horizon:state')(freshEvent).store.history[0].url, 'https://session.example/');
+    assert.equal(handlers.get('horizon:state')(freshEvent).storageReadError, true);
+    freshWindow.emit('closed');
+    if (unavailable) assert.deepEqual(readFileSync(path), original, 'Session edits and shutdown leave encrypted bytes intact');
+    else assert.ok(readdirSync(require('node:path').dirname(path)).some(name => name.includes('.corrupt-') && readFileSync(join(require('node:path').dirname(path), name)).equals(original)));
+  }
+});
+
+const faviconPNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
+
+test('settings validate themes, write atomically and preserve corrupt or oversized files', t => {
+  const directory = temporaryDirectory(t, 'settings');
+  const path = join(directory, 'settings.json');
+  const changed = [];
+  const settings = createSettings(path, value => changed.push(value));
+  assert.equal(settings.theme, 'system');
+  assert.equal(settings.contrast, 'standard');
+  assert.equal(settings.migrationAllowed, true);
+  settings.setTheme('amber', true);
+  settings.setTheme('daylight', true);
+  assert.equal(settings.theme, 'amber');
+  assert.equal(settings.migrationAllowed, false);
+  assert.deepEqual(changed, ['amber']);
+  settings.setTheme('system', false);
+  assert.equal(settings.theme, 'system');
+  assert.equal(createSettings(path, () => {}).migrationAllowed, false);
+  assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
+  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 1, theme, contrast: 'standard' }), true);
+  for (const value of [null, [], {}, { version: 2, theme: 'system' }, { version: 1, theme: 'dark' }, { version: 1, theme: 'amber', extra: true }, { version: 1, theme: 'amber' }, { version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', contrast: null }, { version: 1, theme: 'amber', contrast: 'high', extra: true }]) {
+    assert.equal(validateSettings(value), false);
+    assert.throws(() => writeSettings(path, value));
+  }
+  for (const corrupt of ['{broken', JSON.stringify({ version: 2, theme: 'amber' }), ' '.repeat(4097)]) {
+    writeFileSync(path, corrupt);
+    assert.deepEqual(readSettings(path), { version: 1, theme: 'system', contrast: 'standard' });
+    assert.ok(readdirSync(directory).filter(name => name.startsWith('settings.json.corrupt-')).some(name => readFileSync(join(directory, name), 'utf8') === corrupt));
+  }
+  const existing = createSettings(path, () => {});
+  existing.setTheme('amber', true);
+  assert.equal(existing.theme, 'system');
+});
+
+test('favicon URLs exclude privileged schemes, credentials and unbounded inputs', () => {
+  for (const url of ['https://example.com/icon.png', 'https://8.8.8.8/icon', 'https://[2606:4700:4700::1111]/icon']) assert.equal(isFaviconURL(url), true);
+  for (const url of [null, {}, '', 'about:blank', 'file:///private', 'horizon://app/', 'data:image/png,bytes', 'blob:https://example.com/icon', 'https://user@example.com/icon', ' https://example.com/icon', 'https://example.com/\nicon', 'https://example.com/' + 'a'.repeat(8192)]) assert.equal(isFaviconURL(url), false);
+});
+
+const privateFaviconHosts = ['127.0.0.1', '127.99.1.2', '10.0.0.1', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.1.2', '169.254.169.254', '100.64.0.1', '100.127.255.255', '0.0.0.0', '0.1.2.3', '[::]', '[::1]', '[fc00::1]', '[fdff::1]', '[fe80::1]', '[febf::1]', '[::ffff:127.0.0.1]', '[::ffff:192.168.1.1]', 'localhost', 'sub.localhost', 'printer.local', 'server.internal', 'router.lan', 'host.home.arpa', 'home.arpa', 'LOCALHOST.'];
+test('favicon destinations allow the page host and public hosts and refuse private candidates and every redirect hop', async () => {
+  const signal = new AbortController().signal;
+  for (const host of privateFaviconHosts) {
+    const url = `http://${host}/icon`;
+    assert.equal(isFaviconURL(url), false, host);
+    assert.equal(isFaviconURL(url, `http://${host}/page`), true, `Same host: ${host}`);
+    const calls = [];
+    const target = { async fetch(value) { calls.push(value); return new Response(faviconPNG); } };
+    assert.equal(await fetchFavicon(target, [url], signal, 'https://example.com/'), null);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(await fetchFavicon(target, [url], signal, `http://${host}/page`), faviconPNG);
+    calls.length = 0;
+    target.fetch = async value => { calls.push(value); return new Response(null, { status: 302, headers: { location: calls.length === 1 ? 'https://cdn.example/hop' : url } }); };
+    assert.equal(await fetchFavicon(target, ['https://example.com/start'], signal, 'https://example.com/page'), null);
+    assert.deepEqual(calls, ['https://example.com/start', 'https://cdn.example/hop']);
+  }
+});
+
+test('favicon streaming enforces the 256 KB cap even without a trustworthy length header', async () => {
+  assert.equal((await readFavicon(new Response(faviconPNG))).equals(faviconPNG), true);
+  let cancelled = false;
+  const oversize = new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(FAVICON_LIMIT)); controller.enqueue(new Uint8Array(1)); },
+    cancel() { cancelled = true; },
+  });
+  await assert.rejects(readFavicon(new Response(oversize, { headers: { 'content-length': '1' } })), /size limit/);
+  assert.equal(cancelled, true);
+  await assert.rejects(readFavicon(new Response(faviconPNG, { headers: { 'content-length': String(FAVICON_LIMIT + 1) } })), /response/);
+  const exact = Buffer.alloc(FAVICON_LIMIT); faviconPNG.copy(exact);
+  assert.equal((await readFavicon(new Response(exact))).length, FAVICON_LIMIT);
+});
+
+test('favicon fetching preserves validated raster bytes without decoding, tries candidates in order and validates redirects', async t => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', duration => { assert.equal(duration, 5000); return timeout(duration); });
+  const controller = new AbortController();
+  const calls = [];
+  const target = { async fetch(url, options) {
+    calls.push(url); assert.equal(options.redirect, 'manual'); assert.ok(options.signal instanceof AbortSignal);
+    if (url.endsWith('/redirect')) return new Response(null, { status: 302, headers: { location: 'file:///private' } });
+    if (url.endsWith('/svg')) return new Response('<svg xmlns="http://www.w3.org/2000/svg"></svg>', { headers: { 'content-type': 'image/png' } });
+    if (url.endsWith('/xml')) return new Response(faviconPNG, { headers: { 'content-type': 'image/svg+xml' } });
+    if (url.endsWith('/oversize')) return new Response(Buffer.alloc(FAVICON_LIMIT + 1));
+    if (url.endsWith('/text')) return new Response('not an image');
+    if (url.endsWith('/broken')) return new Response(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    return new Response(faviconPNG);
+  } };
+  const candidates = ['data:image/png,bytes', ...['redirect', 'svg', 'xml', 'oversize', 'text', 'png', 'unused'].map(name => 'https://example.com/' + name)];
+  assert.deepEqual(await fetchFavicon(target, candidates, controller.signal), faviconPNG);
+  assert.deepEqual(calls, candidates.slice(1, -1));
+  assert.equal(await fetchFavicon(target, ['https://example.com/svg', 'https://example.com/text'], controller.signal), null);
+  const signatureOnly = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.deepEqual(await fetchFavicon(target, ['https://example.com/broken'], controller.signal), signatureOnly);
+  const redirects = [];
+  const redirecting = { async fetch(url) { redirects.push(url); return redirects.length === 1 ? new Response(null, { status: 302, headers: { location: '/png' } }) : new Response(faviconPNG); } };
+  assert.deepEqual(await fetchFavicon(redirecting, ['http://example.com/start'], controller.signal), faviconPNG);
+  assert.deepEqual(redirects, ['http://example.com/start', 'http://example.com/png']);
+  controller.abort();
+  const before = calls.length;
+  assert.equal(await fetchFavicon(target, ['https://example.com/png'], controller.signal), null);
+  assert.equal(calls.length, before);
+});
+
+
+test('sandboxed preload validates the startup theme and exposes only the frozen browser API', async () => {
+  const { compileFunction } = require('node:vm');
+  const filename = resolve('dist/electron/preload.js');
+  for (const contrast of ['standard', 'high', 'invalid', '']) for (const [argument, expected] of [['system', 'system'], ['amber', 'amber'], ['daylight', 'daylight'], ['dark', 'system'], ['', 'system']]) {
+    let exposed;
+    const invocations = [];
+    const electron = {
+      contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'horizon'); exposed = value; } },
+      ipcRenderer: { invoke(...args) { invocations.push(args); return Promise.resolve(null); }, on() {}, removeListener() {} },
+    };
+    compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'process'])({}, name => { assert.equal(name, 'electron'); return electron; }, { argv: ['electron', '--horizon-theme=' + argument, '--horizon-contrast=' + contrast, '--horizon-theme-migrate=1'] });
+    assert.equal(exposed.initialTheme, expected);
+    assert.equal(exposed.initialContrast, contrast === 'high' ? 'high' : 'standard');
+    assert.equal(exposed.themeMigration, true);
+    assert.equal(Object.isFrozen(exposed), true);
+    assert.deepEqual(Object.keys(exposed).sort(), ['capture', 'command', 'getFavicon', 'getLanguage', 'getState', 'initialContrast', 'initialTheme', 'onContextMenu', 'onShortcut', 'onState', 'setContentArea', 'themeMigration', 'windowAction']);
+    await exposed.getFavicon('tab', 'a'.repeat(32));
+    assert.deepEqual(invocations, [['horizon:favicon', 'tab', 'a'.repeat(32)]]);
+  }
+});
+
+test('contrast defaults follow the OS only on first run and legacy settings migrate atomically', t => {
+  const directory = temporaryDirectory(t, 'contrast');
+  const first = join(directory, 'first.json');
+  const settings = createSettings(first, () => {}, true);
+  assert.deepEqual(readSettings(first), { version: 1, theme: 'system', contrast: 'high' });
+  settings.setTheme('amber', true);
+  assert.equal(settings.contrast, 'high');
+  settings.setContrast('standard');
+  assert.equal(settings.theme, 'amber');
+  assert.deepEqual(readSettings(first, true), { version: 1, theme: 'amber', contrast: 'standard' });
+  assert.throws(() => settings.setContrast('invalid'));
+  assert.equal(settings.contrast, 'standard');
+  for (const theme of ['system', 'amber', 'daylight']) {
+    const legacy = join(directory, theme + '.json');
+    writeFileSync(legacy, JSON.stringify({ version: 1, theme }));
+    assert.deepEqual(readSettings(legacy, true), { version: 1, theme, contrast: 'standard' });
+    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 1, theme, contrast: 'standard' });
+    assert.equal(createSettings(legacy, () => {}, true).migrationAllowed, false);
+  }
+  assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
+  const blocked = join(directory, 'blocked');
+  writeFileSync(blocked, 'file');
+  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 1, theme: 'system', contrast: 'high' });
+  const unavailable = createSettings(join(blocked, 'settings.json'), () => {}, true);
+  assert.throws(() => unavailable.setContrast('standard'));
+  assert.equal(unavailable.contrast, 'high');
+});
+
+test('renderer applies both startup settings and preserves contrast across system scheme changes', () => {
+  const { compileFunction } = require('node:vm');
+  const { transpileModule, ModuleKind } = require('typescript');
+  const source = transpileModule(readFileSync('src/theme.ts', 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS } }).outputText;
+  for (const theme of ['system', 'amber', 'daylight']) for (const contrast of ['standard', 'high']) {
+    const root = { dataset: {} };
+    let changed;
+    const media = { matches: false, addEventListener(name, handler) { assert.equal(name, 'change'); changed = handler; } };
+    const exported = {};
+    compileFunction(source, ['exports', 'window', 'document', 'matchMedia'])(exported, { horizon: { initialTheme: theme, initialContrast: contrast } }, { documentElement: root }, query => { assert.equal(query, '(prefers-color-scheme: dark)'); return media; });
+    exported.applyTheme(theme, contrast);
+    assert.deepEqual(root.dataset, { theme: theme === 'system' ? 'daylight' : theme, contrast });
+    media.matches = true; changed();
+    assert.deepEqual(root.dataset, { theme: theme === 'system' ? 'amber' : theme, contrast });
+    exported.applyTheme('system', contrast === 'high' ? 'standard' : 'high');
+    assert.equal(root.dataset.theme, 'amber');
+    media.matches = false; changed();
+    assert.deepEqual(root.dataset, { theme: 'daylight', contrast: contrast === 'high' ? 'standard' : 'high' });
+  }
+});
+
+test('main paints the resolved palette and passes both settings before loading chrome', async t => {
+  const { EventEmitter } = require('node:events');
+  const { compileFunction } = require('node:vm');
+  const filename = resolve('dist/electron/main.js');
+  const directory = temporaryDirectory(t, 'first-paint');
+  const localRequire = require('node:module').createRequire(filename);
+  for (const theme of ['system', 'amber', 'daylight']) for (const contrast of ['standard', 'high']) for (const dark of [false, true]) {
+    const windows = [];
+    let painted;
+    const settings = { theme, contrast, migrationAllowed: false };
+    const nativeTheme = new EventEmitter();
+    nativeTheme.shouldUseDarkColors = dark;
+    nativeTheme.shouldUseHighContrastColors = true;
+    const app = new EventEmitter();
+    app.isPackaged = true;
+    app.enableSandbox = () => {};
+    app.whenReady = () => Promise.resolve();
+    app.getPath = () => directory;
+    app.getLocale = () => 'en';
+    app.exit = () => assert.fail('Main startup failed');
+    const electron = {
+      app, nativeTheme,
+      protocol: { registerSchemesAsPrivileged() {} },
+      screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1440, height: 900 } }) },
+      session: { defaultSession: { protocol: {} } },
+      ipcMain: { handle() {} },
+      BrowserWindow: class extends EventEmitter {
+        constructor(options) {
+          super(); windows.push(this); this.options = options;
+          this.webContents = new EventEmitter();
+        }
+        setBackgroundColor(value) { painted = value; }
+        removeMenu() {}
+        async loadURL(url) {
+          assert.equal(url, 'horizon://app/');
+          const darkScheme = theme === 'amber' || theme === 'system' && dark;
+          const expected = contrast === 'high' ? darkScheme ? '#000000' : '#ffffff' : darkScheme ? '#171514' : '#eeebe9';
+          assert.equal(this.options.backgroundColor, expected);
+          assert.ok(this.options.webPreferences.additionalArguments.includes('--horizon-theme=' + theme));
+          assert.ok(this.options.webPreferences.additionalArguments.includes('--horizon-contrast=' + contrast));
+          this.loaded = true;
+        }
+      },
+    };
+    let changed;
+    compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])( {}, name => {
+      if (name === 'electron') return electron;
+      if (name === './settings') return { createSettings(path, callback, high) { assert.equal(path, join(directory, 'settings.json')); assert.equal(high, true); changed = callback; return settings; } };
+      if (name === './security') return { START_URL: 'horizon://app/', secureSession() {} };
+      if (name === './protocol') return { serveHorizon: async () => {} };
+      if (name === './browser') return { createBrowser: () => ({ layout() {} }) };
+      return localRequire(name);
+    }, require('node:path').dirname(filename));
+    await new Promise(done => setImmediate(done));
+    const window = windows[0];
+    assert.equal(window.loaded, true);
+    settings.contrast = contrast === 'high' ? 'standard' : 'high';
+    changed();
+    const darkScheme = theme === 'amber' || theme === 'system' && dark;
+    assert.equal(painted, settings.contrast === 'high' ? darkScheme ? '#000000' : '#ffffff' : darkScheme ? '#171514' : '#eeebe9');
+    nativeTheme.shouldUseDarkColors = !dark;
+    nativeTheme.emit('updated');
+    if (theme === 'system') assert.equal(painted, settings.contrast === 'high' ? dark ? '#ffffff' : '#000000' : dark ? '#eeebe9' : '#171514');
+    window.emit('closed');
+    assert.equal(nativeTheme.listenerCount('updated'), 0);
+  }
+});
+
+function authenticatedCipher() {
+  const key = require('node:crypto').randomBytes(32);
+  return {
+    isEncryptionAvailable: () => true,
+    encryptString(value) {
+      const iv = require('node:crypto').randomBytes(12);
+      const cipher = createCipheriv('aes-256-gcm', key, iv);
+      const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+      return Buffer.concat([iv, cipher.getAuthTag(), encrypted]);
+    },
+    decryptString(bytes) {
+      const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(0, 12));
+      decipher.setAuthTag(bytes.subarray(12, 28));
+      return Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8');
+    },
+  };
+}
+
+test('profile registry validates exact shapes, UUIDs, partitions, names, colours, counts and tombstones', () => {
+  const personal = makeProfile('Personal', 'amber', true), work = makeProfile('Work', 'blue');
+  const valid = { version: 1, activeId: personal.id, profiles: [personal, work], tombstones: ['persist:profile-' + randomUUID()] };
+  assert.equal(validateRegistry(valid), true);
+  for (const color of ['amber', 'blue', 'green', 'red', 'yellow', 'grey', 'purple', 'cyan']) assert.equal(validateRegistry({ ...valid, profiles: [{ ...personal, color }, work] }), true);
+  for (const value of [null, [], {}, { ...valid, version: 2 }]) assert.equal(validateRegistry(value), false);
+  const mutations = [
+    registry => { registry.extra = true; },
+    registry => { delete registry.tombstones; },
+    registry => { registry.activeId = randomUUID(); },
+    registry => { registry.activeId = 'not-a-uuid'; },
+    registry => { registry.profiles = []; },
+    registry => { registry.profiles = Array.from({ length: 21 }, (_, index) => makeProfile('Profile ' + index, 'cyan')); },
+    registry => { registry.profiles = new Array(1); },
+    registry => { registry.profiles[0].extra = true; },
+    registry => { delete registry.profiles[0].createdAt; },
+    registry => { registry.profiles[0].id = '../outside'; },
+    registry => { registry.profiles[1].id = registry.profiles[0].id; },
+    registry => { registry.profiles[1].partition = 'persist:web'; },
+    registry => { registry.profiles[0].partition = 'web'; },
+    registry => { registry.profiles[0].partition = 'persist:profile-not-a-uuid'; },
+    registry => { registry.profiles[0].partition = 'persist:profile-' + randomUUID() + '/../outside'; },
+    registry => { registry.profiles[0].name = ''; },
+    registry => { registry.profiles[0].name = '   '; },
+    registry => { registry.profiles[0].name = ' Personal'; },
+    registry => { registry.profiles[0].name = 'x'.repeat(41); },
+    registry => { registry.profiles[0].name = 'Line\nbreak'; },
+    registry => { registry.profiles[0].name = 'Control\u0085'; },
+    registry => { registry.profiles[0].name = 1; },
+    registry => { registry.profiles[1].name = 'PERSONAL'; },
+    registry => { registry.profiles[0].color = '#ff0000'; },
+    registry => { registry.profiles[0].color = { toString: () => 'amber' }; },
+    registry => { registry.profiles[0].createdAt = Infinity; },
+    registry => { registry.profiles[0].createdAt = -1; },
+    registry => { registry.profiles[0].createdAt = 8640000000000001; },
+    registry => { registry.tombstones = null; },
+    registry => { registry.tombstones = [personal.partition]; },
+    registry => { registry.tombstones = ['persist:profile-' + randomUUID(), '../outside']; },
+    registry => { registry.tombstones = [work.partition]; },
+    registry => { registry.tombstones.push(registry.tombstones[0]); },
+    registry => { registry.tombstones = [123]; },
+  ];
+  for (const mutate of mutations) { const registry = structuredClone(valid); mutate(registry); assert.equal(validateRegistry(registry), false); }
+  const twenty = Array.from({ length: 20 }, (_, index) => makeProfile('Profile ' + index, 'grey'));
+  assert.equal(validateRegistry({ version: 1, activeId: twenty[19].id, profiles: twenty, tombstones: ['persist:web'] }), true);
+});
+
+test('profile registry recovers malformed and oversized files, preserves originals and writes atomically', t => {
+  const directory = temporaryDirectory(t, 'registry');
+  const path = join(directory, 'profiles.json');
+  const first = readRegistry(path, 'es');
+  assert.deepEqual(first.profiles.map(profile => [profile.name, profile.color]), [['Personal', 'amber'], ['Trabajo', 'blue']]);
+  assert.equal(first.profiles[0].partition, 'persist:web');
+  assert.equal(first.activeId, first.profiles[0].id);
+  assert.equal(validateRegistry(first), true);
+  assert.deepEqual(readRegistry(path, 'en'), first);
+  writeRegistry(path, { ...first, activeId: first.profiles[1].id });
+  assert.equal(readRegistry(path, 'es').activeId, first.profiles[1].id);
+  for (const corrupt of ['{broken', JSON.stringify({ ...first, activeId: 'unknown' }), ' '.repeat(64 * 1024 + 1)]) {
+    writeFileSync(path, corrupt);
+    const recovered = readRegistry(path, 'en');
+    assert.equal(validateRegistry(recovered), true);
+    assert.deepEqual(recovered.profiles.map(profile => profile.name), ['Personal', 'Work']);
+    assert.ok(readdirSync(directory).some(name => name.startsWith('profiles.json.corrupt-') && readFileSync(join(directory, name), 'utf8') === corrupt));
+  }
+  assert.throws(() => writeRegistry(path, { ...first, profiles: [] }));
+  assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
+  const blocked = join(directory, 'blocked'); writeFileSync(blocked, 'file');
+  assert.equal(validateRegistry(readRegistry(join(blocked, 'profiles.json'), 'en')), true);
+});
+
+test('profile stores encrypt through an injected cipher and retain tampered or invalid encrypted originals', t => {
+  const directory = temporaryDirectory(t, 'encrypted');
+  const path = join(directory, 'profile', 'browser-store.json');
+  const cipher = authenticatedCipher();
+  const store = sampleStore(directory);
+  writeStore(path, store, cipher);
+  const encrypted = readFileSync(path);
+  assert.equal(encrypted.includes(Buffer.from('https://example.com/')), false);
+  assert.deepEqual(readStore(path, cipher), store);
+  const tampered = Buffer.from(encrypted); tampered[tampered.length - 1] ^= 1;
+  writeFileSync(path, tampered);
+  const readStatus = { readError: false, memoryOnly: false };
+  assert.deepEqual(readStore(path, cipher, readStatus), { version: 1, history: [], bookmarks: [], downloads: [] });
+  assert.deepEqual(readStatus, { readError: true, memoryOnly: false });
+  assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(tampered)));
+  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 2 }))]);
+  writeFileSync(path, invalid);
+  assert.equal(readStore(path, cipher).history.length, 0);
+  assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(invalid)));
+  const unavailable = { isEncryptionAvailable: () => false };
+  writeStore(path, store, cipher);
+  const kept = readFileSync(path), status = { readError: false, memoryOnly: false };
+  assert.equal(readStore(path, unavailable, status).history.length, 0);
+  assert.deepEqual(status, { readError: true, memoryOnly: true });
+  assert.deepEqual(readFileSync(path), kept);
+  assert.throws(() => writeStore(path, store, unavailable), /encryption/);
+  assert.throws(() => writeStore(path, store), /encryption/);
+  assert.deepEqual(readFileSync(path), kept);
+  const plain = join(directory, 'plain.json');
+  writeStore(plain, store, unavailable);
+  assert.deepEqual(JSON.parse(readFileSync(plain, 'utf8')), store);
+  if (process.platform !== 'win32') assert.equal(require('node:fs').statSync(plain).mode & 0o777, 0o600);
+  assert.deepEqual(readStore(plain, cipher), store, 'Plain stores are upgraded when encryption becomes available');
+  assert.equal(readFileSync(plain).includes(Buffer.from('https://example.com/')), false);
+  assert.equal(readdirSync(join(directory, 'profile')).some(name => name.endsWith('.tmp')), false);
+});
+
+test('legacy browsing migrates into Personal and archives the owner-only original only after a successful write', t => {
+  const directory = temporaryDirectory(t, 'migration');
+  const registry = readRegistry(join(directory, 'profiles.json'), 'en');
+  const legacy = join(directory, 'browser-store.json');
+  const store = sampleStore(directory), cipher = authenticatedCipher();
+  const archived = `${legacy}.migrated`;
+  writeFileSync(archived, 'old backup');
+  writeStore(legacy, store);
+  migrateStore(directory, registry, cipher);
+  assert.equal(existsSync(legacy), false);
+  assert.deepEqual(JSON.parse(readFileSync(archived, 'utf8')), store);
+  if (process.platform !== 'win32') assert.equal(require('node:fs').statSync(archived).mode & 0o777, 0o600);
+  const personal = registry.profiles.find(profile => profile.partition === 'persist:web');
+  const destination = profileStorePath(directory, personal.id);
+  assert.deepEqual(readStore(destination, cipher), store);
+  assert.equal(existsSync(profileStorePath(directory, registry.profiles[1].id)), false);
+  const newer = { ...store, history: [{ ...store.history[0], title: 'Newer data' }] };
+  const older = { ...store, bookmarks: [] };
+  writeStore(destination, newer, cipher); writeStore(legacy, older);
+  migrateStore(directory, registry, cipher);
+  assert.deepEqual(readStore(destination, cipher), newer, 'A retry after a crash preserves newer data');
+  assert.equal(existsSync(legacy), false);
+  assert.deepEqual(JSON.parse(readFileSync(archived, 'utf8')), older, 'The archive is replaced by the migrated original');
+  const failed = join(directory, 'failed'); mkdirSync(failed);
+  const failedRegistry = readRegistry(join(failed, 'profiles.json'), 'en');
+  writeStore(join(failed, 'browser-store.json'), store);
+  writeFileSync(join(failed, 'profiles'), 'cannot write a directory here');
+  assert.throws(() => migrateStore(failed, failedRegistry, cipher));
+  assert.equal(existsSync(join(failed, 'browser-store.json')), true);
+  assert.deepEqual(readStore(join(failed, 'browser-store.json')), store);
+});
+
+test('tombstones remove only Electron persistent partition directories and remain pending on unsafe junctions', t => {
+  const directory = temporaryDirectory(t, 'partitions');
+  const path = join(directory, 'profiles.json');
+  let registry = readRegistry(path, 'en');
+  const partition = 'persist:profile-' + randomUUID();
+  registry = { ...registry, tombstones: [partition] }; writeRegistry(path, registry);
+  const root = join(directory, 'Partitions'); mkdirSync(root);
+  const dead = join(root, partition.slice('persist:'.length)); mkdirSync(dead); writeFileSync(join(dead, 'Cookies'), 'old sign-ins');
+  const live = join(root, 'web'); mkdirSync(live); writeFileSync(join(live, 'Cookies'), 'kept sign-ins');
+  const outside = join(directory, 'outside'); mkdirSync(outside); writeFileSync(join(outside, 'keep'), 'keep');
+  const cleaned = cleanupPartitions(directory, path, registry);
+  assert.equal(existsSync(dead), false);
+  assert.equal(readFileSync(join(live, 'Cookies'), 'utf8'), 'kept sign-ins');
+  assert.deepEqual(cleaned.tombstones, []);
+  assert.deepEqual(readRegistry(path, 'en').tombstones, []);
+  assert.throws(() => removeProfileDirectory(root, '../outside'));
+  assert.equal(readFileSync(join(outside, 'keep'), 'utf8'), 'keep');
+  const linkedSession = join(directory, 'linked-session'); mkdirSync(linkedSession);
+  symlinkSync(outside, join(linkedSession, 'Partitions'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => cleanupPartitions(linkedSession, path, registry), /Unsafe/);
+  symlinkSync(outside, dead, process.platform === 'win32' ? 'junction' : 'dir');
+  writeRegistry(path, registry);
+  assert.throws(() => cleanupPartitions(directory, path, registry), /Unsafe/);
+  assert.deepEqual(readRegistry(path, 'en').tombstones, [partition]);
+  assert.equal(readFileSync(join(outside, 'keep'), 'utf8'), 'keep');
+});
+
+test('all profile commands reject extra keys, invalid names, ids, colours and unknown profiles', () => {
+  const id = randomUUID(), known = new Set([id]);
+  const valid = [{ type: 'switch-profile', id }, { type: 'delete-profile', id }, { type: 'create-profile', name: ' New ', color: 'cyan' }, { type: 'update-profile', id, name: 'New', color: 'purple' }];
+  for (const command of valid) {
+    assert.deepEqual(validateCommand(command, known), command);
+    assert.throws(() => validateCommand({ ...command, extra: true }, known));
+    for (const key of Object.keys(command)) { const missing = { ...command }; delete missing[key]; assert.throws(() => validateCommand(missing, known)); }
+  }
+  for (const type of ['switch-profile', 'delete-profile', 'update-profile']) for (const invalid of ['', '../escape', null, 5, randomUUID()]) {
+    assert.throws(() => validateCommand({ type, id: invalid, ...(type === 'update-profile' ? { name: 'Valid', color: 'amber' } : {}) }, known));
+  }
+  for (const type of ['create-profile', 'update-profile']) {
+    for (const name of ['', ' ', '\nname', 'Control\u0085', 'x'.repeat(41), null, {}, 5]) assert.throws(() => validateCommand({ type, name, color: 'amber', ...(type === 'update-profile' ? { id } : {}) }, known));
+    for (const color of ['orange', '#ffffff', null, 5, {}]) assert.throws(() => validateCommand({ type, name: 'Valid', color, ...(type === 'update-profile' ? { id } : {}) }, known));
+  }
 });

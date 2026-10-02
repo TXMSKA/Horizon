@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import { IPC } from '../src/shared/api';
 import { hardenContents, secureSession, START_URL, validateSender } from './security';
 import { serveHorizon } from './protocol';
-import { createBrowser } from './browser';
+import { createBrowser, isProfileSession } from './browser';
+import { cleanupPartitions, readRegistry } from './profiles';
+import { createSettings } from './settings';
 
 // The approved design frame: the window and the interface scale are both sized against it.
 const DESIGN_WIDTH = 1440;
@@ -25,13 +27,23 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 app.on('web-contents-created', (_event, contents) => {
-  hardenContents(contents, contents.session === session.fromPartition('persist:web'));
+  hardenContents(contents, isProfileSession(contents.session));
 });
 
 app.whenReady().then(async () => {
+  const registryPath = resolve(app.getPath('userData'), 'profiles.json');
+  const language = app.getLocale().toLowerCase().split('-')[0] === 'es' ? 'es' : 'en';
+  const registry = cleanupPartitions(app.getPath('sessionData'), registryPath, readRegistry(registryPath, language), app.getPath('userData'));
   secureSession(session.defaultSession);
   const tokens = readFileSync(resolve(__dirname, '../tokens.css'), 'utf8');
-  const page = tokens.match(new RegExp(`--palette-${nativeTheme.shouldUseDarkColors ? 'amber' : 'daylight'}-page:\\s*(#[a-fA-F0-9]{6})`))?.[1];
+  const settings = createSettings(resolve(app.getPath('userData'), 'settings.json'), () => { window.setBackgroundColor(background()); }, nativeTheme.shouldUseHighContrastColors);
+  const background = () => {
+    const resolved = settings.theme === 'system' ? nativeTheme.shouldUseDarkColors ? 'amber' : 'daylight' : settings.theme;
+    const palette = settings.contrast === 'high' ? resolved === 'amber' ? 'contrast-dark' : 'contrast-light' : resolved;
+    const page = tokens.match(new RegExp(`--palette-${palette}-page:\\s*(#[a-fA-F0-9]{6})`))?.[1];
+    if (!page) throw new Error('Missing theme background');
+    return page;
+  };
   // A work area smaller than the design frame gets a window that still leaves room around it.
   const area = screen.getPrimaryDisplay().workAreaSize;
   const window = new BrowserWindow({
@@ -42,9 +54,10 @@ app.whenReady().then(async () => {
     minHeight: 480,
     frame: false,
     show: false,
-    backgroundColor: page,
+    backgroundColor: background(),
     webPreferences: {
       preload: resolve(__dirname, 'preload.js'),
+      additionalArguments: [`--horizon-theme=${settings.theme}`, `--horizon-contrast=${settings.contrast}`, `--horizon-theme-migrate=${settings.migrationAllowed ? 1 : 0}`],
       nodeIntegration: false,
       nodeIntegrationInWorker: false,
       nodeIntegrationInSubFrames: false,
@@ -57,8 +70,11 @@ app.whenReady().then(async () => {
       devTools: !app.isPackaged,
     },
   });
+  const systemTheme = () => { if (settings.theme === 'system') window.setBackgroundColor(background()); };
+  nativeTheme.on('updated', systemTheme);
+  window.once('closed', () => nativeTheme.removeListener('updated', systemTheme));
   window.removeMenu();
-  const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'));
+  const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry);
   // The interface draws at 92% of the design frame and shrinks with a smaller window, never below 75%, so text and targets stay usable.
   const fitScale = () => {
     const { width, height } = window.getContentBounds();

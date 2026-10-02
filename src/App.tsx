@@ -1,21 +1,35 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Camera, ChevronDown, Download, Ellipsis,
-  FileText, FolderOpen, History, House, LoaderCircle, Minus, NotebookPen, Plus,
+  ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Camera, Download, Ellipsis,
+  ClipboardPaste, Copy, ExternalLink, FileText, FolderOpen, History, House, Image, LoaderCircle, Minus, NotebookPen, Plus, Redo2, Scissors, SpellCheck, TextSelect, Undo2,
   RotateCw, Search, SearchX, ServerOff, ShieldAlert, ShieldCheck, Sparkles, Square, Star, Trash2, TriangleAlert, WifiOff, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
-import type { BrowserCommand, BrowserShortcut, BrowserState, Language, WindowAction } from './shared/api';
+import type { BrowserCommand, BrowserShortcut, BrowserState, ContextMenuItemId, Language, PageContextMenu, WindowAction } from './shared/api';
 import { browserShortcut } from './shared/shortcuts';
+import { applyTheme } from './theme';
+import { Menu } from './Menu';
+import { NewProfilePopover, ProfileControl, ProfilesMenu, ProfilesPanel } from './Profiles';
+import { EmptyBookmarks, EmptyDownloads, EmptyHistory, NoResults } from './EmptyState';
 
-type Panel = 'history' | 'bookmarks' | 'downloads' | null;
+type LibraryPanel = 'history' | 'bookmarks' | 'downloads';
+type Panel = LibraryPanel | 'profiles' | null;
 const sites = {
   wikipedia: 'https://www.wikipedia.org/', youtube: 'https://www.youtube.com/',
   maps: 'https://www.google.com/maps', news: 'https://www.bbc.com/news', mail: 'https://mail.google.com/',
 } as const;
+const pageMenuRows: Record<Exclude<ContextMenuItemId, `spell:${string}`>, { label: CopyKey; icon: LucideIcon }> = {
+  'open-link': { label: 'openLink', icon: ExternalLink }, 'copy-link': { label: 'copyLink', icon: Copy },
+  'open-image': { label: 'openImage', icon: Image }, 'save-image': { label: 'saveImage', icon: Download },
+  'copy-image': { label: 'copyImage', icon: Copy }, 'copy-image-address': { label: 'copyImageAddress', icon: Copy },
+  copy: { label: 'copy', icon: Copy }, 'search-selection': { label: 'searchWeb', icon: Search },
+  undo: { label: 'undo', icon: Undo2 }, redo: { label: 'redo', icon: Redo2 }, cut: { label: 'cut', icon: Scissors },
+  paste: { label: 'paste', icon: ClipboardPaste }, 'select-all': { label: 'selectAll', icon: TextSelect },
+  back: { label: 'back', icon: ArrowLeft }, forward: { label: 'forward', icon: ArrowRight }, reload: { label: 'reload', icon: RotateCw },
+};
 
 function pageError(name: string): { heading: CopyKey; sentence: CopyKey; icon: LucideIcon } {
   if (['ERR_NAME_NOT_RESOLVED', 'ERR_NAME_RESOLUTION_FAILED'].includes(name)) return { heading: 'siteNotFound', sentence: 'checkAddress', icon: SearchX };
@@ -40,23 +54,23 @@ export function App({ language }: { language: Language }) {
   const [startSearch, setStartSearch] = useState('');
   const [panel, setPanel] = useState<Panel>(null);
   const [announcement, setAnnouncement] = useState('');
-  const [undo, setUndo] = useState<{ kind: Exclude<Panel, null>; message: CopyKey } | null>(null);
+  const [undo, setUndo] = useState<{ kind: LibraryPanel; message: CopyKey } | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const undoGeneration = useRef(0);
   const undoTimeout = useRef<number | undefined>(undefined);
   const [filter, setFilter] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState<'menu' | 'new' | null>(null);
+  const profileByKeyboard = useRef(false);
+  const profileButtonRef = useRef<HTMLButtonElement>(null);
+  const [contextMenu, setContextMenu] = useState<PageContextMenu | null>(null);
+  const contextMenuRef = useRef<PageContextMenu | null>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [findText, setFindText] = useState('');
   const [renameUrl, setRenameUrl] = useState('');
   const [renameTitle, setRenameTitle] = useState('');
-  const [theme, setTheme] = useState<'amber' | 'daylight'>(() => {
-    try {
-      const saved = localStorage.getItem('horizon-theme');
-      if (saved === 'amber' || saved === 'daylight') return saved;
-    } catch { /* Without storage the system theme applies. */ }
-    return matchMedia('(prefers-color-scheme: dark)').matches ? 'amber' : 'daylight';
-  });
+  const [addressFocused, setAddressFocused] = useState(false);
+  const [favicons, setFavicons] = useState<Record<string, { hash: string; url: string }>>({});
   const headerRef = useRef<HTMLElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
   const focusingClick = useRef(false);
@@ -66,15 +80,14 @@ export function App({ language }: { language: Language }) {
   const areaHidden = useRef(false);
   const findRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
   const menuByKeyboard = useRef(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const active = state?.tabs.find(tab => tab.id === state.activeId);
   const activeUrl = active?.url ?? '';
   const bookmarked = state?.store.bookmarks.some(item => item.url === activeUrl) ?? false;
-  const popover = menuOpen || suggestionsOpen;
+  const popover = menuOpen || Boolean(profileOpen) || suggestionsOpen || Boolean(contextMenu);
   const hidden = Boolean(panel || popover);
-  const pageShowing = Boolean(activeUrl && !active?.error && !active?.fullscreen);
+  const pageShowing = Boolean(activeUrl && !active?.error && (!active?.fullscreen || contextMenu));
   const failure = active?.error ? pageError(active.error) : null;
   const ErrorIcon = failure?.icon ?? TriangleAlert;
   const reportArea = useCallback((hidden: boolean) => {
@@ -85,11 +98,21 @@ export function App({ language }: { language: Language }) {
     try { await window.horizon.command(command); setError(''); return true; }
     catch { setError(text('browserError', language)); return false; }
   }, [language]);
+  const closeContextMenu = useCallback((focusPage = false) => {
+    const menu = contextMenuRef.current;
+    contextMenuRef.current = null; setContextMenu(null);
+    if (menu) void window.horizon.command({ type: 'dismiss-context-menu', id: menu.id }).catch(() => {});
+    if (focusPage) requestAnimationFrame(() => { void run({ type: 'focus-page' }); });
+  }, [run]);
+  useEffect(() => window.horizon.onContextMenu(menu => {
+    contextMenuRef.current = menu; setContextMenu(menu);
+    if (menu) { setProfileOpen(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }
+  }), []);
   const dismissUndo = useCallback(() => {
     undoGeneration.current++; window.clearTimeout(undoTimeout.current); undoTimeout.current = undefined;
     setUndo(null); setConfirmClear(false);
   }, []);
-  const destructive = async (command: BrowserCommand, kind: Exclude<Panel, null>, message: CopyKey) => {
+  const destructive = async (command: BrowserCommand, kind: LibraryPanel, message: CopyKey) => {
     dismissUndo();
     const generation = undoGeneration.current;
     undoTimeout.current = window.setTimeout(() => { if (undoGeneration.current === generation) dismissUndo(); }, 8000);
@@ -98,9 +121,10 @@ export function App({ language }: { language: Language }) {
   };
   const focusAddress = useCallback(() => {
     dismissUndo();
-    setPanel(null); setMenuOpen(false);
+    closeContextMenu();
+    setPanel(null); setMenuOpen(false); setProfileOpen(null);
     addressRef.current?.focus(); addressRef.current?.select();
-  }, [dismissUndo]);
+  }, [dismissUndo, closeContextMenu]);
   const closeFind = useCallback(() => {
     setFindOpen(false); setFindText(''); void run({ type: 'stop-find' });
   }, [run]);
@@ -108,13 +132,15 @@ export function App({ language }: { language: Language }) {
     // A panel covers the page, so a search in it has nothing left to show.
     if (next) closeFind();
     dismissUndo();
-    setFilter(''); setRenameUrl(''); setPanel(next); setMenuOpen(false); setSuggestionsOpen(false);
-  }, [closeFind, dismissUndo]);
+    closeContextMenu();
+    setProfileOpen(null); setFilter(''); setRenameUrl(''); setPanel(next); setMenuOpen(false); setSuggestionsOpen(false);
+  }, [closeFind, dismissUndo, closeContextMenu]);
   const navigate = (input: string) => {
     setDirty(false);
     if (!input.trim()) return;
     dismissUndo();
-    setSuggestionsOpen(false); setMenuOpen(false); setPanel(null); setStartSearch('');
+    closeContextMenu();
+    setProfileOpen(null); setSuggestionsOpen(false); setMenuOpen(false); setPanel(null); setStartSearch('');
     void run({ type: 'navigate', input }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); });
   };
 
@@ -140,6 +166,8 @@ export function App({ language }: { language: Language }) {
         }
       }
       previous = next;
+      applyTheme(next.theme, next.contrast);
+      document.title = current?.url && current.url !== 'about:blank' ? `${current.title || current.url} - ${text('product', language)}` : text('product', language);
       setState(next);
     };
     const unsubscribe = window.horizon.onState(receive);
@@ -148,9 +176,25 @@ export function App({ language }: { language: Language }) {
     });
     return () => { mounted = false; unsubscribe(); };
   }, [language]);
-  useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
+  const faviconKey = JSON.stringify(state?.tabs.map(tab => [tab.id, tab.favicon]) ?? []);
   useEffect(() => {
-    const timeout = window.setTimeout(() => { setQuery((dirty ? address : activeUrl).trim().toLowerCase()); setSuggestionIndex(-1); }, 250);
+    let mounted = true;
+    const urls: string[] = [];
+    const tabs = JSON.parse(faviconKey) as [string, string | null][];
+    const entries: Record<string, { hash: string; url: string }> = {};
+    void Promise.all(tabs.map(async ([id, hash]) => {
+      if (!hash) return;
+      try {
+        const bytes = await window.horizon.getFavicon(id, hash);
+        if (!bytes || !mounted) return;
+        const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)]));
+        urls.push(url); entries[id] = { hash, url };
+      } catch { /* A closed or navigating tab keeps its initial badge. */ }
+    })).then(() => { if (mounted) setFavicons(entries); });
+    return () => { mounted = false; urls.forEach(url => URL.revokeObjectURL(url)); };
+  }, [faviconKey]);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => { setQuery((dirty ? address : activeUrl).trim()); setSuggestionIndex(-1); }, 250);
     return () => window.clearTimeout(timeout);
   }, [address, dirty, activeUrl]);
   useLayoutEffect(() => {
@@ -196,18 +240,7 @@ export function App({ language }: { language: Language }) {
     snapshotUrl.current = null;
   }, []);
   useEffect(() => { if (panel) (panelRef.current?.querySelector<HTMLInputElement>('input') ?? panelRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)'))?.focus(); }, [panel]);
-  // A menu opened from the keyboard focuses its first item; one opened by pointer focuses the menu itself, so no item looks selected.
-  useEffect(() => { if (menuOpen) (menuByKeyboard.current ? menuRef.current?.querySelector<HTMLButtonElement>('[role^=menuitem]') : menuRef.current)?.focus(); }, [menuOpen]);
-  useEffect(() => {
-    if (!menuOpen) return;
-    // A press anywhere outside the menu closes it; the page under it is a snapshot drawn by the chrome.
-    const close = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!menuRef.current?.contains(target) && !menuButtonRef.current?.contains(target)) setMenuOpen(false);
-    };
-    document.addEventListener('pointerdown', close);
-    return () => document.removeEventListener('pointerdown', close);
-  }, [menuOpen]);
+  useEffect(() => { dismissUndo(); setRenameUrl(''); setFilter(''); setStartSearch(''); setDirty(false); setSuggestionsOpen(false); }, [state?.activeProfileId, dismissUndo]);
   useEffect(() => { if (findOpen) { findRef.current?.focus(); findRef.current?.select(); } }, [findOpen]);
   useEffect(() => {
     setDirty(false); setSuggestionsOpen(false); setFindOpen(false); setFindText('');
@@ -230,14 +263,16 @@ export function App({ language }: { language: Language }) {
     else if (action === 'find' && activeUrl && !active?.error) { openPanel(null); setSuggestionsOpen(false); setFindOpen(true); requestAnimationFrame(() => { findRef.current?.focus(); findRef.current?.select(); }); }
     else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') void run({ type: 'zoom', delta: action === 'zoom-in' ? 1 : action === 'zoom-out' ? -1 : 0 });
     else if (action === 'stop') {
-      if (findOpen) { closeFind(); void run({ type: 'focus-page' }); }
-      else if (panel || menuOpen) { openPanel(null); setMenuOpen(false); menuButtonRef.current?.focus(); }
+      if (contextMenu) closeContextMenu(true);
+      else if (findOpen) { closeFind(); void run({ type: 'focus-page' }); }
+      else if (profileOpen) { setProfileOpen(null); profileButtonRef.current?.focus(); }
+      else if (panel || menuOpen) { const profiles = panel === 'profiles'; openPanel(null); setMenuOpen(false); (profiles ? profileButtonRef : menuButtonRef).current?.focus(); }
       else if (suggestionsOpen) { setSuggestionsOpen(false); addressRef.current?.focus(); }
       else void run({ type: 'stop' });
     } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'bookmark') {
       openPanel(null); setSuggestionsOpen(false); void run({ type: action });
     }
-  }, [state, active, activeUrl, closeFind, findOpen, focusAddress, menuOpen, openPanel, panel, run, suggestionsOpen]);
+  }, [state, active, activeUrl, closeFind, closeContextMenu, contextMenu, findOpen, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen]);
   useEffect(() => {
     const unsubscribe = window.horizon.onShortcut(shortcut);
     const keydown = (event: KeyboardEvent) => {
@@ -254,14 +289,16 @@ export function App({ language }: { language: Language }) {
   }, [shortcut, run]);
 
   const suggestions = useMemo(() => {
-    if (!query || !suggestionsOpen) return [];
+    const search = { kind: 'search' as const, url: `https://duckduckgo.com/?q=${encodeURIComponent((dirty ? address : activeUrl).trim())}`, title: text('searchWeb', language).replace('{query}', (dirty ? address : activeUrl).trim()), hint: '' };
+    if (!query) return [search];
     const seen = new Set<string>();
-    return [...(state?.store.bookmarks ?? []), ...(state?.store.history ?? [])].filter(item => {
+    const local = [...(state?.store.bookmarks ?? []), ...(state?.store.history ?? [])].filter(item => {
       if (seen.has(item.url)) return false;
       seen.add(item.url);
-      return `${item.title} ${item.url}`.toLowerCase().includes(query);
-    }).slice(0, 8);
-  }, [query, suggestionsOpen, state?.store.bookmarks, state?.store.history]);
+      return `${item.title} ${item.url}`.toLowerCase().includes(query.toLowerCase());
+    }).slice(0, 8).map(item => ({ kind: 'createdAt' in item ? 'bookmark' as const : 'history' as const, url: item.url, title: item.title || item.url, hint: 'createdAt' in item ? text('bookmarks', language) : new URL(item.url).host }));
+    return [search, ...local];
+  }, [query, address, dirty, activeUrl, language, state?.store.bookmarks, state?.store.history]);
   const iconButton = (Icon: LucideIcon, key: CopyKey, onClick: () => void, disabled = false, accent = false) => <button
     className={`icon-button${accent ? ' accent' : ''}`} type="button" onClick={onClick} disabled={disabled} aria-label={t(key)} title={t(key)}><Icon aria-hidden="true" /></button>;
   const previewButton = (Icon: LucideIcon, key: CopyKey, accent = false) => <button
@@ -283,7 +320,7 @@ export function App({ language }: { language: Language }) {
     <a className="skip-link" href="#content" onClick={event => { event.preventDefault(); if (activeUrl && !hidden && !active?.error) void run({ type: 'focus-page' }); else document.getElementById('content')?.focus(); }}>{t('skip')}</a>
     <header className="chrome" ref={headerRef}>
       <div className="tab-strip">
-        <button className="profile" type="button" disabled aria-label={t('profile')} title={t('unavailable')}><span className="profile-dot" /><span>{t('personal')}</span><ChevronDown aria-hidden="true" /></button>
+        <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
         <span className="separator" aria-hidden="true" />
         <nav className="tabs" role="tablist" aria-label={t('tabs')}>
           {state?.tabs.map((tab, index) => <div className={`tab${tab.id === state.activeId ? ' active' : ''}`} key={tab.id} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'close-tab', id: tab.id }); } }}>
@@ -299,13 +336,13 @@ export function App({ language }: { language: Language }) {
                 event.preventDefault(); const selected = state.tabs[next]; if (!selected) return; closeFind(); setDirty(false); setSuggestionsOpen(false);
                 void run({ type: 'activate-tab', id: selected.id }); document.getElementById(`tab-${selected.id}`)?.focus();
               }}>
-              {tab.loading ? <LoaderCircle className="spinner accent" aria-label={t('loading')} /> : !tab.url ? <House className="accent" aria-hidden="true" /> : <span className="tab-initial" aria-hidden="true">{(tab.title || tab.url).slice(0, 1).toUpperCase()}</span>}
+              {tab.loading ? <LoaderCircle className="spinner accent" aria-label={t('loading')} /> : !tab.url ? <House className={tab.id === state.activeId ? 'accent' : undefined} aria-hidden="true" /> : tab.favicon && favicons[tab.id]?.hash === tab.favicon ? <img className="tab-favicon" src={favicons[tab.id]?.url} alt="" aria-hidden="true" onError={() => setFavicons(previous => { if (previous[tab.id]?.hash !== tab.favicon) return previous; const next = { ...previous }; delete next[tab.id]; return next; })} /> : <span className="tab-initial" aria-hidden="true">{(tab.title || tab.url).slice(0, 1).toUpperCase()}</span>}
               <span>{tab.title || t('home')}</span>
             </button>
             {iconButton(X, 'closeTab', () => { if (tab.id === state.activeId) closeFind(); void run({ type: 'close-tab', id: tab.id }); })}
           </div>)}
         </nav>
-        {iconButton(Plus, 'newTab', () => shortcut('new-tab'))}<div className="drag-space" />
+        <button className="icon-button new-tab" type="button" onClick={() => shortcut('new-tab')} aria-label={t('newTab')} title={t('newTab')}><Plus aria-hidden="true" /></button><div className="drag-space" />
         <div className="window-controls">
           <button type="button" onClick={() => { void windowAction('minimize'); }} aria-label={t('minimize')} title={t('minimize')}><Minus aria-hidden="true" /></button>
           <button type="button" onClick={() => { void windowAction('maximize'); }} aria-label={t('maximize')} title={t('maximize')}><Square aria-hidden="true" /></button>
@@ -317,12 +354,12 @@ export function App({ language }: { language: Language }) {
         <form className="address-bar" onSubmit={event => { event.preventDefault(); navigate(suggestionsOpen && suggestionIndex >= 0 && suggestions[suggestionIndex] ? suggestions[suggestionIndex].url : dirty ? address : activeUrl); }}>
           <ShieldCheck className="accent" aria-label={t('protection')} />
           <input ref={addressRef} spellCheck={false} autoComplete="off" role="combobox" aria-label={t('address')} aria-autocomplete="list" aria-expanded={suggestionsOpen} aria-controls="address-suggestions" aria-activedescendant={suggestionsOpen && suggestionIndex >= 0 ? `suggestion-${suggestionIndex}` : undefined}
-            placeholder={t('address')} value={dirty ? address : activeUrl} maxLength={8192}
-            onFocus={event => event.currentTarget.select()}
+            placeholder={t('address')} value={dirty ? address : addressFocused ? activeUrl : activeUrl.startsWith('https://') ? activeUrl.slice(8).replace(/^([^/?#]+)\/(?=$|[?#])/, '$1') : activeUrl} maxLength={8192}
+            onFocus={event => { setAddressFocused(true); event.currentTarget.value = dirty ? address : activeUrl; event.currentTarget.select(); }}
             onMouseDown={event => { focusingClick.current = document.activeElement !== event.currentTarget; }}
             onMouseUp={event => { if (focusingClick.current) event.preventDefault(); focusingClick.current = false; }}
-            onChange={event => { setAddress(event.target.value); setDirty(true); setSuggestionIndex(-1); setSuggestionsOpen(Boolean(event.target.value.trim())); setMenuOpen(false); setPanel(null); }}
-            onBlur={event => { focusingClick.current = false; if (!dirty) setDirty(false); if (!event.relatedTarget || !(event.relatedTarget as HTMLElement).closest('.suggestions')) setSuggestionsOpen(false); }}
+            onChange={event => { setAddress(event.target.value); setDirty(true); setSuggestionIndex(-1); setSuggestionsOpen(Boolean(event.target.value.trim())); setProfileOpen(null); setMenuOpen(false); setPanel(null); }}
+            onBlur={event => { focusingClick.current = false; setAddressFocused(false); if (!dirty) setDirty(false); if (!event.relatedTarget || !(event.relatedTarget as HTMLElement).closest('.suggestions')) setSuggestionsOpen(false); }}
             onKeyDown={event => {
               if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setSuggestionsOpen(true); setSuggestionIndex(previous => !suggestions.length ? -1 : previous < 0 ? event.key === 'ArrowDown' ? 0 : suggestions.length - 1 : (previous + (event.key === 'ArrowDown' ? 1 : suggestions.length - 1)) % suggestions.length); }
               else if (event.key === 'Escape') { event.preventDefault(); setSuggestionsOpen(false); setDirty(false); addressRef.current?.focus(); }
@@ -330,7 +367,7 @@ export function App({ language }: { language: Language }) {
           {active && active.zoom !== 1 && <button className="zoom-level" type="button" title={t('zoomReset')} aria-label={`${Math.round(active.zoom * 100)}%, ${t('zoomReset')}`} onClick={() => { void run({ type: 'zoom', delta: 0 }); }}>{Math.round(active.zoom * 100)}%</button>}
           <button className={`icon-button${bookmarked ? ' accent bookmarked' : ''}`} type="button" disabled={!/^https?:/.test(activeUrl)} aria-label={t(bookmarked ? 'removeBookmark' : 'bookmark')} aria-pressed={bookmarked} title={t(bookmarked ? 'removeBookmark' : 'bookmark')} onClick={() => shortcut('bookmark')}><Star aria-hidden="true" /></button>
         </form>
-        <div className="tools">{previewButton(NotebookPen, 'notebooks')}{previewButton(Sparkles, 'lyra', true)}<button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-expanded={menuOpen} aria-controls="browser-menu" onClick={event => { menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button></div>
+        <div className="tools">{previewButton(NotebookPen, 'notebooks')}{previewButton(Sparkles, 'lyra', true)}<button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-expanded={menuOpen} aria-controls="browser-menu" onClick={event => { setProfileOpen(null); closeContextMenu(); menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button></div>
       </div>
       {findOpen && <div className="find-bar" role="search" aria-label={t('find')}>
         <Search aria-hidden="true" /><input ref={findRef} spellCheck={false} autoComplete="off" aria-label={t('find')} placeholder={t('find')} value={findText} maxLength={1024} onChange={event => { const value = event.target.value; setFindText(value); if (value) void run({ type: 'find', text: value, forward: true, next: false }); else void run({ type: 'stop-find' }); }}
@@ -338,17 +375,15 @@ export function App({ language }: { language: Language }) {
         <span className="match-count" role="status">{findText ? active?.find.total ? `${active.find.active} ${t('matchOf')} ${active.find.total}` : t('notFound') : ''}</span>
         {iconButton(ArrowUp, 'previousMatch', () => { void run({ type: 'find', text: findText, forward: false, next: true }); }, !findText)}{iconButton(ArrowDown, 'nextMatch', () => { void run({ type: 'find', text: findText, forward: true, next: true }); }, !findText)}{iconButton(X, 'close', () => { closeFind(); void run({ type: 'focus-page' }); })}
       </div>}
-      {(error || state?.storageError) && <div className="shell-status" role="alert"><span>{error || t('storageError')}</span>{error && iconButton(X, 'close', () => setError(''))}</div>}
+      {(error || state?.storageReadError || state?.storageError) && <div className="shell-status" role="alert"><span>{error || t(state?.storageReadError ? 'storageReadError' : 'storageError')}</span>{error && iconButton(X, 'close', () => setError(''))}</div>}
       <div className={`loading-line${active?.loading ? ' loading' : ''}`} aria-hidden="true" />
     </header>
-    {menuOpen && <div id="browser-menu" className="browser-menu" ref={menuRef} role="menu" tabIndex={-1} aria-label={t('menu')} onKeyDown={event => {
-      // Arrow keys, Home and End move between the enabled items, as in any menu.
-      const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role^=menuitem]:not(:disabled)') ?? [])];
-      const index = items.indexOf(document.activeElement as HTMLButtonElement);
-      const next = event.key === 'ArrowDown' ? (index + 1) % items.length : event.key === 'ArrowUp' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : -1;
-      if (next < 0 || !items.length) return;
-      event.preventDefault(); items[next]?.focus();
-    }}>
+    {profileOpen === 'menu' && state && <ProfilesMenu state={state} language={language} keyboard={profileByKeyboard.current} opener={profileButtonRef} onDismiss={reason => { setProfileOpen(null); if (reason === 'escape') profileButtonRef.current?.focus(); }} onSwitch={profile => {
+      setProfileOpen(null); profileButtonRef.current?.focus();
+      void run({ type: 'switch-profile', id: profile.id }).then(success => { if (success) { setAnnouncement(t('switchedProfile').replace('{name}', profile.name)); profileButtonRef.current?.focus(); } });
+    }} onNew={() => setProfileOpen('new')} onManage={() => openPanel('profiles')} />}
+    {profileOpen === 'new' && state && <NewProfilePopover state={state} language={language} opener={profileButtonRef} onCancel={() => { setProfileOpen(null); profileButtonRef.current?.focus(); }} onSuccess={name => { setProfileOpen(null); setAnnouncement(t('createdProfile').replace('{name}', name)); profileButtonRef.current?.focus(); }} />}
+    {menuOpen && <Menu id="browser-menu" label={t('menu')} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={reason => { setMenuOpen(false); if (reason === 'escape') menuButtonRef.current?.focus(); }}>
       <button type="button" role="menuitem" tabIndex={-1} onClick={() => { setMenuOpen(false); shortcut('new-tab'); }}><Plus aria-hidden="true" /><span>{t('newTab')}</span><kbd>Ctrl+T</kbd></button>
       <hr />
       <button type="button" role="menuitem" tabIndex={-1} onClick={() => openPanel('history')}><History aria-hidden="true" /><span>{t('history')}</span><kbd>Ctrl+H</kbd></button>
@@ -357,39 +392,63 @@ export function App({ language }: { language: Language }) {
       <hr />
       <button type="button" role="menuitem" tabIndex={-1} disabled={!activeUrl || Boolean(active?.error)} onClick={() => { setMenuOpen(false); shortcut('find'); }}><Search aria-hidden="true" /><span>{t('find')}</span><kbd>Ctrl+F</kbd></button>
       <hr />
-      <div className="menu-theme" role="group" aria-label={t('theme')}><span>{t('theme')}</span><div className="segmented">{(['amber', 'daylight'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={theme === value} onClick={() => { setTheme(value); try { localStorage.setItem('horizon-theme', value); } catch { /* The choice lasts for this session only. */ } }}>{t(value)}</button>)}</div></div>
-    </div>}
-    <main id="content" className={panel ? 'panel-content' : activeUrl ? 'web-content' : ''} tabIndex={-1}>
-      {panel ? <section className="library-panel" ref={panelRef} aria-labelledby="panel-title">
+      <div className="menu-theme" role="group" aria-label={t('theme')}><span>{t('theme')}</span><div className="segmented">{(['system', 'amber', 'daylight'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={(state?.theme ?? window.horizon.initialTheme) === value} onClick={() => { void run({ type: 'theme', value }); }}>{t(value)}</button>)}</div></div>
+      <div className="menu-contrast"><span id="contrast-label">{t('highContrast')}</span><button className="contrast-switch" type="button" role="switch" tabIndex={-1} aria-labelledby="contrast-label" aria-checked={(state?.contrast ?? window.horizon.initialContrast) === 'high'} onClick={() => { void run({ type: 'contrast', value: (state?.contrast ?? window.horizon.initialContrast) === 'high' ? 'standard' : 'high' }); }}><span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span></button></div>
+    </Menu>}
+    {contextMenu && <Menu key={contextMenu.id} id="page-context-menu" label={t('pageMenu')} keyboard={contextMenu.keyboard} point={contextMenu} onDismiss={reason => closeContextMenu(reason === 'escape')}>
+      {contextMenu.groups.flatMap((group, index) => [
+        ...(index ? [<hr role="separator" key={`divider-${index}`} />] : []),
+        ...group.map(item => {
+          const row = item.id.startsWith('spell:') ? null : pageMenuRows[item.id as keyof typeof pageMenuRows];
+          const Icon = row?.icon ?? SpellCheck;
+          const label = row ? t(row.label).replace('{query}', contextMenu.selection ?? '') : item.id.slice(6);
+          return <button type="button" role="menuitem" tabIndex={-1} key={item.id} disabled={!item.enabled} onClick={() => {
+            const menuId = contextMenu.id;
+            contextMenuRef.current = null; setContextMenu(null);
+            void run({ type: 'context-menu', id: menuId, item: item.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); });
+          }}><Icon aria-hidden="true" /><span>{label}</span></button>;
+        }),
+      ])}
+    </Menu>}
+    <main id="content" className={panel ? 'panel-content' : activeUrl ? 'web-content' : 'start-content'} tabIndex={-1}>
+      {panel === 'profiles' && state ? <ProfilesPanel state={state} language={language} run={run} announce={setAnnouncement} onClose={() => { openPanel(null); profileButtonRef.current?.focus(); }} /> : panel && panel !== 'profiles' ? <section className="library-panel" ref={panelRef} aria-labelledby="panel-title">
         <div className="panel-heading"><h1 id="panel-title">{t(panel)}</h1>{panel === 'history' && (confirmClear ? <div className="clear-confirmation"><span>{t('confirmClearHistory')}</span><button className="text-button" type="button" onClick={() => { void destructive({ type: 'clear-history' }, 'history', 'historyCleared'); }}>{t('clear')}</button><button className="text-button" type="button" onClick={() => setConfirmClear(false)}>{t('cancel')}</button></div> : <button className="text-button" type="button" disabled={!entries.length} onClick={() => setConfirmClear(true)}>{t('clearHistory')}</button>)}{iconButton(X, 'close', () => { openPanel(null); menuButtonRef.current?.focus(); })}</div>
         {undo?.kind === panel && <div className="undo-bar"><span>{t(undo.message)}</span><button className="text-button" type="button" onClick={() => { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); }}>{t('undo')}</button></div>}
         {panel !== 'downloads' && <div className="search-field panel-search"><Search aria-hidden="true" /><input aria-label={t(panel === 'history' ? 'filterHistory' : 'filterBookmarks')} placeholder={t(panel === 'history' ? 'filterHistory' : 'filterBookmarks')} value={filter} onChange={event => setFilter(event.target.value)} /></div>}
         {panel === 'downloads' ? <ul className="library-list">
-          {!state?.store.downloads.length && <li className="empty-state">{t('emptyDownloads')}</li>}
+          {!state?.store.downloads.length && <EmptyDownloads language={language} onAction={() => { void run({ type: 'open-downloads-folder' }); }} />}
           {state?.store.downloads.map(download => <li key={download.id}>
-            <Download aria-hidden="true" /><div className="entry-body"><strong>{download.filename}</strong><p role="status">{t(download.status)}{download.status === 'progressing' && download.total > 0 ? ` ${Math.round(download.received / download.total * 100)}%` : ''}</p><p className="entry-url">{download.url}</p>{download.status === 'progressing' && <progress max={download.total || undefined} value={download.total ? download.received : undefined} aria-label={t('progressing')} />}</div>
+            <Download aria-hidden="true" /><div className="entry-body"><strong>{download.filename}</strong><p role="status">{t(download.status)}{download.status === 'progressing' && download.total > 0 ? ` ${Math.round(download.received / download.total * 100)}%` : ''}</p><p className="entry-url download-source">{download.url}</p>{download.status === 'progressing' && <progress max={download.total || undefined} value={download.total ? download.received : undefined} aria-label={t('progressing')} />}</div>
             <div className="entry-actions">{download.status === 'progressing' && iconButton(X, 'cancel', () => { void run({ type: 'cancel-download', id: download.id }); })}{iconButton(FolderOpen, 'showFolder', () => { void run({ type: 'show-download', id: download.id }); }, download.status !== 'completed')}{iconButton(Trash2, 'removeDownload', () => { void destructive({ type: 'remove-download', id: download.id }, 'downloads', 'downloadRemoved'); }, download.status === 'progressing')}</div>
           </li>)}
         </ul> : <ul className="library-list">
-          {!filteredEntries.length && <li className="empty-state">{t(entries.length ? 'noResults' : panel === 'history' ? 'emptyHistory' : 'emptyBookmarks')}</li>}
+          {!filteredEntries.length && (filter ? <NoResults language={language} onAction={() => { setFilter(''); panelRef.current?.querySelector<HTMLInputElement>('input')?.focus(); }} /> : panel === 'history' ? <EmptyHistory language={language} onAction={focusAddress} /> : <EmptyBookmarks language={language} onAction={focusAddress} />)}
           {filteredEntries.map(item => <li key={item.url}><div className="entry-body">
-            <button className="entry-link" type="button" onClick={() => navigate(item.url)}>{item.title || item.url}</button><p className="entry-url">{item.url}</p>
+            <a className="entry-link" href={item.url} onClick={event => { event.preventDefault(); if (event.ctrlKey) void run({ type: 'new-tab', input: item.url, background: true }); else navigate(item.url); }} onAuxClick={event => { event.preventDefault(); if (event.button === 1) void run({ type: 'new-tab', input: item.url, background: true }); }}>{item.title || item.url}</a><p className="entry-url">{item.url}</p>
             {'lastVisit' in item && <time dateTime={new Date(item.lastVisit).toISOString()}>{new Date(item.lastVisit).toLocaleString(language)}</time>}
-            {renameUrl === item.url && <form className="rename-form" onSubmit={event => { event.preventDefault(); if (renameTitle.trim()) { void run({ type: 'rename-bookmark', url: item.url, title: renameTitle }); setRenameUrl(''); } }}><input autoFocus aria-label={t('bookmarkName')} value={renameTitle} maxLength={1024} onChange={event => setRenameTitle(event.target.value)} /><button className="text-button" type="submit" disabled={!renameTitle.trim()}>{t('save')}</button><button className="text-button" type="button" onClick={() => setRenameUrl('')}>{t('cancel')}</button></form>}
-          </div><div className="entry-actions">{panel === 'bookmarks' && <button className="text-button" type="button" onClick={() => { setRenameUrl(item.url); setRenameTitle(item.title); }}>{t('rename')}</button>}{iconButton(Trash2, 'delete', () => { void destructive({ type: panel === 'history' ? 'delete-history' : 'delete-bookmark', url: item.url }, panel, panel === 'history' ? 'entryDeleted' : 'bookmarkDeleted'); })}</div></li>)}
+            {renameUrl === item.url && <form className="rename-form" onSubmit={event => { event.preventDefault(); if (renameTitle.trim()) { void run({ type: 'rename-bookmark', url: item.url, title: renameTitle }).then(success => { if (success) { setRenameUrl(''); setAnnouncement(t('bookmarkRenamed')); } }); } }}><input autoFocus aria-label={t('bookmarkName')} value={renameTitle} maxLength={1024} onChange={event => setRenameTitle(event.target.value)} /><button className="text-button" type="submit" disabled={!renameTitle.trim()}>{t('save')}</button><button className="text-button" type="button" onClick={() => setRenameUrl('')}>{t('cancel')}</button></form>}
+          </div><div className="entry-actions">{panel === 'bookmarks' && <button className="text-button" type="button" onClick={() => { setAnnouncement(''); setRenameUrl(item.url); setRenameTitle(item.title); }}>{t('rename')}</button>}{iconButton(Trash2, 'delete', () => { void destructive({ type: panel === 'history' ? 'delete-history' : 'delete-bookmark', url: item.url }, panel, panel === 'history' ? 'entryDeleted' : 'bookmarkDeleted'); })}</div></li>)}
         </ul>}
-      </section> : active?.error && failure ? <section className="error-page" role="alert"><ErrorIcon aria-hidden="true" /><h1>{t(failure.heading)}</h1><p>{t(failure.sentence)}</p><div className="error-details"><p>{active.url}</p><p>{active.error}</p></div><button className="text-button" type="button" onClick={() => { void run({ type: 'reload' }); }}>{t('retry')}</button></section> : activeUrl ? (snapshot && <img className="web-snapshot" ref={snapshotRef} src={snapshot.url} alt="" aria-hidden="true" />) : !state ? <p role="status">{t('loading')}</p> : <div className="start-page">
-        <div className="brand"><svg className="horizon-mark" viewBox="0 0 52 33" aria-hidden="true"><path d="M10.4 31 A15.6 15.6 0 0 1 41.6 31 Z" /><path d="M1 32 H51" className="horizon-line" /></svg><h1>{t('product')}</h1></div>
-        <form className="search-field" onSubmit={event => { event.preventDefault(); navigate(startSearch); }}><Search aria-hidden="true" /><input spellCheck={false} autoComplete="off" aria-label={t('search')} placeholder={t('search')} value={startSearch} maxLength={8192} onChange={event => setStartSearch(event.target.value)} /><Sparkles className="accent" aria-hidden="true" /></form>
-        <nav className="shortcuts" aria-label={t('shortcuts')}>{(Object.keys(sites) as (keyof typeof sites)[]).map(key => <button type="button" key={key} onClick={() => navigate(sites[key])}>{t(key)}</button>)}</nav>
-        <section className="notebook" aria-labelledby="resume-title"><div className="notebook-heading"><div className="resume"><h2 id="resume-title"><NotebookPen className="accent" aria-hidden="true" />{t('resume')}</h2><p>{t('resumeMeta')}</p></div><button className="open-notebook accent" type="button" disabled title={t('unavailable')}>{t('openNotebook')}</button></div><ul className="notes">{notes.map(({ title, source, icon: Icon }) => <li key={title}><Icon aria-hidden="true" /><span>{t(title)}</span><small>{t(source)}</small></li>)}</ul></section>
-        <button className="lyra-prompt" type="button" disabled title={t('unavailable')}><Sparkles className="accent" aria-hidden="true" />{t('askLyra')}</button><p className="preview-notice">{t('unavailable')}</p>
+      </section> : active?.error && failure ? <section className="error-page" role="alert"><ErrorIcon aria-hidden="true" /><h1>{t(failure.heading)}</h1><p>{t(failure.sentence)}</p><div className="error-details"><p>{active.url}</p><p>{active.error}</p></div><button className="text-button" type="button" onClick={() => { void run({ type: 'reload' }); }}>{t('retry')}</button></section> : activeUrl ? (snapshot && <img className={`web-snapshot${active?.fullscreen ? ' fullscreen-snapshot' : ''}`} ref={snapshotRef} src={snapshot.url} alt="" aria-hidden="true" />) : !state ? <p role="status">{t('loading')}</p> : <div className="start-page">
+        <div className="start-sky"><div className="start-browsing">
+          <h1>{t('product')}</h1>
+          <form className="search-field start-search" onSubmit={event => { event.preventDefault(); navigate(startSearch); }}><Search aria-hidden="true" /><input spellCheck={false} autoComplete="off" aria-label={t('search')} placeholder={t('search')} value={startSearch} maxLength={8192} onChange={event => setStartSearch(event.target.value)} /><Sparkles className="accent" aria-hidden="true" /></form>
+          <nav className="shortcuts" aria-label={t('shortcuts')}>{(Object.keys(sites) as (keyof typeof sites)[]).map(key => <a href={sites[key]} key={key} onClick={event => { event.preventDefault(); if (event.ctrlKey) void run({ type: 'new-tab', input: sites[key], background: true }); else navigate(sites[key]); }} onAuxClick={event => { event.preventDefault(); if (event.button === 1) void run({ type: 'new-tab', input: sites[key], background: true }); }}>{t(key)}</a>)}</nav>
+        </div></div>
+        <div className="start-ground">
+          <div className="horizon-rule" aria-hidden="true" />
+          <svg className="horizon-sun" viewBox="0 0 64 32" aria-hidden="true"><path d="M0 32 A32 32 0 0 1 64 32" /></svg>
+          <div className="start-research">
+            <section className="notebook" aria-labelledby="resume-title"><div className="notebook-heading"><h2 id="resume-title"><NotebookPen className="accent" aria-hidden="true" />{t('notebookTitle')}</h2><p>{t('resumeMeta')}</p></div><ul className="notes">{notes.map(({ title, source, icon: Icon }) => <li key={title}><Icon aria-hidden="true" /><span>{t(title)}</span><small>{t(source)}</small></li>)}</ul></section>
+            <div className="lyra-preview"><div className="lyra-prompt"><Sparkles className="accent" aria-hidden="true" />{t('askLyra')}</div><p className="preview-notice">{t('unavailable')}</p></div>
+          </div>
+        </div>
       </div>}
     </main>
     {suggestionsOpen && createPortal(<div className="suggestions" aria-label={t('suggestions')}>
       <ul id="address-suggestions" role="listbox" aria-label={t('suggestions')}>
-        {suggestions.map((item, index) => <li role="option" id={`suggestion-${index}`} aria-selected={index === suggestionIndex} key={item.url} onMouseDown={event => event.preventDefault()} onClick={() => navigate(item.url)}>{'createdAt' in item ? <Star aria-hidden="true" /> : <History aria-hidden="true" />}<span><strong>{item.title || item.url}</strong><small>{item.url}</small></span></li>)}
-      </ul>{!suggestions.length && <p role="status">{t('noSuggestions')}</p>}
+        {suggestions.map((item, index) => <li role="option" id={`suggestion-${index}`} aria-selected={index === suggestionIndex} key={`${item.kind}:${item.url}`} onMouseDown={event => event.preventDefault()} onClick={() => navigate(item.url)}>{item.kind === 'search' ? <Search aria-hidden="true" /> : item.kind === 'bookmark' ? <Star aria-hidden="true" /> : <History aria-hidden="true" />}<strong>{item.title}</strong>{item.hint && <small>{item.hint}</small>}</li>)}
+      </ul>
     </div>, document.body)}
   </>;
 }

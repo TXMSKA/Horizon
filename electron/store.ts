@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, resolve, win32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BrowserStore } from '../src/shared/api';
@@ -25,6 +25,18 @@ function entries(value: unknown, validate: (entry: unknown) => boolean): boolean
   return Array.isArray(value) && value.length <= 100000 && Array.from(value).every(validate);
 }
 
+export interface StoreCipher { isEncryptionAvailable(): boolean; encryptString(value: string): Buffer; decryptString(value: Buffer): string }
+export interface StoreReadStatus { readError: boolean; memoryOnly: boolean }
+const encryptedHeader = Buffer.from('HORIZON-STORE-1\n');
+const STORE_LIMIT = 64 * 1024 * 1024;
+function encryptedStore(path: string): boolean {
+  const file = openSync(path, 'r');
+  try {
+    const header = Buffer.alloc(encryptedHeader.length);
+    return readSync(file, header, 0, header.length, 0) === header.length && header.equals(encryptedHeader);
+  } finally { closeSync(file); }
+}
+
 export function validateStore(value: unknown): value is BrowserStore {
   return object(value, ['version', 'history', 'bookmarks', 'downloads']) && value.version === 1
     && entries(value.history, entry => object(entry, ['url', 'title', 'lastVisit', 'visitCount'])
@@ -40,43 +52,61 @@ export function validateStore(value: unknown): value is BrowserStore {
       && typeof entry.status === 'string' && ['progressing', 'completed', 'failed', 'cancelled'].includes(entry.status));
 }
 
-export function writeStore(path: string, store: BrowserStore): void {
+export function writeStore(path: string, store: BrowserStore, cipher?: StoreCipher): void {
   if (!validateStore(store)) throw new Error('Invalid browser store');
-  mkdirSync(dirname(path), { recursive: true });
+  const encryption = Boolean(cipher?.isEncryptionAvailable());
+  if (!encryption && existsSync(path) && encryptedStore(path)) {
+    throw new Error('Store encryption is unavailable');
+  }
+  const json = JSON.stringify(store);
+  const bytes = encryption ? Buffer.concat([encryptedHeader, cipher!.encryptString(json)]) : Buffer.from(json);
+  if (bytes.length > STORE_LIMIT) throw new Error('Browser store exceeds size limit');
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(temporary, JSON.stringify(store), { flag: 'wx', mode: 0o600 });
+    writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o600 });
     renameSync(temporary, path);
   } finally {
     if (existsSync(temporary)) unlinkSync(temporary);
   }
 }
 
-export function readStore(path: string): BrowserStore {
+export function readStore(path: string, cipher?: StoreCipher, status: StoreReadStatus = { readError: false, memoryOnly: false }): BrowserStore {
   const empty: BrowserStore = { version: 1, history: [], bookmarks: [], downloads: [] };
   try {
     if (!existsSync(path)) {
-      writeStore(path, empty);
+      writeStore(path, empty, cipher);
       return empty;
     }
     let store: BrowserStore;
+    let upgrade = false;
     try {
-      if (statSync(path).size > 64 * 1024 * 1024) throw new Error('Browser store exceeds size limit');
-      const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      if (!cipher?.isEncryptionAvailable() && encryptedStore(path)) {
+        status.readError = true; status.memoryOnly = true;
+        return empty;
+      }
+      if (statSync(path).size > STORE_LIMIT) throw new Error('Browser store exceeds size limit');
+      const bytes = readFileSync(path);
+      const encrypted = bytes.subarray(0, encryptedHeader.length).equals(encryptedHeader);
+      const json = encrypted ? cipher!.decryptString(bytes.subarray(encryptedHeader.length)) : bytes.toString('utf8');
+      const value: unknown = JSON.parse(json);
       if (!validateStore(value)) throw new Error('Invalid browser store');
       store = value;
+      upgrade = !encrypted && Boolean(cipher?.isEncryptionAvailable());
     } catch {
+      status.readError = true;
       renameSync(path, `${path}.corrupt-${randomUUID()}`);
-      writeStore(path, empty);
+      writeStore(path, empty, cipher);
       return empty;
     }
     const interrupted = store.downloads.filter(entry => entry.status === 'progressing');
     interrupted.forEach(entry => { entry.status = 'failed'; });
-    if (interrupted.length) {
-      try { writeStore(path, store); } catch { /* The recovered list remains usable in memory. */ }
+    if (interrupted.length || upgrade) {
+      try { writeStore(path, store, cipher); } catch { /* The recovered list remains usable in memory. */ }
     }
     return store;
   } catch {
+    status.readError = true;
     // A read-only or unavailable profile must not prevent the browser from starting.
   }
   return empty;

@@ -1,14 +1,21 @@
 # Horizon
 
-Task 001 provides the static Electron shell and start page. Browsing, notebooks,
-profiles, and Lyra controls are previews; only native window controls operate.
+Horizon is a web browser for Windows and Linux. Browsing works with tabs,
+history, bookmarks, downloads, find, page zoom and a page context menu.
+Profiles keep their tabs, history, bookmarks and sign-ins separate in the
+same window. Personal keeps existing sign-ins; Work starts separately.
+Profiles can be created, renamed, recoloured, switched and deleted.
 
-Use Node.js 24 or 26 and npm 11.19 or newer. Verification used Node.js 26.8.2 and
-npm 11.19.1. Windows and Linux are the application targets.
+Amber and Daylight are app-wide themes. Choose either one or System, with
+an optional high-contrast palette. Language follows the system locale:
+Spanish or English, with English for other locales.
+
+Notebooks and Lyra are still previews.
 
 ## Run
 
-From the repository on Windows PowerShell:
+Use Node.js 24 or 26 and npm 11.19 or newer. Verification used Node.js 26.8.2
+and npm 11.19.1. From the repository in Windows PowerShell:
 
 ```powershell
 npm.cmd ci
@@ -19,12 +26,14 @@ npm.cmd run build
 npm.cmd start
 ```
 
-On Linux, use `npm` in place of `npm.cmd`. Electron also needs the system
-libraries required by its official Linux distribution.
+On Linux, use `npm` instead of `npm.cmd`. Electron needs the system libraries
+required by its official Linux distribution.
 
-`npm run dev` watches the renderer and Electron sources, builds them, and
-restarts the window. It deliberately serves built assets over `horizon://`
-instead of exposing a Vite development server, so the production CSP applies.
+`npm run dev` watches the renderer and Electron sources, builds them and
+restarts the window. It serves built assets over `horizon://`, so the
+production Content Security Policy also applies during development.
+
+## Check
 
 ```text
 npm run lint
@@ -36,27 +45,28 @@ npm run scan:secrets
 npm run verify:window
 ```
 
-The last command runs the actual window checks and captures both themes under
-`.runtime/screenshots/`. It requires an environment that permits Electron
-to run. Browser state, tools, and verification artifacts remain in `.runtime/`
-during development; npm and Electron download caches remain in `.npm-cache/`.
+Build checks text and graphic contrast across all four palettes. Security
+tests use temporary stores and mocked Electron sessions. `verify:window`
+launches Electron and captures both themes in `.runtime/screenshots/`;
+it needs an environment that permits Electron to run.
 
-The foundation has no application environment variables and does not load
-environment files. `.env.example` records that empty configuration.
+Development data and verification artifacts stay in `.runtime/`. Download
+caches stay in `.npm-cache/`. The app has no application environment
+variables and does not load environment files; `.env.example` records this.
 
-Amber and Daylight follow the system theme. Language follows Electron's system
-locale: Spanish or English, with English for other locales. A manual theme
-selector is deferred by the task brief's explicit system-theme decision.
+## Security and packaging
 
-The permission, protocol, preload, and fuse boundaries are documented in
-[the Electron checklist](docs/security/electron-checklist.md).
-The dependency and installer review is in
-[dependencies](docs/security/dependencies.md).
+Profile stores use Electron's `safeStorage` encryption when available.
+Linux without a keyring uses plain JSON with owner-only permissions.
+After a successful migration into Personal, the legacy `browser-store.json`
+is renamed to owner-only `browser-store.json.migrated`, replacing any existing
+archive so the original data can be recovered.
+Session, storage, protocol and preload boundaries are documented in the
+[Electron checklist](docs/security/electron-checklist.md). Dependency and
+installer notes are in [dependencies](docs/security/dependencies.md).
 
-## Packaging boundary
-
-Task 012 applies `npm run fuses -- <packaged-binary>` after packaging and before
-code signing. Windows packaging must embed ASAR integrity metadata first.
-Linux does not enable the unsupported embedded-ASAR-integrity fuse.
-The stock development binary stays unmodified. Windows Smart App Control blocks
-it because it is unsigned, so development on Windows needs Smart App Control off.
+Task 012 applies `npm run fuses -- <packaged-binary>` after packaging and
+before signing. Windows packaging must embed ASAR integrity metadata first;
+Linux skips that unsupported fuse. The development binary stays unmodified.
+Windows Smart App Control blocks it because it is unsigned, so development
+on Windows needs Smart App Control off until signed builds are available.

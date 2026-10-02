@@ -25,7 +25,7 @@ app.on('browser-window-created', (_event, window) => {
       assert.ok(['es', 'en'].includes(initial.language));
       assert.equal(initial.node, 'undefined');
       assert.equal(initial.process, 'undefined');
-      assert.deepEqual(initial.api, ['capture', 'command', 'getLanguage', 'getState', 'onShortcut', 'onState', 'setContentArea', 'windowAction']);
+      assert.deepEqual(initial.api, ['capture', 'command', 'getFavicon', 'getLanguage', 'getState', 'initialContrast', 'initialTheme', 'onContextMenu', 'onShortcut', 'onState', 'setContentArea', 'themeMigration', 'windowAction']);
       assert.equal(initial.overflow, false);
       assert.ok(window.isVisible());
       assert.equal(await window.webContents.executeJavaScript('document.querySelector(".skip-link").click(); location.href'), 'horizon://app/');
@@ -47,7 +47,8 @@ app.on('browser-window-created', (_event, window) => {
       assert.equal((await session.defaultSession.fetch('horizon://app/', { method: 'POST' })).status, 403);
       assert.equal((await session.defaultSession.fetch('horizon://app/missing.js')).status, 404);
       mkdirSync('.runtime/screenshots', { recursive: true });
-      // The theme is chosen in the browser menu since task 002; the system theme only sets the first one.
+      // The menu updates the main-process setting before the resolved theme is captured.
+      await window.webContents.executeJavaScript('window.horizon.command({ type: "contrast", value: "standard" })');
       for (const [theme, name] of [['dark', 'Amber'], ['light', 'Daylight']]) {
         await window.webContents.executeJavaScript(`(async () => {
           document.querySelector('[aria-controls=browser-menu]').click();
@@ -60,7 +61,7 @@ app.on('browser-window-created', (_event, window) => {
           page: getComputedStyle(document.body).backgroundColor,
           placeholder: document.querySelector('.search-field input').placeholder
         })`);
-        assert.equal(colours.page, theme === 'dark' ? 'rgb(7, 5, 6)' : 'rgb(251, 248, 247)');
+        assert.equal(colours.page, theme === 'dark' ? 'rgb(23, 21, 20)' : 'rgb(238, 235, 233)');
         const capture = await window.webContents.capturePage();
         writeFileSync(resolve('.runtime/screenshots', `${theme}.png`), capture.toPNG());
         console.log(JSON.stringify({ theme, ...colours }));
