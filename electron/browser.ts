@@ -15,8 +15,10 @@ import type { ThemeSettings } from './settings';
 import { PageMenuSession } from './context-menu';
 import { cleanupPartitions, makeProfile, migrateStore, PROFILE_LIMIT, profileName, profileStorePath, readRegistry, removeProfileDirectory, writeRegistry } from './profiles';
 import type { ProfileRegistry } from './profiles';
+import { createBlockingEngine } from './blocking';
+import { PermissionQueue, requestedPermissions, secureOrigin, setBlocking, setPermission, siteSettings, stripCookieHeaders } from './site-settings';
 
-interface Tab { state: TabState; view?: WebContentsView; findRequest?: number; navigation?: number; committed?: boolean; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController }
+interface Tab { state: TabState; view?: WebContentsView; findRequest?: number; navigation?: number; committed?: boolean; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean }
 
 
 const profileSessions = new Set<Session>();
@@ -49,6 +51,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     window.setTitle(tab?.url && tab.url !== 'about:blank' ? `${tab.title || tab.url} - Horizon` : 'Horizon');
     window.webContents.send(IPC.stateChanged, state());
   };
+  const blocker = createBlockingEngine(userData, publish);
   const layout = () => { for (const runtime of runtimes.values()) runtime.layout(); };
   const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); registry = next; };
   const runtimeFor = (profile: Profile) => {
@@ -146,19 +149,73 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const webSession = session.fromPartition(profile.partition);
     profileSessions.add(webSession);
-    // Electron routes HTML fullscreen through the permission handler; browsers grant it without a prompt and Escape leaves it.
-    webSession.setPermissionRequestHandler((_contents, permission, callback) => callback(permission === 'fullscreen'));
-    webSession.setPermissionCheckHandler(() => false);
+    const permissions = new PermissionQueue(store.siteSettings, publish, () => persist());
+    const tabFor = (contents: WebContents | null | undefined) => contents && tabs.find(tab => tab.view?.webContents === contents);
+    // Frame requests inherit the top-level origin; a frame cannot choose the origin shown by chrome.
+    webSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+      if (permission === 'fullscreen') { callback(true); return; }
+      const tab = tabFor(contents), origin = tab && siteSettings(store.siteSettings, contents.mainFrame.origin ?? contents.mainFrame.url)?.origin;
+      if (!tab || !origin || tab.navigating || disposed || closing) { callback(false); return; }
+      permissions.request(tab.state.id, origin, requestedPermissions(permission, details), callback);
+    });
+    webSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => {
+      if (permission === 'fullscreen') return true;
+      const tab = tabFor(contents);
+      const url = tab ? contents!.mainFrame.origin ?? contents!.mainFrame.url : !contents ? details?.embeddingOrigin ?? requestingOrigin : '';
+      const site = siteSettings(store.siteSettings, url ?? '');
+      const requested = requestedPermissions(permission, details);
+      return !!site && secureOrigin(site.origin) && requested.length > 0 && requested.every(permission => site.permissions[permission] === 'allow');
+    });
     webSession.setDevicePermissionHandler(() => false);
+    const requests = new Map<number, { tab: Tab; pageLoad: number; topURL: string }>();
+    const requestContext = (details: { id: number; webContentsId?: number; url: string; resourceType: string }) => {
+      const existing = requests.get(details.id);
+      if (existing) {
+        // A redirected document is first party at every hop, including its cookie headers.
+        if (details.resourceType === 'mainFrame') {
+          existing.topURL = details.url;
+          if (existing.pageLoad === existing.tab.pageLoad) existing.tab.topURL = details.url;
+        }
+        return existing;
+      }
+      const tab = details.webContentsId === undefined ? undefined : tabs.find(tab => tab.view?.webContents.id === details.webContentsId);
+      if (!tab) return undefined;
+      const context = { tab, pageLoad: tab.pageLoad, topURL: details.resourceType === 'mainFrame' ? details.url : tab.topURL ?? tab.state.url };
+      requests.set(details.id, context); return context;
+    };
     webSession.webRequest.onBeforeRequest((details, callback) => {
       const scheme = new URL(details.url).protocol;
       const cancel = details.resourceType === 'mainFrame' ? !isAllowedURL(details.url)
         : details.resourceType === 'subFrame' ? !isAllowedSubframeURL(details.url)
         : !['http:', 'https:', 'data:', 'blob:', 'ws:', 'wss:'].includes(scheme);
-      callback({ cancel });
+      if (cancel || disposed || closing) { callback({ cancel: true }); return; }
+      const context = requestContext(details);
+      const enabled = context && siteSettings(store.siteSettings, context.topURL)?.blocking;
+      const match = enabled ? blocker.match(details.url, details.resourceType, context.topURL) : undefined;
+      if (!match) { callback({ cancel: false }); return; }
+      if (context!.pageLoad === context!.tab.pageLoad) { context!.tab.state.blocked[match.kind]++; publish(); }
+      if (match.redirectURL) callback({ redirectURL: match.redirectURL });
+      else callback({ cancel: true });
     });
+    webSession.webRequest.onBeforeSendHeaders((details, callback) => {
+      const context = requestContext(details);
+      const headers = context ? stripCookieHeaders(details.requestHeaders, false, details.url, context.topURL,
+        siteSettings(store.siteSettings, context.topURL)?.blocking ?? true, context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : details.requestHeaders;
+      if (context && context.pageLoad === context.tab.pageLoad && context.tab.state.blocked.cookies !== context.tab.refusedCookies.size) { context.tab.state.blocked.cookies = context.tab.refusedCookies.size; publish(); }
+      callback({ requestHeaders: headers });
+    });
+    webSession.webRequest.onHeadersReceived((details, callback) => {
+      const context = requestContext(details);
+      const headers = context ? stripCookieHeaders(details.responseHeaders ?? {}, true, details.url, context.topURL,
+        siteSettings(store.siteSettings, context.topURL)?.blocking ?? true, context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : details.responseHeaders;
+      if (context && context.pageLoad === context.tab.pageLoad && context.tab.state.blocked.cookies !== context.tab.refusedCookies.size) { context.tab.state.blocked.cookies = context.tab.refusedCookies.size; publish(); }
+      callback({ responseHeaders: headers });
+    });
+    webSession.webRequest.onCompleted(details => { requests.delete(details.id); });
+    webSession.webRequest.onErrorOccurred(details => { requests.delete(details.id); });
 
-    const state = () => ({ tabs: tabs.map(tab => ({ ...tab.state })), activeId, store, storageError, storageReadError: readStatus.readError });
+    const state = () => ({ tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, storageError, storageReadError: readStatus.readError,
+      blockingReady: blocker.ready, siteSettings: siteSettings(store.siteSettings, active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: permissions.prompt(activeId) });
     const flush = () => {
       if (pendingWrite === undefined) return;
       clearTimeout(pendingWrite); pendingWrite = undefined;
@@ -191,7 +248,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const fullscreen = isCurrent() && tab.state.id === activeId && tab.state.fullscreen;
         const y = fullscreen ? 0 : top;
         tab.view.setBounds({ x: 0, y, width, height: Math.max(0, height - y) });
-        tab.view.setVisible(isCurrent() && tab.state.id === activeId && (fullscreen && pageMenu.tabId !== tab.state.id || !area.hidden) && !tab.state.error && y < height);
+        tab.view.setVisible(isCurrent() && tab.state.id === activeId && (fullscreen && pageMenu.tabId !== tab.state.id || !area.hidden) && !tab.state.error && !tab.cosmeticPending && y < height);
       }
     };
     const update = () => { layout(); publish(); };
@@ -237,6 +294,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       refresh(tab); update();
     };
     const fail = (tab: Tab, description: string) => {
+      permissions.drop(tab.state.id); tab.cosmeticPending = false; tab.navigating = false;
       invalidateMenu(tab.state.id);
       tab.state.loading = false;
       tab.state.error = description === 'RENDERER_GONE' ? description : parseErrorName(description);
@@ -246,6 +304,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const load = (tab: Tab, url: string) => {
       if (!isAllowedURL(url)) throw new Error('Invalid navigation URL');
       invalidateMenu(tab.state.id);
+      permissions.drop(tab.state.id);
+      tab.navigating = true;
       clearFavicon(tab, url);
       ensureView(tab);
       tab.state.url = url;
@@ -264,7 +324,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const newTab = (url?: string, foreground = true, contents?: WebContents) => {
       if (disposed || closing) throw new Error('Profile is closed');
       if (tabs.length >= 200) throw new Error('Tab limit reached');
-      const tab: Tab = { state: { id: randomUUID(), url: url ?? '', title: url ?? '', favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 } } };
+      const tab: Tab = { pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), url: url ?? '', title: url ?? '', favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
       clearFavicon(tab, url);
       tabs.push(tab);
       if (foreground || !activeId) activate(tab);
@@ -277,6 +337,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const index = tabs.indexOf(tab);
       if (index < 0 || closing || disposed) return;
       invalidateMenu(tab.state.id);
+      permissions.drop(tab.state.id);
       leaveFullscreen(tab); clearFavicon(tab);
       tabs.splice(index, 1);
       if (activeId === tab.state.id) activeId = tabs[Math.min(index, tabs.length - 1)]?.state.id ?? '';
@@ -324,15 +385,33 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       });
       contents.on('destroyed', () => closeTab(tab));
       contents.on('did-start-loading', () => { tab.state.loading = true; publish(); });
-      contents.on('did-stop-loading', () => { tab.state.loading = false; refresh(tab); update(); });
+      contents.on('did-stop-loading', () => { tab.state.loading = false; tab.navigating = false; refresh(tab); update(); });
       contents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
         invalidateMenu(tab.state.id);
-        if (isMainFrame && !isInPlace) { clearFavicon(tab, url); tab.state.error = null; tab.state.find = { active: 0, total: 0 }; tab.findRequest = undefined; update(); }
+        if (isMainFrame) permissions.drop(tab.state.id);
+        if (isMainFrame && !isInPlace) {
+          tab.navigating = true;
+          tab.pageLoad++; tab.topURL = url; tab.refusedCookies = new Set(); tab.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
+          tab.cosmeticPending = blocker.ready && !!siteSettings(store.siteSettings, url)?.blocking;
+          clearFavicon(tab, url); tab.state.error = null; tab.state.find = { active: 0, total: 0 }; tab.findRequest = undefined; update();
+        }
       });
       contents.on('will-redirect', (event) => {
         if (event.isMainFrame && !isAllowedURL(event.url)) fail(tab, 'ERR_UNSAFE_REDIRECT');
       });
       contents.on('did-navigate', (_event, url) => {
+        permissions.drop(tab.state.id); tab.navigating = false;
+        tab.topURL = url;
+        const generation = tab.pageLoad;
+        const css = siteSettings(store.siteSettings, url)?.blocking ? blocker.cosmeticCSS(url) : '';
+        // Keep the view hidden until styles are installed, so the new document cannot flash unhidden ads.
+        if (css) {
+          tab.cosmeticPending = true;
+          void contents.insertCSS(css, { cssOrigin: 'user' }).catch(() => undefined).finally(() => {
+            if (disposed || closing || !tabs.includes(tab) || tab.pageLoad !== generation) return;
+            tab.cosmeticPending = false; update();
+          });
+        } else tab.cosmeticPending = false;
         tab.committed = true;
         record(tab, url);
       });
@@ -421,6 +500,20 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!tab) return;
       const contents = page(tab.view);
       switch (command.type) {
+        case 'set-blocking': {
+          const site = siteSettings(store.siteSettings, tab.topURL ?? tab.state.url);
+          if (!site) throw new Error('SITE_UNAVAILABLE');
+          setBlocking(store.siteSettings, site.host, command.enabled); persist();
+          permissions.drop(tab.state.id);
+          if (contents) contents.reload();
+          break;
+        }
+        case 'set-site-permission': {
+          const site = siteSettings(store.siteSettings, tab.topURL ?? tab.state.url);
+          if (!site) throw new Error('SITE_UNAVAILABLE');
+          setPermission(store.siteSettings, site.origin, command.permission, command.decision); persist(); permissions.reconcile(); break;
+        }
+        case 'answer-permission': permissions.answer(tab.state.id, command.id, command.answer); break;
         case 'theme': case 'migrate-theme': settings.setTheme(command.value, command.type === 'migrate-theme'); break;
         case 'contrast': settings.setContrast(command.value); break;
         case 'new-tab': newTab(command.input ? classifyInput(command.input) : undefined, !command.background); break;
@@ -486,7 +579,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'back': if (contents?.navigationHistory.canGoBack()) contents.navigationHistory.goBack(); break;
         case 'forward': if (contents?.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break;
         case 'reload': if (contents) { tab.state.error = null; contents.reload(); } else if (isAllowedURL(tab.state.url)) load(tab, tab.state.url); break;
-        case 'stop': contents?.stop(); break;
+        case 'stop': contents?.stop(); tab.cosmeticPending = false; break;
         case 'focus-page': if (!area.hidden && !tab.state.error) contents?.focus(); break;
         case 'zoom': zoom(tab, command.delta); break;
         case 'bookmark': {
@@ -545,6 +638,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!discard) for (const item of items.values()) item.cancel();
       disposed = true;
       for (const tab of tabs) {
+        permissions.drop(tab.state.id);
         clearFavicon(tab);
         attempt(() => leaveFullscreen(tab));
         if (tab.view) {
@@ -559,6 +653,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (discard) { clearTimeout(pendingWrite); pendingWrite = undefined; } else flush();
       attempt(() => webSession.removeListener('will-download', downloadHandler));
       profileSessions.delete(webSession);
+      requests.clear();
     };
     return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession };
 
@@ -611,6 +706,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const flush = () => { for (const runtime of runtimes.values()) runtime.flush(); };
   window.on('closed', () => {
     closing = true; invalidateMenu();
+    blocker.stop();
     for (const runtime of runtimes.values()) runtime.dispose();
     app.removeListener('before-quit', flush);
     for (const channel of [IPC.state, IPC.capture, IPC.favicon, IPC.command, IPC.contentArea]) ipcMain.removeHandler(channel);
@@ -618,5 +714,6 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   app.on('before-quit', flush);
   const initial = runtimeFor(registry.profiles.find(profile => profile.id === registry.activeId)!);
   initial.persist(); initial.newTab();
+  void blocker.start();
   return { layout };
 }

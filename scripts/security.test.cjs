@@ -13,6 +13,7 @@ const { browserShortcut } = require('../dist/src/shared/shortcuts.js');
 const { cleanupPartitions, makeProfile, migrateStore, profileStorePath, readRegistry, validateRegistry, writeRegistry, removeProfileDirectory } = require('../dist/electron/profiles.js');
 const { randomUUID, createCipheriv, createDecipheriv } = require('node:crypto');
 const { contextMenuGroups, PageMenuSession } = require('../dist/electron/context-menu.js');
+const { PermissionQueue, defaultPermissions, requestedPermissions, setPermission, setBlocking, siteSettings, stripCookieHeaders, cookieSite, secureOrigin, SITE_SETTINGS_LIMIT } = require('../dist/electron/site-settings.js');
 
 function menuParams(overrides = {}) {
   return {
@@ -292,7 +293,8 @@ function temporaryDirectory(t, prefix) {
 
 function sampleStore(directory) {
   return {
-    version: 1,
+    version: 2,
+    siteSettings: { blocking: [], permissions: [] },
     history: [{ url: 'https://example.com/', title: 'Example', lastVisit: 1, visitCount: 2 }],
     bookmarks: [{ url: 'https://example.com/', title: 'Example', createdAt: 1 }],
     downloads: [{ id: 'download-1', url: 'https://example.com/file', filename: 'file.txt', path: join(directory, 'file.txt'), received: 3, total: 3, status: 'completed', startedAt: 1 }],
@@ -302,7 +304,7 @@ function sampleStore(directory) {
 test('store schema rejects unsafe URLs, shapes, statuses, paths, and unbounded fields', (t) => {
   const directory = temporaryDirectory(t, 'schema');
   assert.equal(validateStore(sampleStore(directory)), true);
-  assert.equal(validateStore({ version: 1, history: [], bookmarks: [], downloads: [] }), true);
+  assert.equal(validateStore({ version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } }), true);
   for (const invalid of [null, [], {}, { version: 2, history: [], bookmarks: [], downloads: [] }]) assert.equal(validateStore(invalid), false);
   const mutations = [
     store => { store.extra = true; },
@@ -340,17 +342,17 @@ test('store schema rejects unsafe URLs, shapes, statuses, paths, and unbounded f
 test('store writes atomically, recovers invalid files, and preserves corrupt originals', (t) => {
   const directory = temporaryDirectory(t, 'store');
   const path = join(directory, 'profile', 'browser.json');
-  assert.deepEqual(readStore(path), { version: 1, history: [], bookmarks: [], downloads: [] });
+  assert.deepEqual(readStore(path), { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } });
   assert.ok(existsSync(path));
   const store = sampleStore(directory);
   writeStore(path, store);
   assert.deepEqual(readStore(path), store);
   assert.equal(readdirSync(join(directory, 'profile')).some(name => name.endsWith('.tmp')), false);
-  assert.throws(() => writeStore(path, { ...store, version: 2 }));
+  assert.throws(() => writeStore(path, { ...store, version: 3 }));
   assert.deepEqual(readStore(path), store);
-  for (const corrupt of ['{broken json', JSON.stringify({ ...store, version: 2 })]) {
+  for (const corrupt of ['{broken json', JSON.stringify({ ...store, version: 3 })]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readStore(path), { version: 1, history: [], bookmarks: [], downloads: [] });
+    assert.deepEqual(readStore(path), { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } });
     const backups = readdirSync(join(directory, 'profile')).filter(name => name.startsWith('browser.json.corrupt-'));
     assert.ok(backups.some(name => readFileSync(join(directory, 'profile', name), 'utf8') === corrupt));
     assert.equal(validateStore(JSON.parse(readFileSync(path, 'utf8'))), true);
@@ -481,6 +483,8 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   let registryWriteFailure = false;
   let cleanupFailure = false;
   const storageErrors = [];
+  const blockingCalls = [];
+  let mockCosmetics = false;
   t.mock.method(console, 'error', (...args) => storageErrors.push(args));
   let nextTimer = 0;
   const schedule = (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; };
@@ -492,9 +496,11 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
       timers.delete(id); timer.callback();
     }
   };
+  let nextContentsId = 0;
   class Contents extends EventEmitter {
     constructor(targetSession) {
       super();
+      this.id = ++nextContentsId;
       this.targetSession = targetSession;
       this.mainFrame = { url: 'horizon://app/' };
       this.zoom = 0.75;
@@ -518,7 +524,8 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     capturePage() { this.captures = (this.captures || 0) + 1; return Promise.resolve(this.image); }
     stopFindInPage() {}
     findInPage(text, options) { this.find = { text, options }; return 7; }
-    reload() {}
+    reload() { this.reloads = (this.reloads || 0) + 1; }
+    insertCSS(css, options) { this.css = { css, options }; return Promise.resolve("css-key"); }
     undo() { this.edited = 'undo'; }
     redo() { this.edited = 'redo'; }
     cut() { this.edited = 'cut'; }
@@ -542,7 +549,11 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     target.setPermissionRequestHandler = handler => { target.request = handler; };
     target.setPermissionCheckHandler = handler => { target.check = handler; };
     target.setDevicePermissionHandler = handler => { target.device = handler; };
-    target.webRequest = { onBeforeRequest(handler) { target.network = handler; } };
+    target.listeners = {};
+    target.webRequest = Object.fromEntries(['onBeforeRequest', 'onBeforeSendHeaders', 'onHeadersReceived', 'onCompleted', 'onErrorOccurred'].map(name => [name, handler => {
+      if (handler) target.listeners[name] = (target.listeners[name] || 0) + 1;
+      target[{onBeforeRequest:'network', onBeforeSendHeaders:'sendHeaders', onHeadersReceived:'receiveHeaders', onCompleted:'completed', onErrorOccurred:'requestError'}[name]] = handler;
+    }]));
     for (const name of ['clearStorageData', 'closeAllConnections', 'clearCache', 'clearAuthCache', 'clearCodeCaches']) target[name] = async () => { target.cleared.push(name); };
     return target;
   };
@@ -562,7 +573,10 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const localRequire = createRequire(filename);
   const loaded = { exports: {} };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'module', '__filename', '__dirname', 'setTimeout', 'clearTimeout'])(loaded.exports,
-    name => name === 'electron' ? electron : name === './store' ? { ...localRequire(name), writeStore(path, store, cipher) {
+    name => name === 'electron' ? electron : name === './blocking' ? { createBlockingEngine() { return {
+      ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '',
+      match(url) { blockingCalls.push(url); return url.includes('/blocked-ad') ? { kind: 'ads' } : url.includes('/blocked-tracker') ? { kind: 'trackers' } : undefined; },
+    }; } } : name === './store' ? { ...localRequire(name), writeStore(path, store, cipher) {
       if (writeFailure) throw new Error('Disk unavailable');
       writes.push(structuredClone(store)); localRequire(name).writeStore(path, store, cipher);
     } } : name === './profiles' ? { ...localRequire(name), writeRegistry(path, registry) {
@@ -827,7 +841,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     [{ type: 'delete-bookmark', url: 'https://second.example/' }, 'bookmarks'],
     [{ type: 'remove-download', id: 'download-2' }, 'downloads'],
   ]) {
-    Object.assign(state().store, structuredClone(restoreStore));
+    Object.assign(state().store, structuredClone(restoreStore), { siteSettings: state().store.siteSettings });
     command(destructive);
     const removed = structuredClone(state().store[kind]);
     assert.equal(removed.length, destructive.type === 'clear-history' ? 0 : 2);
@@ -851,7 +865,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     assert.deepEqual(state().store[kind], removed);
     assert.equal(timers.size, 0);
   }
-  Object.assign(state().store, structuredClone(restoreStore));
+  Object.assign(state().store, structuredClone(restoreStore), { siteSettings: state().store.siteSettings });
   command({ type: 'delete-history', url: 'https://second.example/' });
   const historyAfterDelete = structuredClone(state().store.history);
   command({ type: 'delete-bookmark', url: 'https://second.example/' });
@@ -863,7 +877,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   command({ type: 'delete-history', url: 'https://third.example/' });
   command({ type: 'restore', kind: 'history' });
   assert.deepEqual(state().store.history, historyAfterDelete);
-  Object.assign(state().store, originalStore);
+  Object.assign(state().store, originalStore, { siteSettings: state().store.siteSettings });
   tick();
   assert.throws(() => command({ type: 'navigate', input: 'horizon://app/' }));
   for (const url of ['file:///private', 'horizon://app/', 'javascript:alert(1)', 'data:text/html,page', 'custom://example.com/']) {
@@ -942,6 +956,103 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   for (const url of ['file:///private', 'horizon://app/', 'javascript:alert(1)', 'chrome://settings/', 'custom://example.com/']) {
     webSession.network({ url, resourceType: 'subFrame' }, result => assert.equal(result.cancel, true, url));
   }
+  assert.ok(Object.values(webSession.listeners).every(count => count === 1));
+  const network = (url, resourceType = 'script', id = 101) => {
+    let result;
+    webSession.network({ id, webContentsId: view.webContents.id, url, resourceType }, value => { result = value; });
+    return result;
+  };
+  mockCosmetics = true;
+  view.webContents.mainFrame.url = 'https://example.com/';
+  view.webContents.emit('did-start-navigation', {}, 'https://example.com/', false, true);
+  view.webContents.emit('did-navigate', {}, 'https://example.com/');
+  assert.equal(view.visible, false, 'The view waits for CSS installation');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(view.visible, true); assert.equal(view.webContents.css.options.cssOrigin, 'user');
+  assert.equal(state().blockingReady, true);
+  const callsBeforeScheme = blockingCalls.length;
+  assert.equal(network('file:///blocked-ad').cancel, true);
+  assert.equal(blockingCalls.length, callsBeforeScheme, 'Scheme rules precede filter matching');
+  assert.equal(network('https://ads.example/blocked-ad', 'script', 102).cancel, true);
+  assert.equal(network('https://track.example/blocked-tracker', 'script', 103).cancel, true);
+  assert.deepEqual(state().tabs[0].blocked, { ads: 1, trackers: 1, cookies: 0 });
+  const cookieRequest = { id: 104, webContentsId: view.webContents.id, resourceType: 'xhr', url: 'https://third.test/pixel' };
+  network(cookieRequest.url, 'xhr', 104);
+  webSession.sendHeaders({ ...cookieRequest, requestHeaders: { Cookie: 'id=one; token=two', Accept: '*/*' } }, value => assert.deepEqual(value.requestHeaders, { Accept: '*/*' }));
+  webSession.receiveHeaders({ ...cookieRequest, responseHeaders: { 'SET-Cookie': ['id=changed; Secure', 'new=three; Secure'], 'content-type': ['text/plain'] } }, value => assert.deepEqual(value.responseHeaders, { 'content-type': ['text/plain'] }));
+  assert.equal(state().tabs[0].blocked.cookies, 3);
+  webSession.sendHeaders({ ...cookieRequest, requestHeaders: { cookie: 'id=repeated' } }, () => {});
+  assert.equal(state().tabs[0].blocked.cookies, 3);
+  const mainRequest = { id: 106, webContentsId: view.webContents.id, resourceType: 'mainFrame', url: 'https://example.com/' };
+  network(mainRequest.url, 'mainFrame', 106);
+  const redirected = { ...mainRequest, url: 'https://redirected.test/' };
+  network(redirected.url, 'mainFrame', 106);
+  webSession.sendHeaders({ ...redirected, requestHeaders: { Cookie: 'first=party' } }, value => assert.deepEqual(value.requestHeaders, { Cookie: 'first=party' }));
+  network(mainRequest.url, 'mainFrame', 106);
+  const reloads = view.webContents.reloads || 0;
+  command({ type: 'set-blocking', enabled: false });
+  assert.equal(view.webContents.reloads, reloads + 1); assert.equal(state().siteSettings.blocking, false);
+  assert.equal(network('https://ads.example/blocked-ad', 'script', 105).cancel, false);
+  webSession.sendHeaders({ ...cookieRequest, requestHeaders: { Cookie: 'id=one' } }, value => assert.deepEqual(value.requestHeaders, { Cookie: 'id=one' }));
+  webSession.receiveHeaders({ ...cookieRequest, responseHeaders: { 'Set-Cookie': ['id=one'] } }, value => assert.deepEqual(value.responseHeaders, { 'Set-Cookie': ['id=one'] }));
+  command({ type: 'set-blocking', enabled: true });
+  view.webContents.emit('did-start-navigation', {}, 'https://example.com/next', false, true);
+  assert.deepEqual(state().tabs[0].blocked, { ads: 0, trackers: 0, cookies: 0 });
+  webSession.receiveHeaders({ ...cookieRequest, responseHeaders: { 'Set-Cookie': ['late=one'] } }, () => {});
+  assert.equal(state().tabs[0].blocked.cookies, 0, 'Old response cookies never enter the new page count');
+  view.webContents.emit('did-navigate', {}, 'https://example.com/next');
+  await new Promise(resolve => setImmediate(resolve));
+  const permissionResults = [];
+  const requestPermission = (permission, details = {}) => webSession.request(view.webContents, permission, allowed => permissionResults.push([permission, allowed]), details);
+  requestPermission('media', { mediaTypes: ['video', 'audio'], requestingUrl: 'https://evil-frame.test/' });
+  const mediaPrompt = state().permissionPrompt;
+  assert.equal(mediaPrompt.origin, 'https://example.com'); assert.deepEqual(mediaPrompt.permissions, ['camera', 'microphone']);
+  requestPermission('geolocation');
+  command({ type: 'new-tab' }); assert.equal(state().permissionPrompt, null);
+  assert.throws(() => command({ type: 'answer-permission', id: mediaPrompt.id, answer: 'allow' }), /STALE/);
+  command({ type: 'close-tab', id: state().activeId }); assert.equal(state().permissionPrompt.id, mediaPrompt.id);
+  command({ type: 'answer-permission', id: mediaPrompt.id, answer: 'allow' });
+  assert.deepEqual(permissionResults, [['media', true]]);
+  assert.equal(webSession.check(view.webContents, 'media', 'https://evil-frame.test', { mediaType: 'video' }), true);
+  assert.equal(webSession.check(view.webContents, 'media', 'https://evil-frame.test', { mediaType: 'audio' }), true);
+  assert.equal(webSession.check(null, 'media', 'https://evil-frame.test', { embeddingOrigin: 'https://example.com/', mediaType: 'video' }), true);
+  view.webContents.mainFrame.origin = 'null';
+  assert.equal(webSession.check(view.webContents, 'media', 'https://example.com', { mediaType: 'video' }), false);
+  requestPermission('media', { mediaTypes: ['video'] });
+  assert.deepEqual(permissionResults.at(-1), ['media', false]);
+  delete view.webContents.mainFrame.origin;
+  assert.equal(state().permissionPrompt.permissions[0], 'location');
+  command({ type: 'answer-permission', id: state().permissionPrompt.id, answer: 'dismiss' });
+  assert.equal(state().siteSettings.permissions.location, 'ask');
+  requestPermission('notifications');
+  command({ type: 'answer-permission', id: state().permissionPrompt.id, answer: 'block' });
+  requestPermission('notifications'); assert.equal(state().permissionPrompt, null);
+  assert.equal(webSession.check(view.webContents, 'notifications', 'https://example.com', {}), false);
+  requestPermission('geolocation');
+  command({ type: 'set-site-permission', permission: 'location', decision: 'allow' });
+  assert.equal(permissionResults.at(-1)[1], true); assert.equal(state().permissionPrompt, null);
+  command({ type: 'set-site-permission', permission: 'camera', decision: 'ask' });
+  requestPermission('media', { mediaTypes: ['video'] });
+  const stalePrompt = state().permissionPrompt;
+  view.webContents.emit('did-start-navigation', {}, 'http://insecure.test/', false, true);
+  assert.equal(permissionResults.at(-1)[1], false); assert.equal(state().permissionPrompt, null);
+  assert.throws(() => command({ type: 'answer-permission', id: stalePrompt.id, answer: 'allow' }), /STALE/);
+  requestPermission('media', { mediaTypes: ['video'] });
+  assert.equal(state().permissionPrompt, null, 'A replaced document cannot create another prompt');
+  view.webContents.mainFrame.url = 'http://insecure.test/'; requestPermission('geolocation');
+  assert.equal(permissionResults.at(-1)[1], false); assert.equal(state().permissionPrompt, null);
+  view.webContents.mainFrame.url = 'https://example.com/';
+  view.webContents.emit('did-navigate', {}, 'https://example.com/'); await new Promise(resolve => setImmediate(resolve));
+  command({ type: 'new-tab', input: 'https://close-permission.test/' });
+  const permissionTab = views.at(-1).webContents;
+  permissionTab.mainFrame.url = 'https://close-permission.test/';
+  permissionTab.emit('did-navigate', {}, permissionTab.mainFrame.url);
+  webSession.request(permissionTab, 'geolocation', allowed => permissionResults.push(['closed', allowed]), {});
+  assert.equal(state().permissionPrompt.permissions[0], 'location');
+  command({ type: 'close-tab', id: state().activeId });
+  assert.deepEqual(permissionResults.at(-1), ['closed', false]);
+  mockCosmetics = false;
+  tick();
   let blocked = false;
   webSession.emit('will-download', { preventDefault() { blocked = true; } }, {}, window.webContents);
   assert.equal(blocked, true);
@@ -1023,7 +1134,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.throws(() => menuAction(oldMenu, 'reload'));
   assert.equal(state().activeProfileId, work.id);
   assert.equal(readRegistry(join(directory, 'profiles.json'), 'en').activeId, work.id);
-  assert.deepEqual(state().store, { version: 1, history: [], bookmarks: [], downloads: [] });
+  assert.deepEqual(state().store, { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } });
   assert.equal(state().tabs.length, 1);
   assert.equal(view.visible, false); assert.equal(view.webContents.destroyed, false);
   assert.equal(sessions.size, 2);
@@ -1526,10 +1637,10 @@ test('profile stores encrypt through an injected cipher and retain tampered or i
   const tampered = Buffer.from(encrypted); tampered[tampered.length - 1] ^= 1;
   writeFileSync(path, tampered);
   const readStatus = { readError: false, memoryOnly: false };
-  assert.deepEqual(readStore(path, cipher, readStatus), { version: 1, history: [], bookmarks: [], downloads: [] });
+  assert.deepEqual(readStore(path, cipher, readStatus), { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } });
   assert.deepEqual(readStatus, { readError: true, memoryOnly: false });
   assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(tampered)));
-  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 2 }))]);
+  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 3 }))]);
   writeFileSync(path, invalid);
   assert.equal(readStore(path, cipher).history.length, 0);
   assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(invalid)));
@@ -1625,4 +1736,222 @@ test('all profile commands reject extra keys, invalid names, ids, colours and un
     for (const name of ['', ' ', '\nname', 'Control\u0085', 'x'.repeat(41), null, {}, 5]) assert.throws(() => validateCommand({ type, name, color: 'amber', ...(type === 'update-profile' ? { id } : {}) }, known));
     for (const color of ['orange', '#ffffff', null, 5, {}]) assert.throws(() => validateCommand({ type, name: 'Valid', color, ...(type === 'update-profile' ? { id } : {}) }, known));
   }
+});
+
+test('site settings migrate strict version 1 stores and validate bounded canonical origins and hosts', t => {
+  const directory = temporaryDirectory(t, 'site-settings');
+  const path = join(directory, 'store.json'), sample = sampleStore(directory);
+  const legacy = { version: 1, history: sample.history, bookmarks: sample.bookmarks, downloads: sample.downloads };
+  legacy.version = 1;
+  writeFileSync(path, JSON.stringify(legacy));
+  const migrated = readStore(path);
+  assert.deepEqual(migrated, sample);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), sample);
+  assert.equal(readdirSync(directory).some(name => name.includes('corrupt')), false);
+  const cipher = authenticatedCipher(), encryptedLegacy = join(directory, 'encrypted.json');
+  writeFileSync(encryptedLegacy, Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify(legacy))]));
+  assert.deepEqual(readStore(encryptedLegacy, cipher), sample);
+  const settings = sample.siteSettings;
+  setBlocking(settings, 'example.com', false);
+  setPermission(settings, 'https://example.com', 'camera', 'allow');
+  assert.equal(validateStore(sample), true);
+  assert.equal(siteSettings(settings, 'http://example.com/').blocking, false);
+  assert.equal(siteSettings(settings, 'http://example.com/').permissions.camera, 'ask');
+  assert.equal(siteSettings(settings, 'https://example.com/').permissions.camera, 'allow');
+  for (const host of ['', 'Example.com', 'user@example.com', 'example.com:443', 'example.com/path', 'example.com.', 'x'.repeat(254), '\0']) {
+    const invalid = structuredClone(sample); invalid.siteSettings.blocking[0].host = host;
+    assert.equal(validateStore(invalid), false, host);
+  }
+  for (const origin of ['https://example.com/', 'http://user@example.com', 'file:///private', 'about:blank', 'https://EXAMPLE.com', 'https://example.com/path', 'https://example.com#part', 'https://' + 'a'.repeat(2048)]) {
+    const invalid = structuredClone(sample); invalid.siteSettings.permissions[0].origin = origin;
+    assert.equal(validateStore(invalid), false, origin);
+  }
+  for (const change of [
+    value => { value.siteSettings.extra = true; }, value => { delete value.siteSettings; },
+    value => { value.siteSettings.blocking[0].enabled = 'false'; }, value => { value.siteSettings.permissions[0].camera = 'yes'; },
+    value => { value.siteSettings.permissions[0].extra = true; }, value => { value.siteSettings.blocking.push(value.siteSettings.blocking[0]); },
+    value => { value.siteSettings.permissions.push(value.siteSettings.permissions[0]); }, value => { value.siteSettings.blocking = new Array(1); },
+    value => { value.siteSettings.permissions = new Array(SITE_SETTINGS_LIMIT + 1); },
+  ]) { const invalid = structuredClone(sample); change(invalid); assert.equal(validateStore(invalid), false); }
+  writeFileSync(path, JSON.stringify({ ...legacy, extra: true }));
+  assert.equal(readStore(path).history.length, 0, 'Invalid legacy files are not migrated');
+});
+
+test('site commands accept exact keys and known values only', () => {
+  const valid = [
+    ...[true, false].map(enabled => ({ type: 'set-blocking', enabled })),
+    ...['camera', 'microphone', 'location', 'notifications'].flatMap(permission => ['ask', 'allow', 'block'].map(decision => ({ type: 'set-site-permission', permission, decision }))),
+    ...['allow', 'block', 'dismiss'].map(answer => ({ type: 'answer-permission', id: 'prompt', answer })),
+  ];
+  for (const command of valid) {
+    assert.deepEqual(validateCommand(command), command);
+    assert.throws(() => validateCommand({ ...command, origin: 'https://attacker.test' }));
+    for (const key of Object.keys(command)) { const missing = { ...command }; delete missing[key]; assert.throws(() => validateCommand(missing)); }
+  }
+  for (const command of [
+    { type: 'set-blocking', enabled: 1 }, { type: 'set-blocking', enabled: 'true' },
+    { type: 'set-site-permission', permission: 'geolocation', decision: 'allow' },
+    { type: 'set-site-permission', permission: 'camera', decision: 'dismiss' },
+    { type: 'answer-permission', id: '', answer: 'allow' }, { type: 'answer-permission', id: 'x'.repeat(129), answer: 'allow' },
+    { type: 'answer-permission', id: '\0', answer: 'allow' }, { type: 'answer-permission', id: 'prompt', answer: 'ask' },
+    { type: 'answer-permission', id: 'prompt', answer: {} },
+  ]) assert.throws(() => validateCommand(command));
+});
+
+test('permission queues combine media callbacks, remember decisions, dismiss once and refuse dropped requests', () => {
+  const settings = { blocking: [], permissions: [] }, results = [];
+  let remembered = 0, changed = 0;
+  const queue = new PermissionQueue(settings, () => changed++, () => remembered++);
+  const request = (tab, origin, permissions) => queue.request(tab, origin, permissions, allowed => results.push(allowed));
+  assert.deepEqual(requestedPermissions('media', { mediaTypes: ['video', 'audio'] }), ['camera', 'microphone']);
+  assert.deepEqual(requestedPermissions('media', { mediaType: 'unknown' }), []);
+  assert.deepEqual(requestedPermissions('clipboard-read'), []);
+  for (const origin of ['https://example.com', 'http://localhost:3000', 'http://sub.localhost', 'http://127.0.0.1', 'http://[::1]']) assert.equal(secureOrigin(origin), true);
+  for (const origin of ['http://example.com', 'http://127.evil.test', 'https://user@example.com', 'file:///private']) assert.equal(secureOrigin(origin), false);
+  request('tab', 'https://example.com', ['camera', 'microphone']);
+  const media = queue.prompt('tab');
+  request('tab', 'https://example.com', ['camera', 'microphone']);
+  request('tab', 'https://example.com', ['location']);
+  request('other', 'https://other.test', ['notifications']);
+  assert.equal(queue.prompt('tab').id, media.id); assert.notEqual(queue.prompt('other').id, media.id);
+  queue.answer('tab', media.id, 'allow');
+  assert.deepEqual(results, [true, true]); assert.equal(remembered, 1);
+  request('tab', 'https://example.com', ['camera']); assert.equal(results.at(-1), true);
+  queue.answer('tab', queue.prompt('tab').id, 'dismiss');
+  assert.equal(siteSettings(settings, 'https://example.com').permissions.location, 'ask'); assert.equal(remembered, 1);
+  request('tab', 'https://example.com', ['location']);
+  queue.answer('tab', queue.prompt('tab').id, 'block');
+  request('tab', 'https://example.com', ['location']); assert.equal(queue.prompt('tab'), null); assert.equal(results.at(-1), false);
+  const stale = queue.prompt('other').id; queue.drop('other');
+  assert.equal(queue.prompt('other'), null); assert.equal(results.at(-1), false);
+  assert.throws(() => queue.answer('other', stale, 'allow'), /STALE/);
+  request('tab', 'http://insecure.test', ['camera']); assert.equal(results.at(-1), false);
+  assert.deepEqual(defaultPermissions(), { camera: 'ask', microphone: 'ask', location: 'ask', notifications: 'ask' });
+  assert.ok(changed > 0);
+});
+
+test('cookie headers use schemeful registrable sites and private suffixes and count distinct site/name pairs', () => {
+  assert.equal(cookieSite('https://a.example.co.uk/'), 'https://example.co.uk');
+  assert.notEqual(cookieSite('https://one.github.io/'), cookieSite('https://two.github.io/'));
+  assert.equal(cookieSite('wss://a.example.com/'), cookieSite('https://b.example.com/'));
+  const refused = new Set();
+  const headers = { Cookie: 'id=one; id=two; token=three', Accept: '*/*' };
+  assert.deepEqual(stripCookieHeaders(headers, false, 'https://third.test', 'https://first.test', true, refused), { Accept: '*/*' });
+  assert.equal(refused.size, 2); assert.equal(headers.Cookie, 'id=one; id=two; token=three');
+  assert.deepEqual(stripCookieHeaders({ 'set-cookie': ['id=other; Secure', 'another=one; Expires=Thu, 01 Jan 2037 00:00:00 GMT'] }, true, 'https://third.test', 'https://first.test', true, refused), {});
+  assert.equal(refused.size, 3);
+  stripCookieHeaders({ cookie: 'id=one' }, false, 'https://different.test', 'https://first.test', true, refused); assert.equal(refused.size, 4);
+  assert.equal(stripCookieHeaders(headers, false, 'https://third.test', 'https://first.test', false, refused), headers);
+  assert.equal(stripCookieHeaders(headers, false, 'https://a.example.com', 'https://b.example.com', true, refused), headers);
+});
+
+const {
+  LIST_BYTES_LIMIT, LIST_HOSTS, assertListURL, createBlockingEngine,
+  downloadFilterList, isPublicListAddress, safeCosmeticCSS,
+} = require('../dist/electron/blocking.js');
+const list = 'https://raw.githubusercontent.com/ghostery/adblocker/master/packages/adblocker/assets/easylist/easylist.txt';
+
+function blockingDirectory(t) {
+  mkdirSync('.runtime', { recursive: true });
+  const root = mkdtempSync(resolve('.runtime/blocking-test-'));
+  t.after(() => { assert.ok(root.startsWith(resolve('.runtime') + require('node:path').sep)); rmSync(root, { recursive: true, force: true }); });
+  return root;
+}
+
+function filterSource(url) {
+  if (url.endsWith('resources.json')) return JSON.stringify({
+    redirects: [{ name: 'nooptext', aliases: [], body: '', contentType: 'text/plain' }], scriptlets: [],
+  });
+  if (url.endsWith('/easylist.txt')) return [
+    '||ad.example^', '@@||ad.example/okay^', '||redir.example^$redirect=nooptext',
+    '||sock.example^', 'site.example##.sponsor', '##div[data-ad]',
+  ].join('\n');
+  if (url.endsWith('/easyprivacy.txt')) return '||track.example^';
+  return '';
+}
+
+test('list boundary accepts only package URLs on the fixed HTTPS host and public DNS addresses', () => {
+  assert.deepEqual(LIST_HOSTS, ['raw.githubusercontent.com']);
+  assert.equal(assertListURL(list).href, list);
+  for (const value of [
+    list.replace('https:', 'http:'), list.replace('raw.githubusercontent.com', 'evil.example'),
+    list.replace('raw.githubusercontent.com', 'raw.githubusercontent.com.evil.example'),
+    list + '?other', list + '#fragment', list.replace('easylist.txt', 'extra.txt'),
+    list.replace('https://', 'https://user@'),
+  ]) assert.throws(() => assertListURL(value), /FILTER_SOURCE_REFUSED/);
+  for (const address of ['127.0.0.1', '10.1.2.3', '169.254.169.254', '::1', 'fc00::1', '::ffff:127.0.0.1', '::ffff:7f00:1']) {
+    assert.equal(isPublicListAddress(address), false, address);
+  }
+  assert.equal(isPublicListAddress('8.8.8.8'), true);
+});
+
+test('list response refuses redirects, oversized headers and streams, and timed out headers or bodies', async t => {
+  let called = false;
+  for (const url of [list.replace('https:', 'http:'), list.replace('raw.githubusercontent.com', 'evil.test')]) {
+    await assert.rejects(downloadFilterList(url, async () => { called = true; return new Response('unexpected'); }), /FILTER_SOURCE_REFUSED/);
+  }
+  assert.equal(called, false);
+  await assert.rejects(downloadFilterList(list, async () => new Response(null, { status: 302 })), /FILTER_RESPONSE_REFUSED/);
+  await assert.rejects(downloadFilterList(list, async () => new Response('small', { headers: { 'content-length': String(LIST_BYTES_LIMIT + 1) } })), /FILTER_RESPONSE_REFUSED/);
+  const tooLarge = () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(LIST_BYTES_LIMIT + 1)); controller.close(); } }));
+  await assert.rejects(downloadFilterList(list, async () => tooLarge()), /FILTER_SIZE_LIMIT/);
+  let deadline = new AbortController();
+  t.mock.method(AbortSignal, 'timeout', duration => { assert.equal(duration, 30000); return deadline.signal; });
+  const headers = downloadFilterList(list, () => new Promise(() => undefined));
+  deadline.abort();
+  await assert.rejects(headers, /FILTER_TIMEOUT/);
+  deadline = new AbortController();
+  const slowBody = downloadFilterList(list, async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([65])); }, cancel() { return new Promise(() => undefined); } })));
+  setImmediate(() => deadline.abort());
+  await assert.rejects(slowBody, /FILTER_TIMEOUT/);
+});
+
+test('two serialized engines classify ads and trackers, respect exceptions and allow neutral data redirects', async t => {
+  const root = blockingDirectory(t);
+  let changed = 0, downloads = 0;
+  const first = createBlockingEngine(root, () => changed++, { download: async url => { downloads++; return filterSource(url); } });
+  assert.equal(first.ready, false);
+  assert.equal(first.match('https://ad.example/x', 'image', 'https://site.example/'), undefined);
+  assert.equal(await first.refresh(), true);
+  assert.equal(downloads, 15);
+  assert.equal(changed, 1);
+  assert.deepEqual(first.match('https://ad.example/x', 'image', 'https://site.example/'), { kind: 'ads' });
+  assert.deepEqual(first.match('https://track.example/x', 'script', 'https://site.example/'), { kind: 'trackers' });
+  assert.equal(first.match('https://ad.example/okay', 'image', 'https://site.example/'), undefined);
+  assert.deepEqual(first.match('ws://sock.example/connect', 'webSocket', 'https://site.example/'), { kind: 'ads' });
+  assert.deepEqual(first.match('https://redir.example/x', 'script', 'https://site.example/'), { kind: 'ads', redirectURL: 'data:text/plain;base64,' });
+  assert.match(first.cosmeticCSS('https://site.example/'), /\.sponsor \{ display: none !important; \}/);
+  assert.doesNotMatch(first.cosmeticCSS('https://site.example/'), /div\[data-ad\]/);
+  first.stop();
+  const cached = createBlockingEngine(root);
+  await cached.start();
+  assert.equal(cached.ready, true);
+  assert.deepEqual(cached.match('https://track.example/x', 'script', 'https://site.example/'), { kind: 'trackers' });
+  cached.stop();
+});
+
+test('stale refresh failure keeps the serialized last good engine', async t => {
+  const root = blockingDirectory(t), initial = Date.now();
+  const first = createBlockingEngine(root, undefined, { now: () => initial, download: async url => filterSource(url) });
+  assert.equal(await first.refresh(), true);
+  first.stop();
+  const kept = readFileSync(join(root, 'adblock', 'engines.bin'));
+  let attempted = 0;
+  const stale = createBlockingEngine(root, undefined, { now: () => initial + 24 * 60 * 60 * 1000 + 1, download: async () => { attempted++; throw new Error('offline'); } });
+  await stale.start();
+  await stale.refresh();
+  assert.ok(attempted > 0);
+  assert.equal(stale.ready, true);
+  assert.deepEqual(stale.match('https://ad.example/x', 'image', 'https://site.example/'), { kind: 'ads' });
+  assert.deepEqual(readFileSync(join(root, 'adblock', 'engines.bin')), kept);
+  stale.stop();
+  const empty = createBlockingEngine(root, undefined, { download: async url => url.endsWith('resources.json') ? filterSource(url) : '' });
+  assert.equal(await empty.refresh(), false);
+  assert.deepEqual(readFileSync(join(root, 'adblock', 'engines.bin')), kept);
+  empty.stop();
+});
+
+test('cosmetic sanitization keeps only fixed hiding declarations and refuses loading CSS', () => {
+  const styles = '.ad { display:none!important; } .remote { background:url(https://evil.example/x); } .font { @font-face:x; } .custom { opacity:0; }';
+  assert.deepEqual(safeCosmeticCSS(styles), { css: '.ad { display: none !important; }', rules: 1 });
 });

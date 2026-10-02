@@ -3,6 +3,7 @@ import { isWebURL } from './browsing';
 import { isContrast, isTheme } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
+import { isPermissionDecision, isSitePermission } from './site-settings';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid browser argument');
@@ -19,6 +20,11 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
   const type = command.type;
   let valid = false;
   switch (type) {
+    case 'set-blocking': keys(command, ['type', 'enabled']); valid = Object.keys(command).length === 2 && typeof command.enabled === 'boolean'; break;
+    case 'set-site-permission':
+      keys(command, ['type', 'permission', 'decision']); valid = Object.keys(command).length === 3 && isSitePermission(command.permission) && isPermissionDecision(command.decision); break;
+    case 'answer-permission':
+      keys(command, ['type', 'id', 'answer']); valid = Object.keys(command).length === 3 && string(command.id, 128) && ['allow', 'block', 'dismiss'].includes(command.answer as string); break;
     case 'switch-profile': case 'delete-profile':
       keys(command, ['type', 'id']); valid = Object.keys(command).length === 2 && Object.hasOwn(command, 'id') && isProfileId(command.id) && (!profileIds || profileIds.has(command.id)); break;
     case 'create-profile': case 'update-profile':

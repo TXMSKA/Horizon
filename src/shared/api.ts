@@ -11,14 +11,25 @@ export interface HistoryEntry { url: string; title: string; lastVisit: number; v
 export interface Bookmark { url: string; title: string; createdAt: number }
 export type DownloadStatus = 'progressing' | 'completed' | 'failed' | 'cancelled';
 export interface DownloadEntry { id: string; url: string; filename: string; path: string; received: number; total: number; status: DownloadStatus; startedAt: number }
-export interface BrowserStore { version: 1; history: HistoryEntry[]; bookmarks: Bookmark[]; downloads: DownloadEntry[] }
-export interface TabState { id: string; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number } }
-export interface BrowserState { profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast }
+export const SITE_PERMISSIONS = ['camera', 'microphone', 'location', 'notifications'] as const;
+export type SitePermission = typeof SITE_PERMISSIONS[number];
+export type PermissionDecision = 'ask' | 'allow' | 'block';
+export type PermissionDecisions = Record<SitePermission, PermissionDecision>;
+export interface SiteSettingsStore { blocking: { host: string; enabled: boolean }[]; permissions: ({ origin: string } & PermissionDecisions)[] }
+export interface SiteSettings { host: string; origin: string; blocking: boolean; permissions: PermissionDecisions }
+export interface PermissionPrompt { id: string; origin: string; permissions: SitePermission[] }
+export interface BlockedCounts { ads: number; trackers: number; cookies: number }
+export interface BrowserStore { version: 2; history: HistoryEntry[]; bookmarks: Bookmark[]; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore }
+export interface TabState { id: string; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
+export interface BrowserState { profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
 export type BrowserShortcut = 'focus-address' | 'new-tab' | 'close-tab' | 'next-tab' | 'previous-tab' | 'back' | 'forward' | 'reload' | 'stop' | 'history' | 'downloads' | 'bookmark' | 'find' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | `tab-${number}`;
 export type BrowserCommand =
+  | { type: 'set-blocking'; enabled: boolean }
+  | { type: 'set-site-permission'; permission: SitePermission; decision: PermissionDecision }
+  | { type: 'answer-permission'; id: string; answer: 'allow' | 'block' | 'dismiss' }
   | { type: 'switch-profile' | 'delete-profile'; id: string }
   | { type: 'create-profile'; name: string; color: ProfileColor }
   | { type: 'update-profile'; id: string; name: string; color: ProfileColor }

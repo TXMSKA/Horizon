@@ -3,6 +3,7 @@ import { basename, dirname, extname, isAbsolute, resolve, win32 } from 'node:pat
 import { randomUUID } from 'node:crypto';
 import type { BrowserStore } from '../src/shared/api';
 import { isWebURL } from './browsing';
+import { isPermissionDecision, SITE_SETTINGS_LIMIT, validHost, validOrigin } from './site-settings';
 
 function object(value: unknown, keys: string[]): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -37,9 +38,8 @@ function encryptedStore(path: string): boolean {
   } finally { closeSync(file); }
 }
 
-export function validateStore(value: unknown): value is BrowserStore {
-  return object(value, ['version', 'history', 'bookmarks', 'downloads']) && value.version === 1
-    && entries(value.history, entry => object(entry, ['url', 'title', 'lastVisit', 'visitCount'])
+function browsingEntries(value: Record<string, unknown>): boolean {
+  return entries(value.history, entry => object(entry, ['url', 'title', 'lastVisit', 'visitCount'])
       && isWebURL(entry.url) && string(entry.title, 4096) && timestamp(entry.lastVisit) && integer(entry.visitCount, 1))
     && entries(value.bookmarks, entry => object(entry, ['url', 'title', 'createdAt'])
       && isWebURL(entry.url) && string(entry.title, 4096) && timestamp(entry.createdAt))
@@ -50,6 +50,26 @@ export function validateStore(value: unknown): value is BrowserStore {
       && string(entry.path, 8192, 1) && (isAbsolute(entry.path) || win32.isAbsolute(entry.path))
       && integer(entry.received) && integer(entry.total) && timestamp(entry.startedAt)
       && typeof entry.status === 'string' && ['progressing', 'completed', 'failed', 'cancelled'].includes(entry.status));
+}
+
+function legacyStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings'> & { version: 1 } {
+  return object(value, ['version', 'history', 'bookmarks', 'downloads']) && value.version === 1 && browsingEntries(value);
+}
+export function validateStore(value: unknown): value is BrowserStore {
+  if (!object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings']) || value.version !== 2 || !browsingEntries(value)
+    || !object(value.siteSettings, ['blocking', 'permissions'])) return false;
+  const settings = value.siteSettings;
+  if (!Array.isArray(settings.blocking) || settings.blocking.length > SITE_SETTINGS_LIMIT
+    || !Array.isArray(settings.permissions) || settings.permissions.length > SITE_SETTINGS_LIMIT) return false;
+  const hosts = new Set<string>(), origins = new Set<string>();
+  return Array.from(settings.blocking).every(entry => {
+    if (!object(entry, ['host', 'enabled']) || !validHost(entry.host) || typeof entry.enabled !== 'boolean' || hosts.has(entry.host)) return false;
+    hosts.add(entry.host); return true;
+  }) && Array.from(settings.permissions).every(entry => {
+    if (!object(entry, ['origin', 'camera', 'microphone', 'location', 'notifications']) || !validOrigin(entry.origin) || origins.has(entry.origin)
+      || !['camera', 'microphone', 'location', 'notifications'].every(key => isPermissionDecision(entry[key]))) return false;
+    origins.add(entry.origin); return true;
+  });
 }
 
 export function writeStore(path: string, store: BrowserStore, cipher?: StoreCipher): void {
@@ -72,7 +92,7 @@ export function writeStore(path: string, store: BrowserStore, cipher?: StoreCiph
 }
 
 export function readStore(path: string, cipher?: StoreCipher, status: StoreReadStatus = { readError: false, memoryOnly: false }): BrowserStore {
-  const empty: BrowserStore = { version: 1, history: [], bookmarks: [], downloads: [] };
+  const empty: BrowserStore = { version: 2, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], permissions: [] } };
   try {
     if (!existsSync(path)) {
       writeStore(path, empty, cipher);
@@ -90,9 +110,13 @@ export function readStore(path: string, cipher?: StoreCipher, status: StoreReadS
       const encrypted = bytes.subarray(0, encryptedHeader.length).equals(encryptedHeader);
       const json = encrypted ? cipher!.decryptString(bytes.subarray(encryptedHeader.length)) : bytes.toString('utf8');
       const value: unknown = JSON.parse(json);
-      if (!validateStore(value)) throw new Error('Invalid browser store');
-      store = value;
-      upgrade = !encrypted && Boolean(cipher?.isEncryptionAvailable());
+      if (legacyStore(value)) {
+        store = { ...value, version: 2, siteSettings: { blocking: [], permissions: [] } }; upgrade = true;
+      } else {
+        if (!validateStore(value)) throw new Error('Invalid browser store');
+        store = value;
+      }
+      upgrade ||= !encrypted && Boolean(cipher?.isEncryptionAvailable());
     } catch {
       status.readError = true;
       renameSync(path, `${path}.corrupt-${randomUUID()}`);

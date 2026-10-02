@@ -23,9 +23,11 @@
     "verify:window": "electron scripts/verify-foundation.cjs"
   },
   "dependencies": {
+    "@ghostery/adblocker": "2.18.2",
     "lucide-react": "1.48.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "tldts-experimental": "7.4.15"
   },
   "devDependencies": {
     "@electron/fuses": "2.1.3",
