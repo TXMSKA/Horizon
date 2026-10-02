@@ -2066,6 +2066,21 @@ test('permission buttons use touch targets only for coarse pointers', () => {
   assert.doesNotMatch(coarse[1], /(?:^|,)\s*\.site-permission-row\s*[,\{]/m);
 });
 
+test('tab strip makes room for touch targets only for coarse pointers', () => {
+  const css = readFileSync('src/styles.css', 'utf8');
+  const tokens = readFileSync('src/tokens.css', 'utf8');
+  const coarse = css.match(/@media \(pointer: coarse\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(coarse);
+  assert.match(tokens, /--height-tabs-touch:\s*3\.5rem\s*;/);
+  assert.match(coarse[1], /:root\s*\{\s*--height-tabs:\s*var\(--height-tabs-touch\);\s*\}/);
+  assert.match(coarse[1], /\.tab-strip\s*\{\s*--height-tab:\s*var\(--target-touch\);\s*--target-minimum:\s*var\(--target-touch\);\s*\}/);
+  for (const [token, size] of [['height-tab', 'size-32'], ['height-tabs', 'size-44'], ['target-minimum', 'size-32']]) {
+    const declaration = new RegExp('--' + token + ':\\s*([^;]+);', 'g');
+    assert.deepEqual([...tokens.matchAll(declaration)].map(match => match[1].trim()), ['var(--' + size + ')']);
+    assert.doesNotMatch(css.replace(coarse[0], ''), declaration);
+  }
+});
+
 test('cosmetic sanitization keeps only fixed hiding declarations and refuses loading CSS', () => {
   const styles = '.ad { display:none!important; } .remote { background:url(https://evil.example/x); } .font { @font-face:x; } .custom { opacity:0; }';
   assert.deepEqual(safeCosmeticCSS(styles), { css: '.ad { display: none !important; }', rules: 1 });

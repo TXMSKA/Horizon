@@ -190,6 +190,8 @@ kbd { border-radius: var(--radius-badge); color: var(--text-secondary); font-fam
   .entry-actions { margin-left: auto; }
 }
 @media (pointer: coarse) {
+  :root { --height-tabs: var(--height-tabs-touch); }
+  .tab-strip { --height-tab: var(--target-touch); --target-minimum: var(--target-touch); }
   .shortcuts a { margin-block: 0; }
   .icon-button, .shortcuts a, .control-switch { min-width: var(--target-touch); min-height: var(--target-touch); }
   .site-popover button.site-permission-row, .site-permission-actions .profile-action, .site-permission-menu > button { min-height: var(--target-touch); }

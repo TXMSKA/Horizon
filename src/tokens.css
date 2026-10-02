@@ -307,6 +307,8 @@
   --height-divider: var(--space-20);
   --height-tab: var(--size-32);
   --height-tabs: var(--size-44);
+  /* The 44px touch tab keeps the mouse layout's 6px above and below its tab. */
+  --height-tabs-touch: 3.5rem;
   --height-toolbar: var(--size-52);
   --height-address: var(--size-36);
   --height-brand: 2.375rem;
