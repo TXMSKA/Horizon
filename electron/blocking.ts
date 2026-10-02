@@ -178,10 +178,13 @@ export function createBlockingEngine(userData: string, onReady: () => void = () 
   let refreshPromise: Promise<boolean> | undefined;
   let controller: AbortController | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryIndex = 0;
   let started = false;
   const refresh = (): Promise<boolean> => {
     if (stopped) return Promise.resolve(false);
     if (refreshPromise) return refreshPromise;
+    clearTimeout(retryTimer); retryTimer = undefined;
     controller = new AbortController();
     refreshPromise = (async () => {
       try {
@@ -202,9 +205,17 @@ export function createBlockingEngine(userData: string, onReady: () => void = () 
         finally { await unlink(temporary).catch(() => undefined); }
         if (stopped) return false;
         current = { ads, full, updatedAt };
+        retryIndex = 0;
         onReady();
         return true;
-      } catch { controller?.abort(); return false; }
+      } catch {
+        controller?.abort();
+        if (!stopped && !current && retryIndex < 3) {
+          retryTimer = setTimeout(() => { retryTimer = undefined; void refresh(); }, [1, 5, 15][retryIndex++]! * 60 * 1000);
+          retryTimer.unref();
+        }
+        return false;
+      }
       finally { refreshPromise = undefined; controller = undefined; }
     })();
     return refreshPromise;
@@ -226,7 +237,7 @@ export function createBlockingEngine(userData: string, onReady: () => void = () 
       timer.unref();
     },
     refresh,
-    stop(): void { stopped = true; controller?.abort(); clearInterval(timer); },
+    stop(): void { stopped = true; controller?.abort(); clearInterval(timer); clearTimeout(retryTimer); },
     match(url: string, resourceType: ElectronRequestType, sourceURL: string): BlockMatch | undefined {
       if (!current || !/^(?:https?|wss?):\/\//i.test(url) || !/^https?:\/\//i.test(sourceURL)) return undefined;
       const request = Request.fromRawDetails({ url, type: resourceType, sourceUrl: sourceURL });

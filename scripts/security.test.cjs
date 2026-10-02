@@ -1987,12 +1987,53 @@ test('two serialized engines classify ads and trackers, respect exceptions and a
   cached.stop();
 });
 
-test('stale refresh failure keeps the serialized last good engine', async t => {
+test('missing engine retries after 1, 5 and 15 minutes then waits for the hourly check', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  let downloads = 0;
+  const engine = createBlockingEngine(blockingDirectory(t), undefined, { download: async () => { downloads++; throw new Error('offline'); } });
+  t.after(() => engine.stop());
+  await engine.start(); await engine.refresh();
+  assert.equal(downloads, 15); assert.equal(engine.ready, false);
+  for (const [delay, expected] of [[1, 30], [5, 45], [15, 60]]) {
+    t.mock.timers.tick(delay * 60 * 1000 - 1); assert.equal(downloads, expected - 15);
+    t.mock.timers.tick(1); assert.equal(downloads, expected);
+    await engine.refresh(); assert.equal(downloads, expected);
+  }
+  t.mock.timers.tick(39 * 60 * 1000 - 1); assert.equal(downloads, 60);
+  t.mock.timers.tick(1); assert.equal(downloads, 75);
+  await engine.refresh(); assert.equal(downloads, 75);
+});
+
+test('successful retry makes the engine ready and cancels quick retries', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  let downloads = 0, online = false, changed = 0;
+  const engine = createBlockingEngine(blockingDirectory(t), () => changed++, { download: async url => { downloads++; if (!online) throw new Error('offline'); return filterSource(url); } });
+  t.after(() => engine.stop());
+  await engine.start(); await engine.refresh();
+  online = true; t.mock.timers.tick(60 * 1000);
+  assert.equal(downloads, 30); assert.equal(await engine.refresh(), true);
+  assert.equal(engine.ready, true); assert.equal(changed, 1);
+  assert.deepEqual(engine.match('https://ad.example/x', 'image', 'https://site.example/'), { kind: 'ads' });
+  t.mock.timers.tick(60 * 60 * 1000); assert.equal(downloads, 30);
+});
+
+test('stopping a missing engine cancels its pending retry and hourly check', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  let downloads = 0;
+  const engine = createBlockingEngine(blockingDirectory(t), undefined, { download: async () => { downloads++; throw new Error('offline'); } });
+  t.after(() => engine.stop());
+  await engine.start(); await engine.refresh();
+  engine.stop(); t.mock.timers.tick(2 * 60 * 60 * 1000);
+  assert.equal(downloads, 15); assert.equal(await engine.refresh(), false); assert.equal(engine.ready, false);
+});
+
+test('stale refresh failure keeps the serialized last good engine without quick retries', async t => {
   const root = blockingDirectory(t), initial = Date.now();
   const first = createBlockingEngine(root, undefined, { now: () => initial, download: async url => filterSource(url) });
   assert.equal(await first.refresh(), true);
   first.stop();
   const kept = readFileSync(join(root, 'adblock', 'engines.bin'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   let attempted = 0;
   const stale = createBlockingEngine(root, undefined, { now: () => initial + 24 * 60 * 60 * 1000 + 1, download: async () => { attempted++; throw new Error('offline'); } });
   await stale.start();
@@ -2001,6 +2042,10 @@ test('stale refresh failure keeps the serialized last good engine', async t => {
   assert.equal(stale.ready, true);
   assert.deepEqual(stale.match('https://ad.example/x', 'image', 'https://site.example/'), { kind: 'ads' });
   assert.deepEqual(readFileSync(join(root, 'adblock', 'engines.bin')), kept);
+  const failed = attempted;
+  t.mock.timers.tick(60 * 60 * 1000 - 1); assert.equal(attempted, failed);
+  t.mock.timers.tick(1); assert.equal(attempted, failed + 15);
+  await stale.refresh();
   stale.stop();
   const empty = createBlockingEngine(root, undefined, { download: async url => url.endsWith('resources.json') ? filterSource(url) : '' });
   assert.equal(await empty.refresh(), false);
