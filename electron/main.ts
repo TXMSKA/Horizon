@@ -54,6 +54,7 @@ app.whenReady().then(async () => {
     minHeight: 480,
     frame: false,
     show: false,
+    icon: resolve(__dirname, '../icon.png'),
     backgroundColor: background(),
     webPreferences: {
       preload: resolve(__dirname, 'preload.js'),

@@ -34,6 +34,10 @@ button, input, a, .tabs { -webkit-app-region: no-drag; }
 .tab.active { background: var(--surface-tab-active); color: var(--text-title); font-weight: var(--weight-emphasis); }
 .tab-initial { display: grid; place-items: center; width: var(--icon-control); height: var(--icon-control); border-radius: var(--radius-badge); color: var(--text-secondary); background: var(--surface-sunken); }
 .tab-favicon { width: var(--icon-control); height: var(--icon-control); border-radius: var(--radius-badge); flex-shrink: 0; }
+/* The mark is taller than wide, so it takes the favicon's height and its own width. */
+.tab-select > .horizon-mark { width: auto; height: var(--icon-control); }
+.horizon-mark-sun { fill: var(--accent); }
+.horizon-mark-ink { stroke: var(--text-title); }
 .tab .icon-button { width: var(--target-minimum); height: var(--target-minimum); color: var(--text-placeholder); }
 .tab .icon-button svg { width: var(--icon-tab-close); height: var(--icon-tab-close); }
 .drag-space { flex: 1; min-width: var(--gap-compact); }

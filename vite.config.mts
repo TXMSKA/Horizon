@@ -9,6 +9,8 @@ export default defineConfig({
     closeBundle() {
       // Native window paint reads the same palette before the renderer can draw.
       copyFileSync('src/tokens.css', 'dist/tokens.css');
+      // The window and taskbar show the app icon with its tile; dist stays self-contained for packaging.
+      copyFileSync('assets/icon/horizon-icon-256.png', 'dist/icon.png');
     },
   }],
   build: {

@@ -13,7 +13,7 @@ import { AMBER, DAYLIGHT, NOTES, horizonWindow, mark, noteRow, slug, startPage, 
 // ---- invented sites ---------------------------------------------------------
 
 const SITE_TABS = [
-  { title: "Home", glyph: "house" },
+  { title: "Home", own: true },
   { title: "Route 40: gravel sections and fuel stops", color: "#2f6b4f", initial: "R" },
   { title: "Sourdough bread: the complete guide", color: "#745642", initial: "S" },
 ];
@@ -324,7 +324,7 @@ const capture = () =>
     ],
   });
 
-const NOTEBOOK_TABS = [{ title: "Trip to Patagonia", glyph: "notebookPen" }, SITE_TABS[1], SITE_TABS[2]];
+const NOTEBOOK_TABS = [{ title: "Trip to Patagonia", own: true }, SITE_TABS[1], SITE_TABS[2]];
 
 const notebook = () =>
   horizonWindow(
@@ -481,7 +481,7 @@ const sync = () =>
         ),
       ),
     ],
-    { tabs: [{ title: "Settings", glyph: "settings2" }, SITE_TABS[1]], active: 0, bar: { value: "horizon://settings/sync", blocked: null }, label: "Settings" },
+    { tabs: [{ title: "Settings", own: true }, SITE_TABS[1]], active: 0, bar: { value: "horizon://settings/sync", blocked: null }, label: "Settings" },
   );
 
 export default board({

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from 'react-dom';
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Camera, Download, Ellipsis,
-  ClipboardPaste, Copy, ExternalLink, FileText, FolderOpen, History, House, Image, LoaderCircle, Minus, NotebookPen, Plus, Redo2, Scissors, SpellCheck, TextSelect, Undo2,
+  ClipboardPaste, Copy, ExternalLink, FileText, FolderOpen, History, Image, LoaderCircle, Minus, NotebookPen, Plus, Redo2, Scissors, SpellCheck, TextSelect, Undo2,
   RotateCw, Search, SearchX, ServerOff, ShieldAlert, ShieldCheck, Sparkles, Square, Star, Trash2, TriangleAlert, WifiOff, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -14,6 +14,7 @@ import { applyTheme } from './theme';
 import { Menu } from './Menu';
 import { NewProfilePopover, ProfileControl, ProfilesMenu, ProfilesPanel } from './Profiles';
 import { EmptyBookmarks, EmptyDownloads, EmptyHistory, NoResults } from './EmptyState';
+import { HorizonMark } from './HorizonMark';
 
 type LibraryPanel = 'history' | 'bookmarks' | 'downloads';
 type Panel = LibraryPanel | 'profiles' | null;
@@ -336,7 +337,7 @@ export function App({ language }: { language: Language }) {
                 event.preventDefault(); const selected = state.tabs[next]; if (!selected) return; closeFind(); setDirty(false); setSuggestionsOpen(false);
                 void run({ type: 'activate-tab', id: selected.id }); document.getElementById(`tab-${selected.id}`)?.focus();
               }}>
-              {tab.loading ? <LoaderCircle className="spinner accent" aria-label={t('loading')} /> : !tab.url ? <House className={tab.id === state.activeId ? 'accent' : undefined} aria-hidden="true" /> : tab.favicon && favicons[tab.id]?.hash === tab.favicon ? <img className="tab-favicon" src={favicons[tab.id]?.url} alt="" aria-hidden="true" onError={() => setFavicons(previous => { if (previous[tab.id]?.hash !== tab.favicon) return previous; const next = { ...previous }; delete next[tab.id]; return next; })} /> : <span className="tab-initial" aria-hidden="true">{(tab.title || tab.url).slice(0, 1).toUpperCase()}</span>}
+              {tab.loading ? <LoaderCircle className="spinner accent" aria-label={t('loading')} /> : !tab.url ? <HorizonMark /> : tab.favicon && favicons[tab.id]?.hash === tab.favicon ? <img className="tab-favicon" src={favicons[tab.id]?.url} alt="" aria-hidden="true" onError={() => setFavicons(previous => { if (previous[tab.id]?.hash !== tab.favicon) return previous; const next = { ...previous }; delete next[tab.id]; return next; })} /> : <span className="tab-initial" aria-hidden="true">{(tab.title || tab.url).slice(0, 1).toUpperCase()}</span>}
               <span>{tab.title || t('home')}</span>
             </button>
             {iconButton(X, 'closeTab', () => { if (tab.id === state.activeId) closeFind(); void run({ type: 'close-tab', id: tab.id }); })}

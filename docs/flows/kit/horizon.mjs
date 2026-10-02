@@ -90,30 +90,32 @@ export const CONTRAST_LIGHT = {
 
 // ---- the mark -------------------------------------------------------------
 
-// A half sun on a line. A vector box twice as wide as tall turns the arc's
-// radii (50 by 100 on the grid) into a true half circle.
-export const HALF = "M0 100 A50 100 0 0 1 100 100 Z";
+// The start page's sun: an outline half circle sitting on the horizon. A vector
+// box twice as wide as tall turns the arc's radii (50 by 100 on the grid) into a
+// true half circle.
 export const ARC = "M0 100 A50 100 0 0 1 100 100";
 
-/** The mark: a filled sun sitting on the horizon. */
-export function mark(size, { line = "horizon", sun = "primary" } = {}) {
-  const h = Math.round(size * 0.62);
-  return stack(
-    { w: size, h, name: "mark", label: "Horizon mark" },
-    vector({ d: HALF, w: Math.round(size * 0.6), h: Math.round(size * 0.3), fill: sun, place: { x: Math.round(size * 0.2), y: h - Math.round(size * 0.3) - 1 } }),
-    box({ w: size, h: 2, radius: "pill", fill: line, place: "bottom-left" }),
-  );
-}
+/**
+ * The mark without its tile, for Horizon's own surfaces (the app icon keeps the
+ * tile for everything the system shows). Drawn by the `hz-mark` node in
+ * extra-nodes.mjs in the theme's title and primary colours; `size` is its height.
+ */
+export const mark = (size) => ({ t: "hz-mark", size, name: "mark", label: "Horizon mark" });
+
+/** The app icon as delivered: the mark on the dark Amber tile. */
+export const appIcon = (size, name = "app-icon") => ({ t: "hz-icon", size, name, label: "Horizon app icon" });
 
 // ---- the window -----------------------------------------------------------
 
+// A tab marked `own` is one of Horizon's own pages and leads with the mark (the owner, 2026-10-01).
 export const TABS = [
-  { title: "Home", glyph: "house" },
+  { title: "Home", own: true },
   { title: "Sourdough bread: the complete guide", color: "#745642", initial: "S" },
   { title: "Routes through Patagonia in autumn", color: "#3a7bc9", initial: "R" },
 ];
 
 export function tabLead(tab, on) {
+  if (tab.own) return { t: "hz-mark", size: 16 };
   return tab.glyph
     ? icon(tab.glyph, { size: 14, color: on ? "primary" : "soft" })
     : badge(tab.color, { initial: tab.initial, size: 16, radius: 4 });
