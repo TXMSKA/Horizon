@@ -1921,6 +1921,25 @@ test('list boundary accepts only package URLs on the fixed HTTPS host and public
     assert.equal(isPublicListAddress(address), false, address);
   }
   assert.equal(isPublicListAddress('8.8.8.8'), true);
+  assert.equal(isPublicListAddress('::ffff:8.8.8.8'), true);
+  assert.equal(isPublicListAddress('::ffff:808:808'), true);
+  for (const [first, last, before, after] of [
+    ['192.31.196.0', '192.31.196.255', '192.31.195.255', '192.31.197.0'],
+    ['192.52.193.0', '192.52.193.255', '192.52.192.255', '192.52.194.0'],
+    ['192.88.99.0', '192.88.99.255', '192.88.98.255', '192.88.100.0'],
+    ['192.175.48.0', '192.175.48.255', '192.175.47.255', '192.175.49.0'],
+    ['64:ff9b:1::', '64:ff9b:1:ffff:ffff:ffff:ffff:ffff', '64:ff9b:0:ffff:ffff:ffff:ffff:ffff', '64:ff9b:2::'],
+    ['100::', '100::ffff:ffff:ffff:ffff', 'ff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', '100:0:0:1::'],
+    ['2001::', '2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff', '2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff', '2001:200::'],
+    ['2620:4f:8000::', '2620:4f:8000:ffff:ffff:ffff:ffff:ffff', '2620:4f:7fff:ffff:ffff:ffff:ffff:ffff', '2620:4f:8001::'],
+    ['3fff::', '3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff', '3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff', '3fff:1000::'],
+    ['5f00::', '5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff', '5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', '5f01::'],
+    ['fec0::', 'feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'],
+  ]) {
+    for (const address of [first, last]) assert.equal(isPublicListAddress(address), false, address);
+    for (const address of [before, after].filter(Boolean)) assert.equal(isPublicListAddress(address), true, address);
+  }
+  assert.equal(isPublicListAddress('2001:2::'), false);
 });
 
 test('list response refuses redirects, oversized headers and streams, and timed out headers or bodies', async t => {
