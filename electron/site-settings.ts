@@ -60,17 +60,22 @@ export function requestedPermissions(permission: string, details: { mediaTypes?:
 interface Pending { id: string; origin: string; permissions: SitePermission[]; callbacks: ((allowed: boolean) => void)[] }
 export class PermissionQueue {
   private queues = new Map<string, Pending[]>();
+  // A prompt hides its page, and Chromium repeats a hidden page's location request once the page shows again,
+  // so a dismissal refuses that origin and permission until the tab navigates instead of prompting in a loop.
+  private dismissed = new Map<string, Set<string>>();
   constructor(private settings: SiteSettingsStore, private changed: () => void, private remember: () => void) {}
-  private decision(request: Pending): boolean | undefined {
-    const decisions = siteSettings(this.settings, request.origin)!.permissions;
-    if (request.permissions.some(permission => decisions[permission] === 'block')) return false;
-    if (request.permissions.every(permission => decisions[permission] === 'allow')) return true;
+  private decision(tabId: string, request: Pending): boolean | undefined {
+    const decisions = siteSettings(this.settings, request.origin)!.permissions, dismissed = this.dismissed.get(tabId);
+    const current = (permission: SitePermission) => decisions[permission] !== 'ask' ? decisions[permission] : dismissed?.has(`${request.origin}
+${permission}`) ? 'block' : 'ask';
+    if (request.permissions.some(permission => current(permission) === 'block')) return false;
+    if (request.permissions.every(permission => current(permission) === 'allow')) return true;
     return undefined;
   }
   request(tabId: string, origin: string, permissions: SitePermission[], callback: (allowed: boolean) => void): void {
     if (!secureOrigin(origin) || !permissions.length) { callback(false); return; }
     const request = { id: randomUUID(), origin, permissions, callbacks: [callback] };
-    const decision = this.decision(request);
+    const decision = this.decision(tabId, request);
     if (decision !== undefined) { callback(decision); return; }
     const queue = this.queues.get(tabId) ?? [];
     if (queue.reduce((count, request) => count + request.callbacks.length, 0) >= 32) { callback(false); return; }
@@ -88,9 +93,15 @@ export class PermissionQueue {
   answer(tabId: string, id: string, answer: 'allow' | 'block' | 'dismiss'): void {
     const queue = this.queues.get(tabId), request = queue?.[0];
     if (!request || request.id !== id) throw new Error('PERMISSION_PROMPT_STALE');
+    const asked = this.prompt(tabId)!.permissions;
     if (answer !== 'dismiss') {
-      for (const permission of this.prompt(tabId)!.permissions) setPermission(this.settings, request.origin, permission, answer);
+      for (const permission of asked) setPermission(this.settings, request.origin, permission, answer);
       this.remember();
+    } else {
+      const dismissed = this.dismissed.get(tabId) ?? new Set<string>();
+      for (const permission of asked) dismissed.add(`${request.origin}
+${permission}`);
+      this.dismissed.set(tabId, dismissed);
     }
     queue!.shift(); if (!queue!.length) this.queues.delete(tabId);
     for (const callback of request.callbacks) callback(answer === 'allow');
@@ -98,15 +109,15 @@ export class PermissionQueue {
   }
   reconcile(): void {
     for (const [tabId, queue] of this.queues) {
-      const settled = queue.filter(request => this.decision(request) !== undefined);
-      const remaining = queue.filter(request => this.decision(request) === undefined);
+      const settled = queue.filter(request => this.decision(tabId, request) !== undefined);
+      const remaining = queue.filter(request => this.decision(tabId, request) === undefined);
       if (remaining.length) this.queues.set(tabId, remaining); else this.queues.delete(tabId);
-      for (const request of settled) for (const callback of request.callbacks) callback(this.decision(request)!);
+      for (const request of settled) for (const callback of request.callbacks) callback(this.decision(tabId, request)!);
     }
     this.changed();
   }
   drop(tabId: string): void {
-    const queue = this.queues.get(tabId); this.queues.delete(tabId);
+    const queue = this.queues.get(tabId); this.queues.delete(tabId); this.dismissed.delete(tabId);
     for (const request of queue ?? []) for (const callback of request.callbacks) callback(false);
     if (queue?.length) this.changed();
   }

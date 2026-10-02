@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Camera, Download, Ellipsis,
   ClipboardPaste, Copy, ExternalLink, FileText, FolderOpen, History, Image, LoaderCircle, Minus, NotebookPen, Plus, Redo2, Scissors, SpellCheck, TextSelect, Undo2,
-  RotateCw, Search, SearchX, ServerOff, ShieldAlert, ShieldCheck, Sparkles, Square, Star, Trash2, TriangleAlert, WifiOff, X,
+  RotateCw, Search, SearchX, ServerOff, Shield, ShieldAlert, ShieldCheck, ShieldOff, Sparkles, Square, Star, Trash2, TriangleAlert, WifiOff, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
@@ -15,6 +15,8 @@ import { Menu } from './Menu';
 import { NewProfilePopover, ProfileControl, ProfilesMenu, ProfilesPanel } from './Profiles';
 import { EmptyBookmarks, EmptyDownloads, EmptyHistory, NoResults } from './EmptyState';
 import { HorizonMark } from './HorizonMark';
+import { Switch } from './Switch';
+import { blockedCount, blockedTotal, PermissionDialog, ShieldPopover } from './SiteControls';
 
 type LibraryPanel = 'history' | 'bookmarks' | 'downloads';
 type Panel = LibraryPanel | 'profiles' | null;
@@ -62,6 +64,9 @@ export function App({ language }: { language: Language }) {
   const [filter, setFilter] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState<'menu' | 'new' | null>(null);
+  const [shieldScope, setShieldScope] = useState<string | null>(null);
+  const shieldButtonRef = useRef<HTMLButtonElement>(null);
+  const [pageFocusRequest, setPageFocusRequest] = useState<string | null>(null);
   const profileByKeyboard = useRef(false);
   const profileButtonRef = useRef<HTMLButtonElement>(null);
   const [contextMenu, setContextMenu] = useState<PageContextMenu | null>(null);
@@ -86,9 +91,23 @@ export function App({ language }: { language: Language }) {
   const active = state?.tabs.find(tab => tab.id === state.activeId);
   const activeUrl = active?.url ?? '';
   const bookmarked = state?.store.bookmarks.some(item => item.url === activeUrl) ?? false;
-  const popover = menuOpen || Boolean(profileOpen) || suggestionsOpen || Boolean(contextMenu);
+  const site = state?.siteSettings;
+  const siteScope = site ? `${state?.activeProfileId}:${state?.activeId}:${site.origin}` : null;
+  const currentSiteScope = useRef(siteScope);
+  useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
+  const shieldOpen = shieldScope !== null && shieldScope === siteScope;
+  const permissionPrompt = state?.permissionPrompt;
+  const permissionOpen = Boolean(permissionPrompt?.permissions.length && !menuOpen && !profileOpen && !suggestionsOpen && !contextMenu && !shieldOpen && !panel && !findOpen);
+  const popover = menuOpen || Boolean(profileOpen) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
-  const pageShowing = Boolean(activeUrl && !active?.error && (!active?.fullscreen || contextMenu));
+  const pageShowing = Boolean(activeUrl && !active?.error && (!active?.fullscreen || popover));
+  const totalBlocked = active ? blockedTotal(active.blocked) : 0;
+  // Third-party cookies are refused before the filter lists load, so a count can exist while the lists are not ready.
+  const showBlocked = Boolean(site?.blocking && totalBlocked > 0);
+  const ShieldIcon = !site?.blocking ? ShieldOff : !state?.blockingReady ? Shield : ShieldCheck;
+  const shieldLabel = site ? !site.blocking ? t('blockingOffSite') : !state?.blockingReady && !totalBlocked ? t('blockingNotReady') : `${t('blockingOnSite')}, ${blockedCount(totalBlocked, language)}` : t('protection');
+  const siteFavicon = active?.favicon && favicons[active.id]?.hash === active.favicon ? favicons[active.id]?.url : undefined;
+  const siteInitial = (active?.title || activeUrl).slice(0, 1).toUpperCase();
   const failure = active?.error ? pageError(active.error) : null;
   const ErrorIcon = failure?.icon ?? TriangleAlert;
   const reportArea = useCallback((hidden: boolean) => {
@@ -99,6 +118,14 @@ export function App({ language }: { language: Language }) {
     try { await window.horizon.command(command); setError(''); return true; }
     catch { setError(text('browserError', language)); return false; }
   }, [language]);
+  const closeShield = useCallback((focusShield = true) => {
+    setShieldScope(null); if (focusShield) shieldButtonRef.current?.focus();
+  }, []);
+  const answerPermission = useCallback(async (answer: 'allow' | 'block' | 'dismiss', focusPage = true) => {
+    if (!permissionPrompt) return;
+    const scope = siteScope;
+    if (await run({ type: 'answer-permission', id: permissionPrompt.id, answer }) && focusPage && currentSiteScope.current === scope) setPageFocusRequest(state?.activeId ?? null);
+  }, [permissionPrompt, run, siteScope, state?.activeId]);
   const closeContextMenu = useCallback((focusPage = false) => {
     const menu = contextMenuRef.current;
     contextMenuRef.current = null; setContextMenu(null);
@@ -107,7 +134,7 @@ export function App({ language }: { language: Language }) {
   }, [run]);
   useEffect(() => window.horizon.onContextMenu(menu => {
     contextMenuRef.current = menu; setContextMenu(menu);
-    if (menu) { setProfileOpen(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }
+    if (menu) { setShieldScope(null); setProfileOpen(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }
   }), []);
   const dismissUndo = useCallback(() => {
     undoGeneration.current++; window.clearTimeout(undoTimeout.current); undoTimeout.current = undefined;
@@ -123,7 +150,7 @@ export function App({ language }: { language: Language }) {
   const focusAddress = useCallback(() => {
     dismissUndo();
     closeContextMenu();
-    setPanel(null); setMenuOpen(false); setProfileOpen(null);
+    setShieldScope(null); setPanel(null); setMenuOpen(false); setProfileOpen(null);
     addressRef.current?.focus(); addressRef.current?.select();
   }, [dismissUndo, closeContextMenu]);
   const closeFind = useCallback(() => {
@@ -134,38 +161,45 @@ export function App({ language }: { language: Language }) {
     if (next) closeFind();
     dismissUndo();
     closeContextMenu();
-    setProfileOpen(null); setFilter(''); setRenameUrl(''); setPanel(next); setMenuOpen(false); setSuggestionsOpen(false);
+    setShieldScope(null); setProfileOpen(null); setFilter(''); setRenameUrl(''); setPanel(next); setMenuOpen(false); setSuggestionsOpen(false);
   }, [closeFind, dismissUndo, closeContextMenu]);
   const navigate = (input: string) => {
     setDirty(false);
     if (!input.trim()) return;
     dismissUndo();
     closeContextMenu();
-    setProfileOpen(null); setSuggestionsOpen(false); setMenuOpen(false); setPanel(null); setStartSearch('');
+    setShieldScope(null); setProfileOpen(null); setSuggestionsOpen(false); setMenuOpen(false); setPanel(null); setStartSearch('');
     void run({ type: 'navigate', input }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); });
   };
 
   useEffect(() => {
     let mounted = true;
     let previous: BrowserState | null = null;
+    let blockingReload: string | null = null;
     const receive = (next: BrowserState) => {
       if (!mounted) return;
       const current = next.tabs.find(tab => tab.id === next.activeId);
       const before = previous?.tabs.find(tab => tab.id === previous?.activeId);
       const announce = (message: string) => setAnnouncement(last => last === message ? last : message);
+      const blockingChanged = previous?.activeProfileId === next.activeProfileId && before?.id === current?.id && previous?.siteSettings?.origin === next.siteSettings?.origin && previous?.siteSettings?.blocking !== next.siteSettings?.blocking && Boolean(next.siteSettings);
+      if (before?.id !== current?.id) blockingReload = null;
+      if (blockingChanged) blockingReload = current?.id ?? null;
       if (current && before?.id === current.id) {
         if (current.error && current.error !== before.error) announce(text(pageError(current.error).heading, language));
         else if (current.loading && !before.loading) {
           let host = current.url;
           try { host = new URL(current.url).host || current.url; } catch { /* A blank tab has no host. */ }
-          announce(text('pageLoading', language).replace('{page}', current.title && current.title !== current.url ? current.title : host));
-        } else if (!current.loading && before.loading && !current.error) announce(text('pageLoaded', language).replace('{page}', current.title || current.url));
+          // The reload must not immediately replace the result of the user's blocking choice.
+          if (blockingReload !== current.id) announce(text('pageLoading', language).replace('{page}', current.title && current.title !== current.url ? current.title : host));
+          blockingReload = null;
+        } else if (!current.loading && before.loading && !current.error) { blockingReload = null; announce(text('pageLoaded', language).replace('{page}', current.title || current.url)); }
         if (current.url === before.url) {
           const saved = next.store.bookmarks.some(item => item.url === current.url);
           const wasSaved = previous!.store.bookmarks.some(item => item.url === current.url);
           if (saved !== wasSaved) announce(text(saved ? 'bookmarkAdded' : 'bookmarkRemoved', language));
         }
       }
+      if (blockingChanged && next.siteSettings) announce(text(next.siteSettings.blocking ? 'blockingEnabled' : 'blockingDisabled', language).replace('{host}', next.siteSettings.host));
       previous = next;
       applyTheme(next.theme, next.contrast);
       document.title = current?.url && current.url !== 'about:blank' ? `${current.title || current.url} - ${text('product', language)}` : text('product', language);
@@ -234,6 +268,16 @@ export function App({ language }: { language: Language }) {
       if (captureGeneration.current === snapshot.generation) void reportArea(true);
     })).catch(() => { if (captureGeneration.current === snapshot.generation) setError(text('browserError', language)); });
   }, [snapshot, reportArea, language]);
+  useEffect(() => { setShieldScope(null); }, [siteScope]);
+  useEffect(() => {
+    if (!pageFocusRequest) return;
+    if (pageFocusRequest !== state?.activeId) { setPageFocusRequest(null); return; }
+    if (hidden) return;
+    let current = true;
+    // The native page cannot receive focus until the snapshot has released it.
+    void reportArea(false).then(() => { if (current) return run({ type: 'focus-page' }); }).finally(() => { if (current) setPageFocusRequest(null); });
+    return () => { current = false; };
+  }, [pageFocusRequest, hidden, state?.activeId, reportArea, run]);
   useEffect(() => () => {
     undoGeneration.current++; window.clearTimeout(undoTimeout.current);
     captureGeneration.current++;
@@ -265,6 +309,8 @@ export function App({ language }: { language: Language }) {
     else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') void run({ type: 'zoom', delta: action === 'zoom-in' ? 1 : action === 'zoom-out' ? -1 : 0 });
     else if (action === 'stop') {
       if (contextMenu) closeContextMenu(true);
+      else if (shieldOpen) closeShield();
+      else if (permissionOpen) void answerPermission('dismiss');
       else if (findOpen) { closeFind(); void run({ type: 'focus-page' }); }
       else if (profileOpen) { setProfileOpen(null); profileButtonRef.current?.focus(); }
       else if (panel || menuOpen) { const profiles = panel === 'profiles'; openPanel(null); setMenuOpen(false); (profiles ? profileButtonRef : menuButtonRef).current?.focus(); }
@@ -273,7 +319,7 @@ export function App({ language }: { language: Language }) {
     } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'bookmark') {
       openPanel(null); setSuggestionsOpen(false); void run({ type: action });
     }
-  }, [state, active, activeUrl, closeFind, closeContextMenu, contextMenu, findOpen, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen]);
+  }, [state, active, activeUrl, closeFind, closeContextMenu, contextMenu, findOpen, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission]);
   useEffect(() => {
     const unsubscribe = window.horizon.onShortcut(shortcut);
     const keydown = (event: KeyboardEvent) => {
@@ -321,7 +367,7 @@ export function App({ language }: { language: Language }) {
     <a className="skip-link" href="#content" onClick={event => { event.preventDefault(); if (activeUrl && !hidden && !active?.error) void run({ type: 'focus-page' }); else document.getElementById('content')?.focus(); }}>{t('skip')}</a>
     <header className="chrome" ref={headerRef}>
       <div className="tab-strip">
-        <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
+        <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { setShieldScope(null); dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
         <span className="separator" aria-hidden="true" />
         <nav className="tabs" role="tablist" aria-label={t('tabs')}>
           {state?.tabs.map((tab, index) => <div className={`tab${tab.id === state.activeId ? ' active' : ''}`} key={tab.id} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'close-tab', id: tab.id }); } }}>
@@ -353,22 +399,25 @@ export function App({ language }: { language: Language }) {
       <div className="toolbar" role="toolbar" aria-label={t('toolbar')}>
         <div className="navigation-buttons">{iconButton(ArrowLeft, 'back', () => shortcut('back'), !active?.canGoBack)}{iconButton(ArrowRight, 'forward', () => shortcut('forward'), !active?.canGoForward)}{iconButton(active?.loading ? X : RotateCw, active?.loading ? 'stop' : 'reload', () => shortcut(active?.loading ? 'stop' : 'reload'), !activeUrl)}</div>
         <form className="address-bar" onSubmit={event => { event.preventDefault(); navigate(suggestionsOpen && suggestionIndex >= 0 && suggestions[suggestionIndex] ? suggestions[suggestionIndex].url : dirty ? address : activeUrl); }}>
-          <ShieldCheck className="accent" aria-label={t('protection')} />
+          {site ? <button className={`icon-button shield-button${site.blocking && state?.blockingReady ? ' accent' : ''}`} ref={shieldButtonRef} type="button" aria-label={shieldLabel} title={shieldLabel} aria-haspopup="dialog" aria-expanded={shieldOpen} aria-controls="shield-popover" onClick={() => {
+            dismissUndo(); closeContextMenu(); setProfileOpen(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); closeFind(); setShieldScope(previous => previous === siteScope ? null : siteScope);
+          }}><ShieldIcon aria-hidden="true" /></button> : <ShieldCheck className="accent" aria-label={t('protection')} />}
           <input ref={addressRef} spellCheck={false} autoComplete="off" role="combobox" aria-label={t('address')} aria-autocomplete="list" aria-expanded={suggestionsOpen} aria-controls="address-suggestions" aria-activedescendant={suggestionsOpen && suggestionIndex >= 0 ? `suggestion-${suggestionIndex}` : undefined}
             placeholder={t('address')} value={dirty ? address : addressFocused ? activeUrl : activeUrl.startsWith('https://') ? activeUrl.slice(8).replace(/^([^/?#]+)\/(?=$|[?#])/, '$1') : activeUrl} maxLength={8192}
             onFocus={event => { setAddressFocused(true); event.currentTarget.value = dirty ? address : activeUrl; event.currentTarget.select(); }}
             onMouseDown={event => { focusingClick.current = document.activeElement !== event.currentTarget; }}
             onMouseUp={event => { if (focusingClick.current) event.preventDefault(); focusingClick.current = false; }}
-            onChange={event => { setAddress(event.target.value); setDirty(true); setSuggestionIndex(-1); setSuggestionsOpen(Boolean(event.target.value.trim())); setProfileOpen(null); setMenuOpen(false); setPanel(null); }}
+            onChange={event => { setShieldScope(null); setAddress(event.target.value); setDirty(true); setSuggestionIndex(-1); setSuggestionsOpen(Boolean(event.target.value.trim())); setProfileOpen(null); setMenuOpen(false); setPanel(null); }}
             onBlur={event => { focusingClick.current = false; setAddressFocused(false); if (!dirty) setDirty(false); if (!event.relatedTarget || !(event.relatedTarget as HTMLElement).closest('.suggestions')) setSuggestionsOpen(false); }}
             onKeyDown={event => {
               if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setSuggestionsOpen(true); setSuggestionIndex(previous => !suggestions.length ? -1 : previous < 0 ? event.key === 'ArrowDown' ? 0 : suggestions.length - 1 : (previous + (event.key === 'ArrowDown' ? 1 : suggestions.length - 1)) % suggestions.length); }
               else if (event.key === 'Escape') { event.preventDefault(); setSuggestionsOpen(false); setDirty(false); addressRef.current?.focus(); }
             }} />
           {active && active.zoom !== 1 && <button className="zoom-level" type="button" title={t('zoomReset')} aria-label={`${Math.round(active.zoom * 100)}%, ${t('zoomReset')}`} onClick={() => { void run({ type: 'zoom', delta: 0 }); }}>{Math.round(active.zoom * 100)}%</button>}
+          {showBlocked && <span className="address-blocked">{blockedCount(totalBlocked, language)}</span>}
           <button className={`icon-button${bookmarked ? ' accent bookmarked' : ''}`} type="button" disabled={!/^https?:/.test(activeUrl)} aria-label={t(bookmarked ? 'removeBookmark' : 'bookmark')} aria-pressed={bookmarked} title={t(bookmarked ? 'removeBookmark' : 'bookmark')} onClick={() => shortcut('bookmark')}><Star aria-hidden="true" /></button>
         </form>
-        <div className="tools">{previewButton(NotebookPen, 'notebooks')}{previewButton(Sparkles, 'lyra', true)}<button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-expanded={menuOpen} aria-controls="browser-menu" onClick={event => { setProfileOpen(null); closeContextMenu(); menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button></div>
+        <div className="tools">{previewButton(NotebookPen, 'notebooks')}{previewButton(Sparkles, 'lyra', true)}<button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-expanded={menuOpen} aria-controls="browser-menu" onClick={event => { setShieldScope(null); setProfileOpen(null); closeContextMenu(); menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button></div>
       </div>
       {findOpen && <div className="find-bar" role="search" aria-label={t('find')}>
         <Search aria-hidden="true" /><input ref={findRef} spellCheck={false} autoComplete="off" aria-label={t('find')} placeholder={t('find')} value={findText} maxLength={1024} onChange={event => { const value = event.target.value; setFindText(value); if (value) void run({ type: 'find', text: value, forward: true, next: false }); else void run({ type: 'stop-find' }); }}
@@ -379,6 +428,8 @@ export function App({ language }: { language: Language }) {
       {(error || state?.storageReadError || state?.storageError) && <div className="shell-status" role="alert"><span>{error || t(state?.storageReadError ? 'storageReadError' : 'storageError')}</span>{error && iconButton(X, 'close', () => setError(''))}</div>}
       <div className={`loading-line${active?.loading ? ' loading' : ''}`} aria-hidden="true" />
     </header>
+    {shieldOpen && site && active && <ShieldPopover key={siteScope} site={site} counts={active.blocked} ready={state?.blockingReady ?? false} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}
+    {permissionOpen && permissionPrompt && <PermissionDialog key={`${siteScope}:${permissionPrompt.id}`} prompt={permissionPrompt} language={language} favicon={siteFavicon} initial={siteInitial} onAnswer={answerPermission} />}
     {profileOpen === 'menu' && state && <ProfilesMenu state={state} language={language} keyboard={profileByKeyboard.current} opener={profileButtonRef} onDismiss={reason => { setProfileOpen(null); if (reason === 'escape') profileButtonRef.current?.focus(); }} onSwitch={profile => {
       setProfileOpen(null); profileButtonRef.current?.focus();
       void run({ type: 'switch-profile', id: profile.id }).then(success => { if (success) { setAnnouncement(t('switchedProfile').replace('{name}', profile.name)); profileButtonRef.current?.focus(); } });
@@ -394,7 +445,7 @@ export function App({ language }: { language: Language }) {
       <button type="button" role="menuitem" tabIndex={-1} disabled={!activeUrl || Boolean(active?.error)} onClick={() => { setMenuOpen(false); shortcut('find'); }}><Search aria-hidden="true" /><span>{t('find')}</span><kbd>Ctrl+F</kbd></button>
       <hr />
       <div className="menu-theme" role="group" aria-label={t('theme')}><span>{t('theme')}</span><div className="segmented">{(['system', 'amber', 'daylight'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={(state?.theme ?? window.horizon.initialTheme) === value} onClick={() => { void run({ type: 'theme', value }); }}>{t(value)}</button>)}</div></div>
-      <div className="menu-contrast"><span id="contrast-label">{t('highContrast')}</span><button className="contrast-switch" type="button" role="switch" tabIndex={-1} aria-labelledby="contrast-label" aria-checked={(state?.contrast ?? window.horizon.initialContrast) === 'high'} onClick={() => { void run({ type: 'contrast', value: (state?.contrast ?? window.horizon.initialContrast) === 'high' ? 'standard' : 'high' }); }}><span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span></button></div>
+      <div className="menu-contrast"><span id="contrast-label">{t('highContrast')}</span><Switch labelledBy="contrast-label" tabIndex={-1} checked={(state?.contrast ?? window.horizon.initialContrast) === 'high'} onChange={checked => { void run({ type: 'contrast', value: checked ? 'high' : 'standard' }); }} /></div>
     </Menu>}
     {contextMenu && <Menu key={contextMenu.id} id="page-context-menu" label={t('pageMenu')} keyboard={contextMenu.keyboard} point={contextMenu} onDismiss={reason => closeContextMenu(reason === 'escape')}>
       {contextMenu.groups.flatMap((group, index) => [

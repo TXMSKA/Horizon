@@ -292,6 +292,14 @@
   --gap-page-inline: var(--space-24);
   --gap-section: var(--space-32);
   --width-switch: 2.25rem;
+  --duration-switch: 120ms;
+  --width-site-popover: 23.75rem;
+  --width-site-permission-menu: 10rem;
+  --padding-site-popover: calc(var(--space-16) - var(--border-width));
+  --gap-site-popover: var(--space-12);
+  --size-site-icon: var(--space-24);
+  --height-site-blocking: var(--size-52);
+  --height-site-permission: var(--size-32);
   --height-switch: 1.25rem;
   --size-switch-thumb: 0.875rem;
   --gap-switch-thumb: 0.1875rem;

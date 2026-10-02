@@ -485,6 +485,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const storageErrors = [];
   const blockingCalls = [];
   let mockCosmetics = false;
+  let mockBlockingReady = true;
   t.mock.method(console, 'error', (...args) => storageErrors.push(args));
   let nextTimer = 0;
   const schedule = (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; };
@@ -525,6 +526,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     stopFindInPage() {}
     findInPage(text, options) { this.find = { text, options }; return 7; }
     reload() { this.reloads = (this.reloads || 0) + 1; }
+    reloadIgnoringCache() { this.reloads = (this.reloads || 0) + 1; this.bypassedCache = (this.bypassedCache || 0) + 1; }
     insertCSS(css, options) { this.css = { css, options }; return Promise.resolve("css-key"); }
     undo() { this.edited = 'undo'; }
     redo() { this.edited = 'redo'; }
@@ -574,7 +576,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const loaded = { exports: {} };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'module', '__filename', '__dirname', 'setTimeout', 'clearTimeout'])(loaded.exports,
     name => name === 'electron' ? electron : name === './blocking' ? { createBlockingEngine() { return {
-      ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '',
+      get ready() { return mockBlockingReady; }, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '',
       match(url) { blockingCalls.push(url); return url.includes('/blocked-ad') ? { kind: 'ads' } : url.includes('/blocked-tracker') ? { kind: 'trackers' } : undefined; },
     }; } } : name === './store' ? { ...localRequire(name), writeStore(path, store, cipher) {
       if (writeFailure) throw new Error('Disk unavailable');
@@ -589,6 +591,8 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const window = new EventEmitter();
   window.webContents = new Contents();
   window.isDestroyed = () => false;
+  let windowFocused = true;
+  window.isFocused = () => windowFocused;
   window.getContentBounds = () => ({ width: 800, height: 600 });
   window.setFullScreen = fullscreen => { window.fullscreen = fullscreen; };
   window.setTitle = title => { window.title = title; };
@@ -926,7 +930,24 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   handlers.get('horizon:content-area')(event, { top: 120, hidden: true });
   assert.equal(view.visible, false);
   command({ type: 'dismiss-context-menu', id: menu.id });
+  assert.equal(view.visible, false, 'Fullscreen stays behind chrome until its snapshot is released');
+  handlers.get('horizon:content-area')(event, { top: 120, hidden: false });
   assert.equal(view.visible, true);
+  window.webContents.focused = false;
+  handlers.get('horizon:content-area')(event, { top: 120, hidden: true });
+  assert.equal(view.visible, false, 'Every chrome overlay can cover fullscreen without a page context menu');
+  assert.equal(window.webContents.focused, true);
+  window.webContents.focused = false;
+  handlers.get('horizon:content-area')(event, { top: 120, hidden: true });
+  assert.equal(window.webContents.focused, false, 'Only the page giving way moves the keyboard to chrome');
+  view.webContents.emit('focus');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(window.webContents.focused, true, 'A hidden page hands the keyboard back to chrome');
+  handlers.get('horizon:content-area')(event, { top: 120, hidden: false });
+  window.webContents.focused = false; windowFocused = false;
+  handlers.get('horizon:content-area')(event, { top: 120, hidden: true });
+  assert.equal(window.webContents.focused, false, 'An unfocused window never takes the keyboard');
+  windowFocused = true;
   handlers.get('horizon:content-area')(event, { top: 120, hidden: false });
   view.webContents.emit('leave-html-full-screen');
   assert.equal(window.fullscreen, false);
@@ -978,6 +999,11 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.deepEqual(state().tabs[0].blocked, { ads: 1, trackers: 1, cookies: 0 });
   const cookieRequest = { id: 104, webContentsId: view.webContents.id, resourceType: 'xhr', url: 'https://third.test/pixel' };
   network(cookieRequest.url, 'xhr', 104);
+  mockBlockingReady = false;
+  assert.equal(state().blockingReady, false);
+  webSession.sendHeaders({ ...cookieRequest, requestHeaders: { Cookie: 'id=one' } }, value => assert.deepEqual(value.requestHeaders, {}, 'Third-party cookies do not wait for the filter lists'));
+  assert.equal(state().tabs[0].blocked.cookies, 1);
+  mockBlockingReady = true;
   webSession.sendHeaders({ ...cookieRequest, requestHeaders: { Cookie: 'id=one; token=two', Accept: '*/*' } }, value => assert.deepEqual(value.requestHeaders, { Accept: '*/*' }));
   webSession.receiveHeaders({ ...cookieRequest, responseHeaders: { 'SET-Cookie': ['id=changed; Secure', 'new=three; Secure'], 'content-type': ['text/plain'] } }, value => assert.deepEqual(value.responseHeaders, { 'content-type': ['text/plain'] }));
   assert.equal(state().tabs[0].blocked.cookies, 3);
@@ -995,7 +1021,9 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(network('https://ads.example/blocked-ad', 'script', 105).cancel, false);
   webSession.sendHeaders({ ...cookieRequest, requestHeaders: { Cookie: 'id=one' } }, value => assert.deepEqual(value.requestHeaders, { Cookie: 'id=one' }));
   webSession.receiveHeaders({ ...cookieRequest, responseHeaders: { 'Set-Cookie': ['id=one'] } }, value => assert.deepEqual(value.responseHeaders, { 'Set-Cookie': ['id=one'] }));
+  assert.equal(view.webContents.bypassedCache, undefined);
   command({ type: 'set-blocking', enabled: true });
+  assert.equal(view.webContents.bypassedCache, 1, 'Blocking turned back on reloads without the responses cached while it was off');
   view.webContents.emit('did-start-navigation', {}, 'https://example.com/next', false, true);
   assert.deepEqual(state().tabs[0].blocked, { ads: 0, trackers: 0, cookies: 0 });
   webSession.receiveHeaders({ ...cookieRequest, responseHeaders: { 'Set-Cookie': ['late=one'] } }, () => {});
@@ -1024,6 +1052,9 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(state().permissionPrompt.permissions[0], 'location');
   command({ type: 'answer-permission', id: state().permissionPrompt.id, answer: 'dismiss' });
   assert.equal(state().siteSettings.permissions.location, 'ask');
+  requestPermission('geolocation');
+  assert.deepEqual(permissionResults.at(-1), ['geolocation', false]); assert.equal(state().permissionPrompt, null, 'A dismissal holds until the page navigates');
+  view.webContents.emit('did-start-navigation', {}, 'https://example.com/#next', true, true);
   requestPermission('notifications');
   command({ type: 'answer-permission', id: state().permissionPrompt.id, answer: 'block' });
   requestPermission('notifications'); assert.equal(state().permissionPrompt, null);
@@ -1819,6 +1850,13 @@ test('permission queues combine media callbacks, remember decisions, dismiss onc
   request('tab', 'https://example.com', ['camera']); assert.equal(results.at(-1), true);
   queue.answer('tab', queue.prompt('tab').id, 'dismiss');
   assert.equal(siteSettings(settings, 'https://example.com').permissions.location, 'ask'); assert.equal(remembered, 1);
+  request('tab', 'https://example.com', ['location']);
+  assert.equal(queue.prompt('tab'), null, 'A dismissed request is not asked again on the same page'); assert.equal(results.at(-1), false);
+  request('second', 'https://example.com', ['location']); assert.notEqual(queue.prompt('second'), null); queue.drop('second');
+  setPermission(settings, 'https://example.com', 'location', 'allow');
+  request('tab', 'https://example.com', ['location']); assert.equal(results.at(-1), true, 'A stored decision outranks a dismissal');
+  setPermission(settings, 'https://example.com', 'location', 'ask');
+  queue.drop('tab');
   request('tab', 'https://example.com', ['location']);
   queue.answer('tab', queue.prompt('tab').id, 'block');
   request('tab', 'https://example.com', ['location']); assert.equal(queue.prompt('tab'), null); assert.equal(results.at(-1), false);

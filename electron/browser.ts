@@ -248,7 +248,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const fullscreen = isCurrent() && tab.state.id === activeId && tab.state.fullscreen;
         const y = fullscreen ? 0 : top;
         tab.view.setBounds({ x: 0, y, width, height: Math.max(0, height - y) });
-        tab.view.setVisible(isCurrent() && tab.state.id === activeId && (fullscreen && pageMenu.tabId !== tab.state.id || !area.hidden) && !tab.state.error && !tab.cosmeticPending && y < height);
+        tab.view.setVisible(isCurrent() && tab.state.id === activeId && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
       }
     };
     const update = () => { layout(); publish(); };
@@ -385,6 +385,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       });
       contents.on('destroyed', () => closeTab(tab));
       contents.on('did-start-loading', () => { tab.state.loading = true; publish(); });
+      // A reload behind an open overlay hands the keyboard to the hidden page; once Chromium has finished moving it, it goes back to chrome.
+      contents.on('focus', () => setImmediate(() => {
+        if (!disposed && !closing && !window.isDestroyed() && area.hidden && isCurrent() && tab.state.id === activeId && window.isFocused()) window.webContents.focus();
+      }));
       contents.on('did-stop-loading', () => { tab.state.loading = false; tab.navigating = false; refresh(tab); update(); });
       contents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
         invalidateMenu(tab.state.id);
@@ -505,7 +509,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (!site) throw new Error('SITE_UNAVAILABLE');
           setBlocking(store.siteSettings, site.host, command.enabled); persist();
           permissions.drop(tab.state.id);
-          if (contents) contents.reload();
+          // Turning blocking back on must not let the page reuse the ad and tracker responses it cached while it was off.
+          if (contents) { if (command.enabled) contents.reloadIgnoringCache(); else contents.reload(); }
           break;
         }
         case 'set-site-permission': {
@@ -701,7 +706,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   ipcMain.handle(IPC.contentArea, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length !== 1) throw new Error('Invalid content area arguments');
-    area = validateContentArea(args[0]); layout();
+    const next = validateContentArea(args[0]);
+    // A hidden page view keeps the keyboard, so an overlay that opened on its own, such as a permission prompt, would get no keys.
+    const covering = next.hidden && !area.hidden;
+    area = next; layout();
+    if (covering && window.isFocused()) window.webContents.focus();
   });
   const flush = () => { for (const runtime of runtimes.values()) runtime.flush(); };
   window.on('closed', () => {
