@@ -2053,6 +2053,19 @@ test('stale refresh failure keeps the serialized last good engine without quick 
   empty.stop();
 });
 
+test('permission buttons use touch targets only for coarse pointers', () => {
+  const css = readFileSync('src/styles.css', 'utf8');
+  const coarse = css.match(/@media \(pointer: coarse\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(coarse);
+  assert.match(readFileSync('src/tokens.css', 'utf8'), /--target-touch:\s*var\(--size-44\)/);
+  for (const selector of ['.site-popover button.site-permission-row', '.site-permission-actions .profile-action', '.site-permission-menu > button']) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rule = new RegExp(escaped + '[^{}]*\\{[^}]*min-height:\\s*var\\(--target-touch\\)');
+    assert.match(coarse[1], rule); assert.doesNotMatch(css.replace(coarse[0], ''), rule);
+  }
+  assert.doesNotMatch(coarse[1], /(?:^|,)\s*\.site-permission-row\s*[,\{]/m);
+});
+
 test('cosmetic sanitization keeps only fixed hiding declarations and refuses loading CSS', () => {
   const styles = '.ad { display:none!important; } .remote { background:url(https://evil.example/x); } .font { @font-face:x; } .custom { opacity:0; }';
   assert.deepEqual(safeCosmeticCSS(styles), { css: '.ad { display: none !important; }', rules: 1 });

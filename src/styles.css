@@ -192,6 +192,7 @@ kbd { border-radius: var(--radius-badge); color: var(--text-secondary); font-fam
 @media (pointer: coarse) {
   .shortcuts a { margin-block: 0; }
   .icon-button, .shortcuts a, .control-switch { min-width: var(--target-touch); min-height: var(--target-touch); }
+  .site-popover button.site-permission-row, .site-permission-actions .profile-action, .site-permission-menu > button { min-height: var(--target-touch); }
 }
 @media (prefers-reduced-motion: reduce) {
   .spinner, .loading-line.loading::after { animation: none; }
