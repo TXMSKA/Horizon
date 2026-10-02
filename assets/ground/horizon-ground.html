@@ -1,0 +1,134 @@
+<!doctype html>
+<!--
+  Horizon's orbital sunrise ground from the Cosmic family image, extracted from
+  family-rift-open.html without tiles, marks, fractures or the family vignette.
+  The original scene coordinates, radii, gradients, strokes, blurs and colours
+  are preserved. Its stars and engraving continue across the complete frame.
+  Render at 1920 x 1080 CSS pixels, 2 native device pixels per CSS pixel:
+  "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --headless=new --hide-scrollbars --force-device-scale-factor=2 --window-size=1920,1080 --screenshot="<repo>\assets\ground\horizon-ground-4k.png" "file:///<repo>/assets/ground/horizon-ground.html"
+  Image: 3840 by 2160; this file is the single source (Cosmic keeps no copy of record).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Horizon ground at 4K</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden; background: #171514; }
+  #hzGround { display: block; width: 1920px; height: 1080px; }
+</style>
+</head>
+<body>
+<svg id="hzGround" xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1820.44 1024" preserveAspectRatio="none"></svg>
+<script>
+function rng(seed) { return () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+const W = 1820.44, H = 1024;
+const HZ_ANGLE = (61 * Math.PI) / 180;
+
+{
+  const [px, py] = [-448, 1671], R = Math.hypot(560 - px, 215 - py);
+  const a = Math.atan2(215 - py, 560 - px), out = [Math.cos(a), Math.sin(a)];
+  const sun = [px + R * out[0], py + R * out[1]];
+  const tangent = (Math.atan2(out[0], -out[1]) * 180) / Math.PI;
+  const f = (v) => v.toFixed(1);
+
+  // the mark's hatching, square to its 61-degree line, so rising 29 degrees to the right
+  const along = [Math.sin(HZ_ANGLE), -Math.cos(HZ_ANGLE)], across = [Math.cos(HZ_ANGLE), Math.sin(HZ_ANGLE)];
+  let engraving = "";
+  for (let t = -40; t < 1800; t += 9) {
+    const x = t * across[0], y = t * across[1];
+    engraving += `M${f(x - 2200 * along[0])} ${f(y - 2200 * along[1])}L${f(x + 2200 * along[0])} ${f(y + 2200 * along[1])}`;
+  }
+
+  // a few warm stars, in space only and clear of the sun
+  const r = rng(77);
+  let stars = "";
+  for (let n = 0, placed = 0; n < 600 && placed < 24; n++) {
+    const x = 200 + r() * 600, y = r() * 520;
+    if (Math.hypot(x - px, y - py) < R + 18 || Math.hypot(x - sun[0], y - sun[1]) < 95) continue;
+    const size = 0.45 + r() * 0.8, op = 0.25 + r() * 0.55, warm = r() < 0.3 ? "#f3c98a" : "#ece4dc";
+    stars += `<circle cx="${f(x)}" cy="${f(y)}" r="${size.toFixed(2)}" fill="${warm}" fill-opacity="${op.toFixed(2)}"/>`;
+    if (size > 1.05) stars += `<circle cx="${f(x)}" cy="${f(y)}" r="${(size * 3.2).toFixed(2)}" fill="${warm}" fill-opacity="0.06"/>`;
+    placed++;
+  }
+
+  // Retain the original stars and seed; continue their density and colour rules
+  // over space outside the original placement window.
+  const inSpace = (x, y) => Math.hypot(x - px, y - py) >= R + 18 && Math.hypot(x - sun[0], y - sun[1]) >= 95;
+  const originalWindow = (x, y) => x >= 200 && x < 800 && y < 520;
+  let sourceArea = 0, extendedArea = 0;
+  for (let y = 4; y < H; y += 8) {
+    for (let x = 4; x < W; x += 8) {
+      if (!inSpace(x, y)) continue;
+      if (originalWindow(x, y)) sourceArea++; else extendedArea++;
+    }
+  }
+  const extendedCount = Math.round(24 * extendedArea / sourceArea), extra = rng(78);
+  for (let n = 0, placed = 0; n < 10000 && placed < extendedCount; n++) {
+    const x = extra() * W, y = extra() * H;
+    if (originalWindow(x, y) || !inSpace(x, y)) continue;
+    const size = 0.45 + extra() * 0.8, op = 0.25 + extra() * 0.55, warm = extra() < 0.3 ? "#f3c98a" : "#ece4dc";
+    stars += `<circle cx="${f(x)}" cy="${f(y)}" r="${size.toFixed(2)}" fill="${warm}" fill-opacity="${op.toFixed(2)}"/>`;
+    if (size > 1.05) stars += `<circle cx="${f(x)}" cy="${f(y)}" r="${(size * 3.2).toFixed(2)}" fill="${warm}" fill-opacity="0.06"/>`;
+    placed++;
+  }
+
+  const blur = (id, sd) => `<filter id="${id}" filterUnits="userSpaceOnUse" x="-300" y="-300" width="${W + 600}" height="1600"><feGaussianBlur stdDeviation="${sd}"/></filter>`;
+  document.getElementById("hzGround").innerHTML = `
+    <defs>
+      ${blur("hz-b1", 0.9)}${blur("hz-b2", 2.2)}${blur("hz-b6", 6)}${blur("hz-b16", 16)}
+      <radialGradient id="hz-body" gradientUnits="userSpaceOnUse" cx="${px}" cy="${py}" r="${R}">
+        <stop offset="0.55" stop-color="#0c0b0a"/><stop offset="0.93" stop-color="#11100f"/><stop offset="1" stop-color="#15130f"/>
+      </radialGradient>
+      <radialGradient id="hz-engraving-fade" gradientUnits="userSpaceOnUse" cx="${px}" cy="${py}" r="${R}">
+        <stop offset="${((R - 620) / R).toFixed(3)}" stop-color="#fff" stop-opacity="0"/><stop offset="0.995" stop-color="#fff"/>
+      </radialGradient>
+      <mask id="hz-engraving"><circle cx="${px}" cy="${py}" r="${R}" fill="url(#hz-engraving-fade)"/></mask>
+      <radialGradient id="hz-limb-fall" gradientUnits="userSpaceOnUse" cx="${f(sun[0])}" cy="${f(sun[1])}" r="620">
+        <stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0.3"/>
+      </radialGradient>
+      <mask id="hz-limb"><rect x="-300" y="-300" width="${W + 600}" height="1600" fill="url(#hz-limb-fall)"/></mask>
+      <clipPath id="hz-space"><path clip-rule="evenodd" d="M-300 -300H${W + 300}V1300H-300Z M${px - R} ${py}a${R} ${R} 0 1 0 ${2 * R} 0a${R} ${R} 0 1 0 ${-2 * R} 0Z"/></clipPath>
+      <radialGradient id="hz-wash" gradientUnits="userSpaceOnUse" cx="${f(sun[0])}" cy="${f(sun[1])}" r="380">
+        <stop offset="0" stop-color="#dda15a" stop-opacity="0.06"/><stop offset="1" stop-color="#dda15a" stop-opacity="0"/>
+      </radialGradient>
+      <radialGradient id="hz-halo" gradientUnits="userSpaceOnUse" cx="${f(sun[0])}" cy="${f(sun[1])}" r="100">
+        <stop offset="0" stop-color="#f3c98a" stop-opacity="0.32"/><stop offset="0.22" stop-color="#f3c98a" stop-opacity="0.1"/>
+        <stop offset="0.6" stop-color="#dda15a" stop-opacity="0.05"/><stop offset="1" stop-color="#dda15a" stop-opacity="0"/>
+      </radialGradient>
+      <radialGradient id="hz-core" gradientUnits="userSpaceOnUse" cx="${f(sun[0])}" cy="${f(sun[1])}" r="15">
+        <stop offset="0" stop-color="#fffaf0"/><stop offset="0.45" stop-color="#f3c98a" stop-opacity="0.9"/><stop offset="1" stop-color="#dda15a" stop-opacity="0"/>
+      </radialGradient>
+      <linearGradient id="hz-dusk" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="460" y2="0">
+        <stop offset="0" stop-color="#000" stop-opacity="0.5"/><stop offset="1" stop-color="#000" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="hz-flare" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#f3c98a" stop-opacity="0"/><stop offset="0.5" stop-color="#fff4e2"/><stop offset="1" stop-color="#f3c98a" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <rect x="-300" y="-300" width="${W + 600}" height="1600" fill="#171514"/>
+    <rect x="-300" y="-300" width="${W + 600}" height="1600" fill="url(#hz-wash)"/>
+    ${stars}
+    <g mask="url(#hz-limb)">
+      <circle cx="${px}" cy="${py}" r="${R + 12}" fill="none" stroke="#dda15a" stroke-opacity="0.13" stroke-width="44" filter="url(#hz-b16)"/>
+    </g>
+    <circle cx="${px}" cy="${py}" r="${R}" fill="url(#hz-body)"/>
+    <path d="${engraving}" fill="none" stroke="#dda15a" stroke-opacity="0.12" stroke-width="1" mask="url(#hz-engraving)"/>
+    <g mask="url(#hz-limb)" fill="none">
+      <circle cx="${px}" cy="${py}" r="${R - 10}" stroke="#dda15a" stroke-opacity="0.07" stroke-width="22" filter="url(#hz-b6)"/>
+      <circle cx="${px}" cy="${py}" r="${R + 1}" stroke="#dda15a" stroke-opacity="0.38" stroke-width="3.5" filter="url(#hz-b2)"/>
+      <circle cx="${px}" cy="${py}" r="${R}" stroke="#f3c98a" stroke-opacity="0.72" stroke-width="1.2"/>
+    </g>
+    <circle cx="${f(sun[0])}" cy="${f(sun[1])}" r="100" fill="url(#hz-halo)"/>
+    <g transform="translate(${f(sun[0])} ${f(sun[1])}) rotate(${tangent.toFixed(2)})">
+      <ellipse rx="90" ry="6" fill="url(#hz-flare)" opacity="0.1" filter="url(#hz-b6)"/>
+      <ellipse rx="120" ry="1.3" fill="url(#hz-flare)" opacity="0.45" filter="url(#hz-b1)"/>
+    </g>
+    <circle cx="${f(sun[0])}" cy="${f(sun[1])}" r="15" fill="url(#hz-core)" clip-path="url(#hz-space)"/>
+    <circle cx="${f(sun[0])}" cy="${f(sun[1])}" r="4.5" fill="#fffaf0" clip-path="url(#hz-space)"/>
+    <rect x="-300" y="-300" width="${W + 600}" height="1600" fill="url(#hz-dusk)"/>
+  `;
+}
+</script>
+</body>
+</html>
