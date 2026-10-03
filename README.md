@@ -11,6 +11,9 @@ an optional high-contrast palette. Language follows the system locale
 (Spanish or English, with English for other locales) unless one is chosen
 in Settings.
 
+The three-dot menu holds the browser's own tools: zoom and fullscreen (F11),
+find, the Favorites, History and Downloads panels, Settings and About.
+
 The Hub, next to the profile avatar, holds Horizon's apps; Themes is the
 first, and any app can be pinned to the toolbar as quick access. The avatar
 opens the profiles.

@@ -173,11 +173,12 @@ function ClearBrowsingDataDialog({ language, clearing, opener, onDismiss, onClea
   </dialog>;
 }
 
-function PrivacySettings({ state, language, onOpen }: { state: BrowserState; language: Language; onOpen: (section: SettingsSection) => void }) {
+function PrivacySettings({ state, language, onOpen, openClearDialog, onClearDialogOpened }: { state: BrowserState; language: Language; onOpen: (section: SettingsSection) => void; openClearDialog?: boolean; onClearDialogOpened?: () => void }) {
   const t = (key: CopyKey) => text(key, language);
   const count = groupSiteSettings(state.sites).length;
   const [dialog, setDialog] = useState(false), [result, setResult] = useState('');
   const opener = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (openClearDialog) { setDialog(true); onClearDialogOpened?.(); } }, [openClearDialog, onClearDialogOpened]);
   return <>
     <SettingsGroup title="blocking" language={language}>
       <SettingsToggle title="blockAdsTrackers" hint={t('blockAdsHint')} value={state.blockAds} command="set-block-ads" language={language} />
@@ -224,8 +225,8 @@ function SitesSettings({ state, language }: { state: BrowserState; language: Lan
   return <><div className="settings-card">{state.sites.length ? <ul className="settings-sites">{groupSiteSettings(state.sites).map(sites => <SettingsSite key={sites[0]!.host} sites={sites} language={language} onReset={host => setResult(t('siteReset').replace('{host}', host))} />)}</ul> : <div className="settings-empty"><strong>{t('noSiteSettings')}</strong><p>{t('noSiteSettingsHint')}</p></div>}</div>{state.sites.length > 0 && <p className="settings-note">{t('resetSiteNote')}</p>}<div className="settings-feedback" role="status" aria-live="polite">{result}</div></>;
 }
 
-export function Settings({ state, section, language, onOpen }: {
-  state: BrowserState; section: SettingsSection; language: Language; onOpen: (section: SettingsSection) => void;
+export function Settings({ state, section, language, onOpen, openClearDialog, onClearDialogOpened }: {
+  state: BrowserState; section: SettingsSection; language: Language; onOpen: (section: SettingsSection) => void; openClearDialog?: boolean; onClearDialogOpened?: () => void;
 }) {
   const t = (key: CopyKey) => text(key, language);
   const current = section === 'privacy/sites' ? 'privacy' : section;
@@ -234,7 +235,7 @@ export function Settings({ state, section, language, onOpen }: {
   </nav><div className="settings-content"><div className="settings-column"><div className="settings-page-heading">{section === 'privacy/sites' && <button className="settings-back" type="button" onClick={() => onOpen('privacy')}><ChevronLeft aria-hidden="true" />{t('privacy')}</button>}<h1 id="settings-title" tabIndex={-1}>{t(section === 'privacy/sites' ? 'sitesOwnSettings' : current)}</h1></div>
     {section === 'general' && <GeneralSettings state={state} language={language} />}
     {section === 'appearance' && <AppearanceSettings state={state} language={language} />}
-    {section === 'privacy' && <PrivacySettings state={state} language={language} onOpen={onOpen} />}
+    {section === 'privacy' && <PrivacySettings state={state} language={language} onOpen={onOpen} openClearDialog={openClearDialog} onClearDialogOpened={onClearDialogOpened} />}
     {section === 'privacy/sites' && <SitesSettings state={state} language={language} />}
     {section === 'profiles' && <ProfilesSettings state={state} language={language} />}
   </div></div></section>;

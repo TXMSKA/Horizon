@@ -94,7 +94,7 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
       break;
     case 'context-menu': keys(command, ['type', 'id', 'item']); valid = string(command.id, 128) && isContextMenuItemId(command.item); break;
     case 'dismiss-context-menu': keys(command, ['type', 'id']); valid = string(command.id, 128); break;
-    case 'activate-tab': case 'close-tab': case 'cancel-download': case 'show-download': case 'remove-download':
+    case 'activate-tab': case 'close-tab': case 'cancel-download': case 'show-download': case 'remove-download': case 'retry-download':
       keys(command, ['type', 'id']); valid = string(command.id, 128); break;
     case 'navigate': keys(command, ['type', 'input']); valid = string(command.input, 8192); break;
     case 'zoom': keys(command, ['type', 'delta']); valid = command.delta === -1 || command.delta === 0 || command.delta === 1; break;
@@ -106,7 +106,7 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
     case 'delete-history': case 'delete-bookmark': keys(command, ['type', 'url']); valid = isWebURL(command.url); break;
     case 'restore':
       keys(command, ['type', 'kind']); valid = command.kind === 'history' || command.kind === 'bookmarks' || command.kind === 'downloads' || command.kind === 'notebooks'; break;
-    case 'back': case 'forward': case 'reload': case 'stop': case 'bookmark': case 'focus-page': case 'stop-find': case 'clear-history': case 'open-downloads-folder':
+    case 'back': case 'forward': case 'reload': case 'stop': case 'bookmark': case 'focus-page': case 'stop-find': case 'clear-history': case 'open-downloads-folder': case 'fullscreen':
       keys(command, ['type']); valid = true; break;
   }
   if (!valid) throw new Error('Invalid browser command');

@@ -25,7 +25,7 @@ import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages'
 import { createNotebooks } from './notebooks';
 import { captureRectangle, captureSelection, captureWholePage, pngSize } from './captures';
 
-interface Tab { state: TabState; view?: WebContentsView; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
+interface Tab { state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
 
 
 const profileSessions = new Set<Session>();
@@ -52,7 +52,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   };
   const current = () => runtimes.get(registry.activeId)!;
   const state = (): BrowserState => ({
-    ...current().state(), activeProfileId: registry.activeId,
+    ...current().state(), version: app.getVersion(), activeProfileId: registry.activeId,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
     quickAccess: settings.quickAccess,
@@ -651,10 +651,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (input.type !== 'keyDown' || input.isComposing) return;
         const shortcut = browserShortcut(input);
         if (!shortcut) return;
+        if (shortcut === 'fullscreen' || shortcut === 'stop' && tab.state.fullscreen) {
+          event.preventDefault(); run({ type: shortcut === 'fullscreen' ? 'fullscreen' : 'stop' }); return;
+        }
         if (shortcut === 'stop' && !contents.isLoading()) return;
         event.preventDefault();
         if (!isCurrent() || tab.state.id !== activeId) return;
-        if (['focus-address', 'find', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
+        if (['focus-address', 'find', 'favorites', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
         window.webContents.send(IPC.shortcut, shortcut);
       });
       contents.on('zoom-changed', (_event, direction) => { if (tab.view === view && isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
@@ -662,10 +665,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
 
     const downloadHandler = (event: Electron.Event, item: DownloadItem, contents: WebContents) => {
       const tab = tabs.find(tab => tab.view?.webContents === contents);
-      if (!tab || disposed || closing) { event.preventDefault(); return; }
-      const url = isWebURL(item.getURL()) ? item.getURL() : tab.state.url;
-      if (!isWebURL(url)) { event.preventDefault(); return; }
+      const retry = Boolean(tab?.retryDownload);
+      let accepted = false;
       try {
+        if (!tab || disposed || closing) { event.preventDefault(); return; }
+        const url = isWebURL(item.getURL()) ? item.getURL() : tab.state.url;
+        if (!isWebURL(url)) { event.preventDefault(); return; }
         const folder = resolvedDownloadsFolder(settings, downloads).downloadsFolder;
         mkdirSync(folder, { recursive: true });
         const proposed = reserveDownloadPath(folder, item.getFilename(), new Set([...reserved, ...[...runtimes.values()].flatMap(runtime => [...runtime.reserved])]));
@@ -674,8 +679,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const path = selected;
         reserved.add(path);
         item.setSavePath(path);
-        const entry = { id: randomUUID(), url, filename: basename(path), path, received: 0, total: item.getTotalBytes(), status: 'progressing' as const, startedAt: Date.now() };
-        store.downloads.unshift(entry);
+        const retryIndex = tab.retryDownload ? store.downloads.findIndex(entry => entry.id === tab.retryDownload) : -1;
+        const entry = { id: retryIndex >= 0 ? tab.retryDownload! : randomUUID(), url, filename: basename(path), path, received: 0, total: item.getTotalBytes(), status: 'progressing' as const, startedAt: Date.now() };
+        if (retryIndex >= 0) store.downloads.splice(retryIndex, 1, entry); else store.downloads.unshift(entry);
+        tab.retryDownload = undefined;
         trustedDownloads.set(entry.id, entry.path);
         store.downloads.splice(10000);
         items.set(entry.id, item); persist(); publish();
@@ -694,8 +701,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (stored) { stored.status = interrupted ? 'failed' : status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed'; stored.received = item.getReceivedBytes(); }
           items.delete(entry.id); reserved.delete(path); persist(); publish();
         });
+        accepted = true;
         if (!tab.committed && tabs.length > 1) setImmediate(() => { if (!tab.committed && tabs.length > 1) closeTab(tab); });
       } catch { event.preventDefault(); storageError = true; publish(); }
+      finally {
+        // A retry that never starts must release its lock before another attempt.
+        if (tab && retry && !accepted) { tab.retryDownload = undefined; closeTab(tab); }
+      }
     };
     webSession.on('will-download', downloadHandler);
 
@@ -889,8 +901,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'back': if (contents?.navigationHistory.canGoBack()) contents.navigationHistory.goBack(); break;
         case 'forward': if (contents?.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break;
         case 'reload': if (contents) { tab.state.error = null; contents.reload(); } else if (isAllowedURL(tab.state.url)) load(tab, tab.state.url); break;
-        case 'stop': contents?.stop(); tab.cosmeticPending = false; break;
+        case 'stop': if (tab.state.fullscreen) leaveFullscreen(tab); else { contents?.stop(); tab.cosmeticPending = false; } break;
         case 'focus-page': if (!area.hidden && !tab.state.error) contents?.focus(); break;
+        case 'fullscreen':
+          if (tab.state.fullscreen) leaveFullscreen(tab);
+          else { tab.state.fullscreen = true; window.setFullScreen(true); }
+          break;
         case 'zoom': zoom(tab, command.delta); break;
         case 'bookmark': {
           if (!isWebURL(tab.state.url)) break;
@@ -921,6 +937,16 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           entry.title = command.title; persist(); break;
         }
         case 'delete-bookmark': keep('bookmarks'); store.bookmarks = store.bookmarks.filter(entry => entry.url !== command.url); persist(); break;
+        case 'retry-download': {
+          const entry = store.downloads.find(entry => entry.id === command.id);
+          if (!entry || entry.status !== 'failed' || !isWebURL(entry.url) || tabs.some(tab => tab.retryDownload === entry.id)) throw new Error('Invalid download retry');
+          // A dedicated background tab keeps retry from navigating the user's current page.
+          const target = newTab(undefined, false);
+          target.retryDownload = entry.id;
+          try { ensureView(target); page(target.view)!.downloadURL(entry.url); }
+          catch (error) { target.retryDownload = undefined; closeTab(target); throw error; }
+          break;
+        }
         case 'cancel-download': items.get(command.id)?.cancel(); break;
         case 'show-download': {
           const entry = store.downloads.find(entry => entry.id === command.id);

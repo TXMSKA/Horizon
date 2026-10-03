@@ -603,7 +603,7 @@ test('dark page copy includes the approved English and Rioplatense Spanish label
     darkStrength: ['Strength', 'Intensidad'], soft: ['Soft', 'Suave'], standard: ['Standard', 'Normal'], deep: ['Deep', 'Fuerte'],
     darkTone: ['Tone', 'Tono'], neutral: ['Neutral', 'Neutro'], warm: ['Warm', 'Cálido'],
     darkModeOnSite: ['Dark mode on this site', 'Modo oscuro en este sitio'],
-    darkPagesOff: ['Dark pages are off. Turn them on in the menu.', 'Las páginas oscuras están apagadas. Activalas en el menú.'],
+    darkPagesOff: ['Dark pages are off. Turn them on in Settings, Appearance.', 'Las páginas oscuras están apagadas. Activalas en Configuración, Apariencia.'],
     darkPagesSystemLight: ['Dark pages follow the system, which is light now.', 'Las páginas oscuras siguen al sistema, que ahora está en claro.'],
     darkModeEnabled: ['Dark mode on for {host}', 'Modo oscuro activado en {host}'],
     darkModeDisabled: ['Dark mode off for {host}', 'Modo oscuro desactivado en {host}'],
@@ -615,42 +615,31 @@ test('dark page copy includes the approved English and Rioplatense Spanish label
   assert.ok(copy.system.en); assert.ok(copy.system.es);
 });
 
-test('dark page menu rows are labelled radio groups with immediate commands and mode-dependent options', () => {
-  const { compileFunction } = require('node:vm');
-  const ts = require('typescript'), { text } = interfaceModule('src/copy.ts');
-  const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let menu;
-  const visit = node => {
-    if (ts.isJsxElement(node) && node.openingElement.attributes.properties.some(property => ts.isJsxAttribute(property) && property.name.getText(source) === 'id' && property.initializer?.text === 'browser-menu')) menu = node;
-    ts.forEachChild(node, visit);
-  };
-  visit(source); assert.ok(menu);
-  const compiled = ts.transpileModule(`export function render(state, t, run) { return ${menu.getText(source)}; }`, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+test('dark page options now live in Appearance with labelled radios and immediate commands', () => {
+  const { compileFunction } = require('node:vm'), ts = require('typescript'), { text } = interfaceModule('src/copy.ts');
+  const source = ts.createSourceFile('Settings.tsx', readFileSync('src/Settings.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const functions = ['AppearanceSettings', 'SettingsSegmented'].map(name => source.statements.find(node => ts.isFunctionDeclaration(node) && node.name.text === name));
+  const compiled = ts.transpileModule(functions.map(node => 'export ' + node.getText(source)).join('\n'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exported = {}, jsx = (type, props) => ({ type, props });
-  compileFunction(compiled, ['exports', 'require', 'Menu', 'Plus', 'History', 'Star', 'Download', 'Search', 'Switch', 'Settings2', 'menuByKeyboard', 'menuButtonRef', 'activeUrl', 'active', 'window'])(exported,
-    name => { assert.equal(name, 'react/jsx-runtime'); return { jsx, jsxs: jsx, Fragment: 'fragment' }; },
-    'menu', 'plus', 'history', 'star', 'download', 'search', 'switch', 'settings', { current: false }, { current: null }, '', undefined, { horizon: { initialTheme: 'system', initialContrast: 'standard' } });
-  for (const language of ['en', 'es']) for (const mode of [undefined, 'off', 'on', 'system']) for (const strength of ['soft', 'standard', 'deep']) for (const tone of ['neutral', 'warm']) {
-    const commands = [], state = mode ? { darkPages: { mode, strength, tone } } : null;
-    const rendered = exported.render(state, key => text(key, language), command => commands.push(command));
-    const rows = interfaceChildren(rendered).flatMap(child => child.type === 'fragment' ? interfaceChildren(child) : [child]).filter(child => child.props.className === 'menu-theme');
-    const visible = mode && mode !== 'off';
-    assert.deepEqual(rows.map(row => row.props['aria-label']), (visible ? ['theme', 'darkPages', 'darkStrength', 'darkTone'] : ['theme', 'darkPages']).map(key => text(key, language)));
-    for (const [index, type, values, selected] of [[1, 'dark-pages', ['off', 'on', 'system'], mode ?? 'off'], ...(visible ? [[2, 'dark-strength', ['soft', 'standard', 'deep'], strength], [3, 'dark-tone', ['neutral', 'warm'], tone]] : [])]) {
-      const row = rows[index]; assert.equal(row.props.role, 'group');
-      const [label, group] = interfaceChildren(row);
-      assert.equal(label.props.children, row.props['aria-label']); assert.equal(group.props.className, 'segmented');
-      const buttons = interfaceChildren(group); assert.equal(buttons.length, values.length);
-      buttons.forEach((button, position) => {
-        assert.equal(button.type, 'button'); assert.equal(button.props.type, 'button'); assert.equal(button.props.role, 'menuitemradio');
-        assert.equal(button.props.tabIndex, -1); assert.equal(button.props['aria-checked'], values[position] === selected);
-        assert.equal(button.props.children, text(values[position], language));
-        button.props.onClick(); assert.deepEqual(commands.at(-1), { type, value: values[position] });
+  compileFunction(compiled, ['exports', 'require', 'text', 'SettingsGroup', 'SettingRow', 'SettingsToggle'])(exported,
+    name => { assert.equal(name, 'react/jsx-runtime'); return { jsx, jsxs: jsx, Fragment: 'fragment' }; }, text, 'group', 'row', 'toggle');
+  for (const language of ['en', 'es']) for (const mode of ['off', 'on', 'system']) for (const strength of ['soft', 'standard', 'deep']) for (const tone of ['neutral', 'warm']) {
+    const commands = [], state = { theme: 'system', contrast: 'standard', darkPages: { mode, strength, tone } };
+    const tree = exported.AppearanceSettings({ state, language });
+    const rows = notebookNodes(tree, node => node.type === 'row');
+    assert.deepEqual(rows.map(row => row.props.title), mode === 'off' ? ['theme', 'darkPages'] : ['theme', 'darkPages', 'darkStrength', 'darkTone']);
+    for (const [index, type, selected] of [[1, 'dark-pages', mode], ...(mode !== 'off' ? [[2, 'dark-strength', strength], [3, 'dark-tone', tone]] : [])]) {
+      const choice = rows[index].props.children('test', command => { commands.push(command); return Promise.resolve(true); }, false);
+      const group = exported.SettingsSegmented(choice.props); assert.equal(group.props.role, 'radiogroup'); assert.equal(group.props['aria-labelledby'], 'test-title');
+      const buttons = interfaceChildren(group);
+      buttons.forEach(button => {
+        assert.equal(button.props.role, 'radio'); assert.equal(button.props.type, 'button');
+        assert.equal(button.props['aria-checked'], button.props.children === text(selected, language)); assert.equal(button.props.tabIndex, button.props['aria-checked'] ? 0 : -1);
+        if (!button.props['aria-checked']) { button.props.onClick(); assert.equal(commands.at(-1).type, type); }
       });
     }
   }
 });
-
 test('site dark switches preserve row order, accessible hints and focus while refusing repeated pending commands', async () => {
   const copy = interfaceModule('src/copy.ts'), switchModule = interfaceModule('src/Switch.tsx');
   const react = { useId: () => 'site', useRef: current => ({ current }), useState: current => [current, () => {}], useEffect() {}, useLayoutEffect() {} };
@@ -701,7 +690,7 @@ test('site dark hints wrap without truncation and menu rows retain internal scro
   }
   assert.match(css, /\.site-blocking-copy small\s*\{[^}]*overflow-wrap:\s*anywhere/);
   assert.match(css, /\.browser-menu\s*\{[^}]*max-height:\s*calc\(100vh - var\(--height-tabs\) - var\(--height-toolbar\)\);[^}]*overflow-y:\s*auto/);
-  assert.match(css, /\.menu-theme\s*\{[^}]*flex-shrink:\s*0/);
+  assert.match(css, /\.browser-menu-zoom\s*\{[^}]*flex:\s*none/);
 });
 
 test('subframes permit local document schemes without allowing privileged navigation', () => {
@@ -934,6 +923,9 @@ test('chrome and web content share the same browser shortcut mapping', () => {
   assert.equal(browserShortcut(input('ArrowRight', { alt: true })), 'forward');
   assert.equal(browserShortcut(input('F5')), 'reload');
   assert.equal(browserShortcut(input('F6')), 'focus-address');
+  assert.equal(browserShortcut(input('F11')), 'fullscreen');
+  assert.equal(browserShortcut(input('O', { control: true, shift: true })), 'favorites');
+  for (const event of [input('o'), input('o', { control: true }), input('o', { control: true, shift: true, alt: true }), input('o', { control: true, shift: true, meta: true }), input('F11', { control: true }), input('F11', { shift: true }), input('F11', { alt: true })]) assert.equal(browserShortcut(event), null);
   assert.equal(browserShortcut(input('Escape')), 'stop');
   for (const event of [input('t'), input('ArrowLeft'), input('t', { control: true, alt: true }), input('t', { control: true, shift: true }), input('t', { control: true, meta: true }), input('z', { control: true })]) {
     assert.equal(browserShortcut(event), null);
@@ -1082,7 +1074,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   sessions.set('persist:web', prepareMockSession(webSession));
   const electron = {
     nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }),
-    app: Object.assign(new EventEmitter(), { commandLine: { appendSwitch() {}, removeSwitch() {} }, getLocale: () => 'en', getPath: () => directory }),
+    app: Object.assign(new EventEmitter(), { commandLine: { appendSwitch() {}, removeSwitch() {} }, getLocale: () => 'en', getVersion: () => '0.1.0-test', getPath: () => directory }),
     nativeImage: { createFromBuffer() { assert.fail('Privileged favicon decoding is forbidden'); } },
     ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
     session: { fromPartition(name) { if (!sessions.has(name)) sessions.set(name, prepareMockSession(new EventEmitter())); return sessions.get(name); } },
@@ -1125,6 +1117,9 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const state = () => handlers.get('horizon:state')(event);
   const command = value => handlers.get('horizon:command')(event, value);
   const capture = (...args) => handlers.get('horizon:capture')(event, ...args);
+  assert.equal(state().version, '0.1.0-test');
+  assert.throws(() => handlers.get('horizon:state')(event, 'version'));
+  assert.throws(() => handlers.get('horizon:state')({ ...event, sender: {} }));
   assert.equal(state().tabs.length, 1);
   assert.equal(window.title, 'Horizon');
   assert.equal(state().theme, 'system');
@@ -1442,6 +1437,17 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(fallbackContents.url, 'https://example.com/fallback');
   assert.equal(state().activeId, openerId);
   fallbackContents.close();
+  command({ type: 'fullscreen' });
+  assert.equal(window.fullscreen, true);
+  assert.equal(state().tabs[0].fullscreen, true);
+  assert.equal(view.bounds.y, 0);
+  const press = key => { let prevented = false; view.webContents.emit('before-input-event', { preventDefault() { prevented = true; } }, { type: 'keyDown', key, control: false, alt: false, shift: false, meta: false }); assert.equal(prevented, true); };
+  press('F11'); assert.equal(window.fullscreen, false);
+  press('F11'); assert.equal(view.bounds.y, 0);
+  press('Escape'); assert.equal(window.fullscreen, false); assert.equal(state().tabs[0].fullscreen, false);
+  let preventedFavorites = false;
+  view.webContents.emit('before-input-event', { preventDefault() { preventedFavorites = true; } }, { type: 'keyDown', key: 'O', control: true, shift: true, alt: false, meta: false });
+  assert.equal(preventedFavorites, true); assert.deepEqual(window.webContents.sent.at(-1), ['horizon:shortcut', 'favorites']);
   view.webContents.emit('enter-html-full-screen');
   assert.equal(window.fullscreen, true);
   assert.equal(state().tabs[0].fullscreen, true);
@@ -1644,6 +1650,8 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(state().store.downloads.find(entry => entry.path === first.path).received, 50);
   second.emit('done', {}, 'completed');
   const completed = state().store.downloads.find(entry => entry.path === second.path);
+  assert.throws(() => command({ type: 'retry-download', id: completed.id }), /Invalid download retry/);
+  assert.throws(() => command({ type: 'retry-download', id: 'missing' }), /Invalid download retry/);
   command({ type: 'show-download', id: completed.id });
   assert.deepEqual(shown, [second.path]);
   state().store.downloads.push({ ...completed, id: 'unsafe', filename: '..', path: directory });
@@ -1653,6 +1661,15 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const progressing = state().store.downloads[0];
   command({ type: 'cancel-download', id: progressing.id });
   assert.equal(state().store.downloads[0].status, 'cancelled');
+  const failed = new Download(); webSession.emit('will-download', allowed, failed, view.webContents); failed.emit('done', {}, 'interrupted');
+  const failedEntry = state().store.downloads.find(entry => entry.path === failed.path), activeBeforeRetry = state().activeId;
+  assert.equal(failedEntry.status, 'failed'); command({ type: 'retry-download', id: failedEntry.id });
+  assert.throws(() => command({ type: 'retry-download', id: failedEntry.id }), /Invalid download retry/);
+  const retryView = views.at(-1); assert.equal(retryView.webContents.downloaded, failedEntry.url); assert.equal(state().activeId, activeBeforeRetry);
+  const retried = new Download(); webSession.emit('will-download', allowed, retried, retryView.webContents); retried.emit('done', {}, 'completed');
+  assert.equal(state().store.downloads.find(entry => entry.id === failedEntry.id).status, 'completed');
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(retryView.webContents.destroyed, true); assert.equal(state().tabs.length, 1);
+  const retryUrl = failedEntry.url; failedEntry.url = 'file:///private'; assert.throws(() => command({ type: 'retry-download', id: failedEntry.id }), /Invalid download retry/); failedEntry.url = retryUrl;
   view.webContents.emit('did-fail-load', {}, -105, "ERR_NAME_NOT_RESOLVED (-105) loading 'https://example.com/'", 'https://example.com/', true);
   assert.equal(view.visible, false);
   assert.equal(state().tabs[0].error, 'ERR_NAME_NOT_RESOLVED');
@@ -1885,7 +1902,7 @@ test('dark page flips replace views in every profile without closing tabs and si
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
   const directory = temporaryDirectory(t, 'dark-browser'), views = [], handlers = new Map(), sessions = new Map(), switchCalls = [], order = [];
   const nativeTheme = Object.assign(new EventEmitter(), { shouldUseDarkColors: false });
-  const app = Object.assign(new EventEmitter(), { getLocale: () => 'en', getPath: () => directory, commandLine: {
+  const app = Object.assign(new EventEmitter(), { getLocale: () => 'en', getVersion: () => '0.1.0-test', getPath: () => directory, commandLine: {
     appendSwitch(...args) { switchCalls.push(['append', ...args]); order.push('switch-on'); },
     removeSwitch(...args) { switchCalls.push(['remove', ...args]); order.push('switch-off'); },
   } });
@@ -3112,6 +3129,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
     close() { if (!this.destroyed) { this.destroyed = true; this.emit('destroyed'); } }
     capturePage(...args) { this.captureArgs = args; return Promise.resolve({ toPNG: () => faviconPNG }); }
     executeJavaScriptInIsolatedWorld(...args) { this.selectionArgs = args; return Promise.resolve(this.selection ?? ' Selected text '); }
+    downloadURL(url) { if (options.downloadError) throw new Error('Download failed'); this.downloaded = url; }
   }
   class View {
     constructor(options) { this.options = options; this.webContents = new Contents(sessions.get(options.webPreferences.partition)); views.push(this); }
@@ -3120,7 +3138,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
     setVisible(value) { this.visible = value; }
     getVisible() { return this.visible; }
   }
-  const app = Object.assign(new EventEmitter(), { getLocale: () => 'en', getPath: () => directory, commandLine: { appendSwitch() {}, removeSwitch() {} } });
+  const app = Object.assign(new EventEmitter(), { getLocale: () => 'en', getVersion: () => '0.1.0-test', getPath: () => directory, commandLine: { appendSwitch() {}, removeSwitch() {} } });
   app.quit = () => { app.quits = (app.quits || 0) + 1; };
   const electron = { app, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), safeStorage: cipher, WebContentsView: View,
     screen: { getDisplayMatching: () => ({ scaleFactor: 2 }) },
@@ -3142,7 +3160,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
     name === 'electron' ? electron : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './notebooks' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, contentView: { addChildView() {}, removeChildView() {} } });
-  electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; return options.saveChoice; } };
+  electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
   electron.shell = { openExternal: async () => assert.fail('System settings must stay mocked'), showItemInFolder: path => { options.shownPath = path; }, openPath: async () => '' };
   Contents.prototype.stop = function () { this.stops = (this.stops || 0) + 1; };
   Contents.prototype.reload = function () { this.reloads = (this.reloads || 0) + 1; };
@@ -3373,6 +3391,165 @@ function notebookNodes(node, predicate) {
   return [...(predicate(node) ? [node] : []), ...interfaceChildren(node).flatMap(child => notebookNodes(child, predicate))];
 }
 const notebookTestIcons = Object.fromEntries(['AppWindow', 'NotebookPen', 'SquareDashed', 'Type', 'Camera', 'Check', 'FileText', 'LoaderCircle', 'Pencil', 'Plus', 'TriangleAlert', 'X', 'Ellipsis', 'Trash2'].map(name => [name, name]));
+
+test('browser menu keeps the drawn order, shortcuts and working zoom controls', () => {
+  const copy = interfaceModule('src/copy.ts'), shortcuts = [], panels = [], commands = [];
+  const { BrowserMenu } = interfaceModule('src/BrowserMenu.tsx', { 'lucide-react': {}, './copy': copy, './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' } });
+  const tree = BrowserMenu({ language: 'en', active: { url: 'https://example.com/', zoom: 1 }, keyboard: true, opener: { current: null }, onDismiss() {}, onShortcut: action => shortcuts.push(action), onPanel: panel => panels.push(panel), onSettings() {}, onAbout() {}, run: async command => { commands.push(command); return true; } });
+  const items = notebookNodes(tree, node => node.props.role === 'menuitem');
+  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Favorites', 'History', 'Downloads', 'Settings', 'About Horizon']);
+  assert.deepEqual(notebookNodes(tree, node => node.type === 'kbd').map(node => node.props.children), ['Ctrl+T', 'Ctrl+F', 'Ctrl+Shift+O', 'Ctrl+H', 'Ctrl+J']);
+  assert.equal(notebookNodes(tree, node => node.type === 'hr').length, 3);
+  items[1].props.onClick(); items[2].props.onClick(); items[3].props.onClick(); items[5].props.onClick();
+  assert.deepEqual(commands, [{ type: 'zoom', delta: -1 }, { type: 'zoom', delta: 1 }]); assert.deepEqual(shortcuts, ['fullscreen']); assert.deepEqual(panels, ['bookmarks']);
+  assert.ok(items.every(item => item.props.tabIndex === -1));
+});
+
+function browserPanelInterface(hooks, document = {}) {
+  return interfaceModule('src/BrowserPanel.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './EmptyState': { EmptyBookmarks: 'empty-bookmarks', EmptyDownloads: 'empty-downloads', EmptyHistory: 'empty-history', NoResults: 'no-results' }, './ToolbarPopover': { ToolbarPopover: 'popover' } }, { document });
+}
+
+test('retry cancellation and early failures release the temporary tab and allow another retry', t => {
+  const { EventEmitter } = require('node:events'), options = {}, browser = notebookBrowser(t, plainCipher, options);
+  browser.navigate();
+  const contents = browser.views.at(-1).webContents, session = contents.session, active = browser.state().activeId;
+  const item = () => Object.assign(new EventEmitter(), { getURL: () => 'https://example.com/file.pdf', getFilename: () => 'file.pdf', getTotalBytes: () => 10, getReceivedBytes: () => 0, setSavePath(path) { this.path = path; }, cancel() { this.cancelled = true; } });
+  const original = item(); session.emit('will-download', { preventDefault() { assert.fail('Original refused'); } }, original, contents);
+  original.emit('done', {}, 'interrupted');
+  const entry = browser.state().store.downloads[0], retry = () => browser.command({ type: 'retry-download', id: entry.id });
+  browser.command({ type: 'set-ask-where-to-save', value: true });
+  for (const reason of ['cancel', 'invalid-url', 'item-error', 'dialog-error']) {
+    retry(); const target = browser.views.at(-1).webContents, download = item(); let prevented = false;
+    assert.equal(target.downloaded, entry.url);
+    assert.throws(retry, /Invalid download retry/);
+    if (reason === 'invalid-url') download.getURL = () => 'file:///invalid';
+    if (reason === 'item-error') download.getURL = () => { throw new Error('Item failed'); };
+    options.saveError = reason === 'dialog-error';
+    session.emit('will-download', { preventDefault() { prevented = true; } }, download, target);
+    assert.equal(prevented, true); assert.equal(target.destroyed, true);
+    if (reason === 'cancel') assert.equal(download.cancelled, true);
+    assert.equal(browser.state().tabs.length, 1); assert.equal(browser.state().activeId, active);
+    assert.equal(browser.state().store.downloads[0].status, 'failed');
+  }
+  options.downloadError = true; assert.throws(retry, /Download failed/);
+  assert.equal(browser.views.at(-1).webContents.destroyed, true);
+  options.downloadError = false; options.saveError = false; retry();
+  const target = browser.views.at(-1).webContents, download = item();
+  options.saveChoice = join(browser.directory, 'downloads', 'retried.pdf');
+  session.emit('will-download', { preventDefault() { assert.fail('Retry refused'); } }, download, target);
+  assert.equal(browser.state().store.downloads.length, 1);
+  assert.equal(browser.state().store.downloads[0].id, entry.id);
+  assert.equal(browser.state().store.downloads[0].status, 'progressing');
+});
+
+test('empty search announcements follow result transitions in both languages', () => {
+  for (const panel of ['bookmarks', 'history']) for (const language of ['en', 'es']) {
+    const hooks = notebookTestHooks(), announced = [], { BrowserPanel } = browserPanelInterface(hooks, { addEventListener() {}, removeEventListener() {} });
+    const entry = { title: 'Example', url: 'https://example.com/', lastVisit: Date.now() };
+    const props = { panel, language, state: { tabs: [], store: { bookmarks: [entry], history: [entry], downloads: [] } }, opener: { current: null }, favicons: {}, undo: null, onAnnounce: message => announced.push(message) };
+    const render = () => { const tree = hooks.render(() => BrowserPanel(props)); hooks.flush(); return tree; };
+    let tree = render(); assert.deepEqual(announced, []);
+    const search = value => { notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value } }); tree = render(); };
+    const expected = interfaceModule('src/copy.ts').text('noResultsTitle', language);
+    assert.ok(expected.trim()); search('missing'); search('missing again'); tree = render();
+    assert.deepEqual(announced, [expected]);
+    search('Example'); search('absent'); assert.deepEqual(announced, [expected, '', expected]);
+    search(''); assert.deepEqual(announced, [expected, '', expected, '']);
+    search('missing'); hooks.dispose(); assert.deepEqual(announced.slice(-2), [expected, '']);
+  }
+});
+
+test('deleting focused library rows preserves the control and falls back to Undo', () => {
+  for (const [panel, control] of [['bookmarks', 'delete'], ['bookmarks', 'link'], ['bookmarks', 'rename'], ['history', 'delete'], ['history', 'link'], ['downloads', 'delete']]) for (const index of [0, 1, 2]) {
+    const hooks = notebookTestHooks(), document = { body: {}, activeElement: null, addEventListener() {}, removeEventListener() {} }, focused = [], { BrowserPanel } = browserPanelInterface(hooks, document);
+    const entries = [0, 1, 2].map(id => ({ id: String(id), title: String(id), filename: `${id}.pdf`, url: `https://example.com/${id}`, lastVisit: 3 - id, status: 'failed', received: 0, total: 0 }));
+    const state = { tabs: [], store: { bookmarks: entries, history: entries, downloads: entries } };
+    const props = { panel, state, language: 'en', opener: { current: null }, favicons: {}, undo: null, onAnnounce() {}, onDelete: async () => {} };
+    const render = () => hooks.render(() => BrowserPanel(props));
+    let tree = render();
+    const controls = entries.map((_, i) => ({ dataset: { rowControl: control }, focus() { focused.push(i); document.activeElement = this; } }));
+    const rows = entries.map((_, i) => ({ isConnected: true, contains: target => target === controls[i], querySelector: selector => { assert.equal(selector, `[data-row-control="${control}"]`); return controls[i]; } }));
+    const dialog = notebookNodes(tree, node => node.props.role === 'dialog')[0];
+    dialog.props.ref.current = { querySelector: () => null, querySelectorAll: () => rows.filter(row => row.isConnected) };
+    hooks.flush();
+    const remove = i => {
+      const buttons = notebookNodes(tree, node => node.props['data-row-control'] === 'delete');
+      document.activeElement = controls[i]; buttons[rows.filter(row => row.isConnected).indexOf(rows[i])].props.onClick({ currentTarget: { closest: () => rows[i] } });
+      rows[i].isConnected = false; document.activeElement = document.body;
+      state.store[panel] = state.store[panel].filter(entry => entry.id !== String(i));
+      tree = render(); hooks.flush();
+    };
+    remove(index); assert.equal(focused.at(-1), index === 2 ? 1 : index + 1);
+    for (const i of [0, 1, 2].filter(i => i !== index)) remove(i);
+    assert.equal(focused.length, 2);
+    props.undo = { kind: panel, message: 'entryDeleted' }; tree = render();
+    notebookNodes(tree, node => node.props.children === 'Undo')[0].props.ref.current = { focus: () => focused.push('undo') };
+    hooks.flush(); assert.equal(focused.at(-1), 'undo'); hooks.dispose();
+  }
+});
+
+test('browser panels search, navigate, open background tabs and keep deletion undo', async () => {
+  const hooks = notebookTestHooks(), events = new Map(), focused = [], commands = [], navigation = [], removed = [], dismissals = [];
+  const document = { activeElement: null, addEventListener: (name, callback) => events.set(name, callback), removeEventListener: name => events.delete(name) };
+  const { BrowserPanel } = browserPanelInterface(hooks, document);
+  const state = { tabs: [], store: { bookmarks: [{ url: 'https://example.com/', title: 'Example', createdAt: 1 }], history: [], downloads: [] } };
+  const props = { panel: 'bookmarks', state, language: 'en', opener: { current: { contains: () => false } }, favicons: {}, undo: { kind: 'bookmarks', message: 'bookmarkDeleted' }, onRestore: () => commands.push('restore'), onDelete: async (...args) => removed.push(args), run: async command => { commands.push(command); return true; }, onNavigate: url => navigation.push(url), onBrowse() {}, onClear() {}, onDismiss: focus => dismissals.push(focus), onAnnounce() {} };
+  const render = () => hooks.render(() => BrowserPanel(props));
+  let tree = render(); const dialog = notebookNodes(tree, node => node.props.role === 'dialog')[0], input = notebookNodes(tree, node => node.type === 'input')[0];
+  input.props.ref.current = { focus: () => focused.push('search') };
+  const link = notebookNodes(tree, node => node.type === 'a')[0]; link.focus = () => focused.push('row');
+  dialog.props.ref.current = { contains: () => false, querySelectorAll: () => [link] }; hooks.flush(); assert.deepEqual(focused, ['search']);
+  const click = (ctrlKey = false) => ({ ctrlKey, preventDefault() {} });
+  link.props.onClick(click()); assert.deepEqual(navigation, ['https://example.com/']);
+  link.props.onClick(click(true)); await Promise.resolve(); await Promise.resolve();
+  link.props.onAuxClick({ button: 1, preventDefault() {} }); await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(commands, [{ type: 'new-tab', input: 'https://example.com/', background: true }, { type: 'new-tab', input: 'https://example.com/', background: true }]);
+  const key = key => ({ key, target: { closest: () => null }, preventDefault() {}, stopPropagation() {} });
+  dialog.props.onKeyDown(key('ArrowDown')); dialog.props.onKeyDown(key('ArrowUp')); assert.deepEqual(focused.slice(-2), ['row', 'row']);
+  notebookNodes(tree, node => node.props.title === 'Delete')[0].props.onClick({ currentTarget: { closest: () => null } }); assert.deepEqual(removed, [[{ type: 'delete-bookmark', url: 'https://example.com/' }, 'bookmarks', 'bookmarkDeleted']]);
+  notebookNodes(tree, node => node.type === 'button' && node.props.children === 'Undo')[0].props.onClick(); assert.equal(commands.at(-1), 'restore');
+  input.props.onChange({ target: { value: 'missing' } }); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'no-results').length, 1);
+  notebookNodes(tree, node => node.type === 'no-results')[0].props.onAction(); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'a').length, 1);
+  dialog.props.onKeyDown(key('Escape')); assert.deepEqual(dismissals, [true]); hooks.dispose(); assert.equal(events.size, 0);
+});
+
+test('history groups local calendar days and downloads expose actions only for their state', () => {
+  const hooks = notebookTestHooks(), { BrowserPanel, historyDays, downloadSize } = browserPanelInterface(hooks);
+  const now = new Date(2026, 9, 3, 12), entries = [3, 2, 1].map(day => ({ url: 'https://example.com/' + day, title: String(day), lastVisit: new Date(2026, 9, day, 10).getTime(), visitCount: 1 }));
+  for (const language of ['en', 'es']) assert.deepEqual(historyDays(entries.slice().reverse(), language, now).map(group => group.label), [language === 'en' ? 'Today' : 'Hoy', language === 'en' ? 'Yesterday' : 'Ayer', new Date(2026, 9, 1).toLocaleDateString(language)]);
+  assert.equal(downloadSize(2.4 * 1024 ** 2, 'en'), '2.4 MB'); assert.equal(downloadSize(2.4 * 1024 ** 2, 'es'), '2,4 MB');
+  const downloads = ['progressing', 'completed', 'failed', 'cancelled'].map((status, index) => ({ id: String(index), filename: status + '.pdf', status, received: 64, total: 100 }));
+  const tree = hooks.render(() => BrowserPanel({ panel: 'downloads', state: { tabs: [], store: { downloads, bookmarks: [], history: [] } }, language: 'en', opener: { current: null }, favicons: {}, undo: null, onRestore() {}, onDelete() {}, run: async () => true, onNavigate() {}, onBrowse() {}, onClear() {}, onDismiss() {}, onAnnounce() {} }));
+  const rows = notebookNodes(tree, node => node.props.className === 'browser-download');
+  assert.deepEqual(rows.map(row => notebookNodes(row, node => node.type === 'button').map(node => node.props.children[1])), [['Cancel'], ['Show in folder', 'Remove'], ['Retry', 'Remove'], ['Remove']]);
+  const progress = notebookNodes(tree, node => node.type === 'progress'); assert.equal(progress.length, 1); assert.equal(progress[0].props.max, 100); assert.equal(progress[0].props.value, 64);
+});
+
+test('browser panel routes are removed, panels use the menu anchor and all menu copy is bilingual', () => {
+  const app = readFileSync('src/App.tsx', 'utf8'), menu = readFileSync('src/BrowserMenu.tsx', 'utf8'), panel = readFileSync('src/BrowserPanel.tsx', 'utf8'), { copy } = interfaceModule('src/copy.ts');
+  assert.doesNotMatch(app, /className="library-panel"|panel-content|filteredEntries|confirmClearHistory/);
+  assert.match(app, /<BrowserPanel[^>]+opener=\{menuButtonRef\}/); assert.match(panel, /<ToolbarPopover opener=\{opener\}/); assert.match(menu, /<ToolbarPopover opener=\{opener\}/);
+  assert.doesNotMatch(menu, /menuitemradio|highContrast|darkPages|newWindow|passwords|extensions/);
+  assert.match(app, /onClear=\{\(\) => openSettings\('privacy', true\)\}/);
+  for (const route of ['horizon://history', 'horizon://bookmarks', 'horizon://downloads']) assert.throws(() => classifyInput(route));
+  for (const key of ['newTab', 'zoom', 'zoomIn', 'zoomOut', 'fullscreen', 'find', 'favorites', 'history', 'downloads', 'settings', 'aboutHorizon', 'appVersion', 'today', 'yesterday', 'downloadSize', 'downloadStateSize', 'downloadRetry', 'downloadRemove', 'downloadDone', 'close']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim(), `${key}: ${language}`);
+  assert.deepEqual(validateCommand({ type: 'fullscreen' }), { type: 'fullscreen' });
+  assert.deepEqual(validateCommand({ type: 'retry-download', id: 'download' }), { type: 'retry-download', id: 'download' });
+  for (const command of [{ type: 'fullscreen', enabled: true }, { type: 'retry-download' }, { type: 'retry-download', id: '', url: 'https://example.com/' }, { type: 'retry-download', id: 'download', path: '/private' }]) assert.throws(() => validateCommand(command));
+});
+
+test('About uses the app version, a labelled modal and Close focus with Escape restoration', () => {
+  const hooks = notebookTestHooks(), { AboutHorizon } = interfaceModule('src/AboutHorizon.tsx', { react: hooks.react, './copy': interfaceModule('src/copy.ts'), './HorizonMark': { HorizonMark: 'mark' } });
+  const focus = [], modal = [], opener = { current: { focus: () => focus.push('menu') } }; let dismissed = 0;
+  const tree = hooks.render(() => AboutHorizon({ language: 'en', version: '2.3.4', opener, onClose: () => dismissed++ }));
+  assert.equal(tree.type, 'dialog'); assert.equal(tree.props['aria-labelledby'], notebookNodes(tree, node => node.type === 'h2')[0].props.id);
+  assert.equal(notebookNodes(tree, node => node.type === 'p')[0].props.children, 'Version 2.3.4');
+  tree.props.ref.current = { showModal: () => modal.push('open'), close: () => modal.push('close') };
+  const button = notebookNodes(tree, node => node.type === 'button')[0]; button.props.ref.current = { focus: () => focus.push('close') }; hooks.flush();
+  assert.deepEqual(modal, ['open']); assert.deepEqual(focus, ['close']); button.props.onClick(); assert.equal(dismissed, 1);
+  tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); assert.equal(dismissed, 2);
+  hooks.dispose(); assert.deepEqual(modal, ['open', 'close']); assert.deepEqual(focus, ['close', 'menu']);
+});
 
 test('capture controls start on Area, expose radio semantics and move selection by arrows, dragging and two clicks', () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), focused = [], document = { body: {}, activeElement: null };
@@ -4060,7 +4237,7 @@ test('local HTML launch authorizes only its exact tab main-frame URL and survive
 
 function settingsMain(t, options) {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm'), filename = resolve('dist/electron/main.js'), localRequire = require('node:module').createRequire(filename), directory = temporaryDirectory(t, 'settings-main'), windows = [], launches = [], handlers = new Map();
-  const app = Object.assign(new EventEmitter(), { isPackaged: true, requestSingleInstanceLock: () => options.lock !== false, getLocale: () => 'es-AR', getPath: () => directory, enableSandbox() {}, whenReady: async () => {}, commandLine: { appendSwitch() {}, removeSwitch() {} }, quit() { this.quits = (this.quits || 0) + 1; }, exit() { assert.fail('Mock main failed'); } });
+  const app = Object.assign(new EventEmitter(), { isPackaged: true, requestSingleInstanceLock: () => options.lock !== false, getLocale: () => 'es-AR', getVersion: () => '0.1.0-test', getPath: () => directory, enableSandbox() {}, whenReady: async () => {}, commandLine: { appendSwitch() {}, removeSwitch() {} }, quit() { this.quits = (this.quits || 0) + 1; }, exit() { assert.fail('Mock main failed'); } });
   const settings = { theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', migrationAllowed: false, language: 'en' };
   class Window extends EventEmitter {
     constructor() { super(); windows.push(this); this.webContents = new EventEmitter(); this.minimized = true; }

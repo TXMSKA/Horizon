@@ -43,11 +43,11 @@ export interface PermissionPrompt { id: string; origin: string; permissions: Sit
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 4; history: HistoryEntry[]; bookmarks: Bookmark[]; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { id: string; settings: SettingsSection | null; notebook: string | null; notebookItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; notebooks: NotebookSummary[]; notebookInUse: string | null; notebooksVersion: number; notebookReadError: boolean; notebookLocked: boolean; notebookStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export interface BrowserState { version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; notebooks: NotebookSummary[]; notebookInUse: string | null; notebooksVersion: number; notebookReadError: boolean; notebookLocked: boolean; notebookStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
-export type BrowserShortcut = 'focus-address' | 'new-tab' | 'close-tab' | 'next-tab' | 'previous-tab' | 'back' | 'forward' | 'reload' | 'stop' | 'history' | 'downloads' | 'bookmark' | 'find' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | `tab-${number}`;
+export type BrowserShortcut = 'focus-address' | 'new-tab' | 'close-tab' | 'next-tab' | 'previous-tab' | 'back' | 'forward' | 'reload' | 'stop' | 'history' | 'downloads' | 'favorites' | 'fullscreen' | 'bookmark' | 'find' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | `tab-${number}`;
 export type NotebookItemKind = 'note' | 'text' | 'area' | 'page';
 export interface CaptureRect { x: number; y: number; width: number; height: number }
 export interface CaptureImage { filename: string; width: number; height: number; bytes: number; cut: boolean }
@@ -93,7 +93,7 @@ export type BrowserCommand =
   | { type: 'open-downloads-folder' }
   | { type: 'activate-tab' | 'close-tab'; id: string }
   | { type: 'navigate'; input: string }
-  | { type: 'back' | 'forward' | 'reload' | 'stop' | 'bookmark' | 'focus-page' }
+  | { type: 'back' | 'forward' | 'reload' | 'stop' | 'bookmark' | 'focus-page' | 'fullscreen' }
   | { type: 'zoom'; delta: -1 | 0 | 1 }
   | { type: 'find'; text: string; forward: boolean; next: boolean }
   | { type: 'stop-find' }
@@ -102,7 +102,7 @@ export type BrowserCommand =
   | { type: 'restore'; kind: 'history' | 'bookmarks' | 'downloads' | 'notebooks' }
   | { type: 'rename-bookmark'; url: string; title: string }
   | { type: 'delete-bookmark'; url: string }
-  | { type: 'cancel-download' | 'show-download' | 'remove-download'; id: string };
+  | { type: 'cancel-download' | 'show-download' | 'remove-download' | 'retry-download'; id: string };
 export interface ContentArea { top: number; hidden: boolean }
 
 export interface HorizonAPI {

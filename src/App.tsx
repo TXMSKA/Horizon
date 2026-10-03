@@ -2,8 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from 'react-dom';
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Download, Ellipsis, LayoutGrid,
-  ClipboardPaste, Copy, ExternalLink, FolderOpen, History, Image, LoaderCircle, Minus, NotebookPen, Plus, Redo2, Scissors, SpellCheck, TextSelect, Undo2,
-  RotateCw, Search, SearchX, ServerOff, Settings2, Shield, ShieldAlert, ShieldCheck, ShieldOff, Sparkles, Square, Star, Trash2, TriangleAlert, WifiOff, X,
+  ClipboardPaste, Copy, ExternalLink, History, Image, LoaderCircle, Minus, NotebookPen, Plus, Redo2, Scissors, SpellCheck, TextSelect, Undo2,
+  RotateCw, Search, SearchX, ServerOff, Shield, ShieldAlert, ShieldCheck, ShieldOff, Sparkles, Square, Star, TriangleAlert, WifiOff, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
@@ -16,9 +16,12 @@ import { Menu } from './Menu';
 import { Hub, hubApps } from './Hub';
 import { ToolbarPopover } from './ToolbarPopover';
 import { NewProfilePopover, ProfileControl, ProfilesMenu } from './Profiles';
-import { EmptyBookmarks, EmptyDownloads, EmptyHistory, NoResults } from './EmptyState';
+import { BrowserPanel } from './BrowserPanel';
+import type { LibraryPanel } from './BrowserPanel';
+import { AboutHorizon } from './AboutHorizon';
+import { BrowserMenu } from './BrowserMenu';
 import { HorizonMark } from './HorizonMark';
-import { Switch } from './Switch';
+
 import { blockedCount, blockedTotal, PermissionDialog, ShieldPopover } from './SiteControls';
 import { CaptureOverlay } from './Capture';
 import type { CaptureKind } from './Capture';
@@ -28,7 +31,6 @@ import { NotebookView } from './NotebookView';
 import { NotebookEdits } from './shared/notebook-edits';
 import { Settings, settingsError } from './Settings';
 
-type LibraryPanel = 'history' | 'bookmarks' | 'downloads';
 type Panel = LibraryPanel | null;
 const sites = {
   wikipedia: 'https://www.wikipedia.org/', youtube: 'https://www.youtube.com/',
@@ -69,11 +71,12 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const [panel, setPanel] = useState<Panel>(null);
   const [announcement, setAnnouncement] = useState('');
   const [undo, setUndo] = useState<{ kind: LibraryPanel; message: CopyKey } | null>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
+
   const undoGeneration = useRef(0);
   const undoTimeout = useRef<number | undefined>(undefined);
-  const [filter, setFilter] = useState('');
+
   const [menuOpen, setMenuOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false), [clearDialogRequested, setClearDialogRequested] = useState(false);
   const [hubPage, setHubPage] = useState<'home' | keyof typeof hubApps | null>(null);
   const [lyraOpen, setLyraOpen] = useState(false);
   const hubButtonRef = useRef<HTMLButtonElement>(null), lyraButtonRef = useRef<HTMLButtonElement>(null), lyraRef = useRef<HTMLDivElement>(null);
@@ -101,8 +104,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const contextMenuRef = useRef<PageContextMenu | null>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [findText, setFindText] = useState('');
-  const [renameUrl, setRenameUrl] = useState('');
-  const [renameTitle, setRenameTitle] = useState('');
+
   const [addressFocused, setAddressFocused] = useState(false);
   const [favicons, setFavicons] = useState<Record<string, { hash: string; url: string }>>({});
   const headerRef = useRef<HTMLElement>(null);
@@ -113,7 +115,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const captureGeneration = useRef(0);
   const areaHidden = useRef(false);
   const findRef = useRef<HTMLInputElement>(null);
-  const panelRef = useRef<HTMLElement>(null);
+
   const menuByKeyboard = useRef(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const active = state?.tabs.find(tab => tab.id === state.activeId);
@@ -130,8 +132,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
   useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.permissionPrompt;
-  const permissionOpen = Boolean(!hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !notebookMode && !suggestionsOpen && !contextMenu && !shieldOpen && !panel && !findOpen);
-  const popover = Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(notebookMode) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
+  const permissionOpen = Boolean(!aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !notebookMode && !suggestionsOpen && !contextMenu && !shieldOpen && !panel && !findOpen);
+  const popover = Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(notebookMode) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
   const pageShowing = Boolean(activeUrl && !active?.notebook && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
@@ -222,7 +224,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   }), []);
   const dismissUndo = useCallback(() => {
     undoGeneration.current++; window.clearTimeout(undoTimeout.current); undoTimeout.current = undefined;
-    setUndo(null); setConfirmClear(false);
+    setUndo(null);
   }, []);
   const destructive = async (command: BrowserCommand, kind: LibraryPanel, message: CopyKey) => {
     setNotebookNotice(notice => notice?.undo ? null : notice);
@@ -246,12 +248,12 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (next) closeFind();
     dismissUndo();
     closeContextMenu();
-    setNotebookOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setFilter(''); setRenameUrl(''); setPanel(next); setMenuOpen(false); setSuggestionsOpen(false);
+    setNotebookOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setPanel(next); setMenuOpen(false); setSuggestionsOpen(false);
   }, [closeFind, dismissUndo, closeContextMenu]);
-  const openSettings = (section: SettingsSection) => {
+  const openSettings = (section: SettingsSection, clear = false) => {
     closeFind(); dismissUndo(); closeContextMenu();
     setNotebookOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setDirty(false);
-    void run({ type: 'open-settings', section });
+    setClearDialogRequested(false); void run({ type: 'open-settings', section }).then(success => { if (success && clear) setClearDialogRequested(true); });
   };
   const openHub = (page: NonNullable<typeof hubPage>) => {
     closeFind(); dismissUndo(); closeContextMenu();
@@ -351,8 +353,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
       if (snapshotUrl.current) URL.revokeObjectURL(snapshotUrl.current);
       snapshotUrl.current = null;
     };
-    if (panel || !popover || !pageShowing) {
-      void reportArea(Boolean(panel)).then(() => requestAnimationFrame(removeSnapshot));
+    if (!popover || !pageShowing) {
+      void reportArea(false).then(() => requestAnimationFrame(removeSnapshot));
     } else {
       void reportArea(false).then(() => window.horizon.capture()).then(bytes => {
         if (!bytes || captureGeneration.current !== generation) return;
@@ -400,11 +402,11 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (snapshotUrl.current) URL.revokeObjectURL(snapshotUrl.current);
     snapshotUrl.current = null;
   }, []);
-  useEffect(() => { if (panel) (panelRef.current?.querySelector<HTMLInputElement>('input') ?? panelRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)'))?.focus(); }, [panel]);
+
   useEffect(() => {
     if (active?.settings && !panel) document.getElementById('settings-title')?.focus();
   }, [active?.settings, state?.activeId, panel]);
-  useEffect(() => { dismissUndo(); setRenameUrl(''); setFilter(''); setStartSearch(''); setDirty(false); setSuggestionsOpen(false); }, [state?.activeProfileId, dismissUndo]);
+  useEffect(() => { dismissUndo(); setStartSearch(''); setDirty(false); setSuggestionsOpen(false); }, [state?.activeProfileId, dismissUndo]);
   useEffect(() => { if (findOpen) { findRef.current?.focus(); findRef.current?.select(); } }, [findOpen]);
   useEffect(() => {
     setDirty(false); setSuggestionsOpen(false); setFindOpen(false); setFindText('');
@@ -423,11 +425,13 @@ export function App({ language: initialLanguage }: { language: Language }) {
     } else if (action.startsWith('tab-')) {
       const number = Number(action.slice(4)); const tab = tabs[number === 9 ? tabs.length - 1 : number - 1];
       if (tab) { closeFind(); openPanel(null); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); }); }
-    } else if (action === 'history' || action === 'downloads') openPanel(action);
+    } else if (action === 'history' || action === 'downloads' || action === 'favorites') openPanel(action === 'favorites' ? 'bookmarks' : action);
+    else if (action === 'fullscreen') { openPanel(null); closeFind(); void run({ type: 'fullscreen' }); }
     else if (action === 'find' && activeUrl && !active?.notebook && !active?.settings && !active?.error) { openPanel(null); setSuggestionsOpen(false); setFindOpen(true); requestAnimationFrame(() => { findRef.current?.focus(); findRef.current?.select(); }); }
     else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') void run({ type: 'zoom', delta: action === 'zoom-in' ? 1 : action === 'zoom-out' ? -1 : 0 });
     else if (action === 'stop') {
-      if (notebookMode) closeNotebooks();
+      if (aboutOpen) setAboutOpen(false);
+      else if (notebookMode) closeNotebooks();
       else if (contextMenu) closeContextMenu(true);
       else if (shieldOpen) closeShield();
       else if (permissionOpen) void answerPermission('dismiss');
@@ -441,7 +445,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'bookmark') {
       openPanel(null); setSuggestionsOpen(false); void run({ type: action });
     }
-  }, [hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, findOpen, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, notebookMode, closeNotebooks]);
+  }, [aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, findOpen, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, notebookMode, closeNotebooks]);
   useEffect(() => {
     const unsubscribe = window.horizon.onShortcut(shortcut);
     const keydown = (event: KeyboardEvent) => {
@@ -476,15 +480,13 @@ export function App({ language: initialLanguage }: { language: Language }) {
     try { if (action === 'close') await edits.flush(); await window.horizon.windowAction(action); }
     catch { setError(t('actionError')); }
   };
-  const entries = panel === 'history' ? state?.store.history ?? [] : state?.store.bookmarks ?? [];
-  const filteredEntries = entries.filter(item => `${item.title} ${item.url}`.toLowerCase().includes(filter.toLowerCase()));
   const closeNotebookNotice = useCallback(() => setNotebookNotice(null), []);
 
   return <>
     <div className="visually-hidden" role="status" aria-live="polite">{announcement}</div>
     <NotebookStatus notice={notebookNotice} language={language} onClose={closeNotebookNotice} />
     <a className="skip-link" href="#content" onClick={event => { event.preventDefault(); if (activeUrl && !active?.notebook && !active?.settings && !hidden && !active?.error) void run({ type: 'focus-page' }); else document.getElementById('content')?.focus(); }}>{t('skip')}</a>
-    <header className="chrome" ref={headerRef}>
+    <header className="chrome" ref={headerRef} hidden={active?.fullscreen}>
       <div className="tab-strip">
         <nav className="tabs" role="tablist" aria-label={t('tabs')}>
           {state?.tabs.map((tab, index) => <div className={`tab${tab.id === state.activeId ? ' active' : ''}`} key={tab.id} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'close-tab', id: tab.id }); } }}>
@@ -540,8 +542,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
         }}><NotebookPen aria-hidden="true" /></button>
           {state?.quickAccess.map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={() => openHub(app)}><Icon aria-hidden="true" /></button>; })}
           <button className="icon-button" ref={hubButtonRef} type="button" aria-label={t('hub')} title={t('hub')} aria-haspopup="dialog" aria-expanded={Boolean(hubPage)} aria-controls="hub-popup" onClick={() => { if (hubPage) { setHubPage(null); hubButtonRef.current?.focus(); } else openHub('home'); }}><LayoutGrid aria-hidden="true" /></button>
-          <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { setNotebookOverlay(null); setShieldScope(null); dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); setHubPage(null); setLyraOpen(false); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
-          <button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls="browser-menu" onClick={event => { setNotebookOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); closeContextMenu(); menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button>
+          <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { setNotebookOverlay(null); setShieldScope(null); dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); setHubPage(null); setLyraOpen(false); setPanel(null); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
+          <button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-haspopup="menu" aria-expanded={menuOpen || Boolean(panel)} aria-controls={panel ? "browser-library-panel" : "browser-menu"} onClick={event => { setNotebookOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); closeContextMenu(); menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setPanel(null); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button>
           <button className="icon-button lyra-button" ref={lyraButtonRef} type="button" aria-label={t('lyra')} title={t('lyra')} aria-haspopup="dialog" aria-expanded={lyraOpen} aria-controls="lyra-preview" onClick={() => { closeFind(); dismissUndo(); closeContextMenu(); setNotebookOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(previous => !previous); }}><span><Sparkles aria-hidden="true" /></span></button>
         </div>
       </div>
@@ -568,25 +570,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
       void run({ type: 'switch-profile', id: profile.id }).then(success => { if (success) { setAnnouncement(t('switchedProfile').replace('{name}', profile.name)); profileButtonRef.current?.focus(); } });
     }} onNew={() => setProfileOpen('new')} onManage={() => openSettings('profiles')} />}
     {profileOpen === 'new' && state && <NewProfilePopover state={state} language={language} opener={profileButtonRef} onCancel={() => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus(); }} onSuccess={name => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); setAnnouncement(t('createdProfile').replace('{name}', name)); profileButtonRef.current?.focus(); }} />}
-    {menuOpen && <Menu id="browser-menu" label={t('menu')} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={reason => { setMenuOpen(false); if (reason === 'escape') menuButtonRef.current?.focus(); }}>
-      <button type="button" role="menuitem" tabIndex={-1} onClick={() => { setMenuOpen(false); shortcut('new-tab'); }}><Plus aria-hidden="true" /><span>{t('newTab')}</span><kbd>Ctrl+T</kbd></button>
-      <hr />
-      <button type="button" role="menuitem" tabIndex={-1} onClick={() => openPanel('history')}><History aria-hidden="true" /><span>{t('history')}</span><kbd>Ctrl+H</kbd></button>
-      <button type="button" role="menuitem" tabIndex={-1} onClick={() => openPanel('bookmarks')}><Star aria-hidden="true" /><span>{t('bookmarks')}</span></button>
-      <button type="button" role="menuitem" tabIndex={-1} onClick={() => openPanel('downloads')}><Download aria-hidden="true" /><span>{t('downloads')}</span><kbd>Ctrl+J</kbd></button>
-      <hr />
-      <button type="button" role="menuitem" tabIndex={-1} disabled={!activeUrl || Boolean(active?.notebook) || Boolean(active?.settings) || Boolean(active?.error)} onClick={() => { setMenuOpen(false); shortcut('find'); }}><Search aria-hidden="true" /><span>{t('find')}</span><kbd>Ctrl+F</kbd></button>
-      <hr />
-      <div className="menu-theme" role="group" aria-label={t('theme')}><span>{t('theme')}</span><div className="segmented">{(['system', 'amber', 'daylight'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={(state?.theme ?? window.horizon.initialTheme) === value} onClick={() => { void run({ type: 'theme', value }); }}>{t(value)}</button>)}</div></div>
-      <div className="menu-theme" role="group" aria-label={t('darkPages')}><span>{t('darkPages')}</span><div className="segmented">{(['off', 'on', 'system'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={(state?.darkPages.mode ?? 'off') === value} onClick={() => { void run({ type: 'dark-pages', value }); }}>{t(value)}</button>)}</div></div>
-      {(state?.darkPages.mode ?? 'off') !== 'off' && <>
-        <div className="menu-theme" role="group" aria-label={t('darkStrength')}><span>{t('darkStrength')}</span><div className="segmented">{(['soft', 'standard', 'deep'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={state?.darkPages.strength === value} onClick={() => { void run({ type: 'dark-strength', value }); }}>{t(value)}</button>)}</div></div>
-        <div className="menu-theme" role="group" aria-label={t('darkTone')}><span>{t('darkTone')}</span><div className="segmented">{(['neutral', 'warm'] as const).map(value => <button type="button" role="menuitemradio" tabIndex={-1} key={value} aria-checked={state?.darkPages.tone === value} onClick={() => { void run({ type: 'dark-tone', value }); }}>{t(value)}</button>)}</div></div>
-      </>}
-      <div className="menu-contrast"><span id="contrast-label">{t('highContrast')}</span><Switch labelledBy="contrast-label" tabIndex={-1} checked={(state?.contrast ?? window.horizon.initialContrast) === 'high'} onChange={checked => { void run({ type: 'contrast', value: checked ? 'high' : 'standard' }); }} /></div>
-      <hr role="separator" />
-      <button type="button" role="menuitem" tabIndex={-1} onClick={() => openSettings('general')}><Settings2 aria-hidden="true" /><span>{t('settings')}</span></button>
-    </Menu>}
+    {menuOpen && <BrowserMenu language={language} active={active} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); shortcut(action); }} onPanel={openPanel} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
+    {panel && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
+    {aboutOpen && state && <AboutHorizon version={state.version} language={language} opener={menuButtonRef} onClose={() => setAboutOpen(false)} />}
     {contextMenu && <Menu key={contextMenu.id} id="page-context-menu" label={t('pageMenu')} keyboard={contextMenu.keyboard} point={contextMenu} onDismiss={reason => closeContextMenu(reason === 'escape')}>
       {contextMenu.groups.flatMap((group, index) => [
         ...(index ? [<hr role="separator" key={`divider-${index}`} />] : []),
@@ -602,26 +588,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
         }),
       ])}
     </Menu>}
-    <main id="content" className={panel ? 'panel-content' : active?.settings ? 'settings-content-area' : active?.notebook ? 'notebook-content' : activeUrl ? 'web-content' : 'start-content'} tabIndex={-1}>
-      {panel ? <section className="library-panel" ref={panelRef} aria-labelledby="panel-title">
-        <div className="panel-heading"><h1 id="panel-title">{t(panel)}</h1>{panel === 'history' && (confirmClear ? <div className="clear-confirmation"><span>{t('confirmClearHistory')}</span><button className="text-button" type="button" onClick={() => { void destructive({ type: 'clear-history' }, 'history', 'historyCleared'); }}>{t('clear')}</button><button className="text-button" type="button" onClick={() => setConfirmClear(false)}>{t('cancel')}</button></div> : <button className="text-button" type="button" disabled={!entries.length} onClick={() => setConfirmClear(true)}>{t('clearHistory')}</button>)}{iconButton(X, 'close', () => { openPanel(null); menuButtonRef.current?.focus(); })}</div>
-        {undo?.kind === panel && <div className="undo-bar"><span>{t(undo.message)}</span><button className="text-button" type="button" onClick={() => { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); }}>{t('undo')}</button></div>}
-        {panel !== 'downloads' && <div className="search-field panel-search"><Search aria-hidden="true" /><input aria-label={t(panel === 'history' ? 'filterHistory' : 'filterBookmarks')} placeholder={t(panel === 'history' ? 'filterHistory' : 'filterBookmarks')} value={filter} onChange={event => setFilter(event.target.value)} /></div>}
-        {panel === 'downloads' ? <ul className="library-list">
-          {!state?.store.downloads.length && <EmptyDownloads language={language} onAction={() => { void run({ type: 'open-downloads-folder' }); }} />}
-          {state?.store.downloads.map(download => <li key={download.id}>
-            <Download aria-hidden="true" /><div className="entry-body"><strong>{download.filename}</strong><p role="status">{t(download.status)}{download.status === 'progressing' && download.total > 0 ? ` ${Math.round(download.received / download.total * 100)}%` : ''}</p><p className="entry-url download-source">{download.url}</p>{download.status === 'progressing' && <progress max={download.total || undefined} value={download.total ? download.received : undefined} aria-label={t('progressing')} />}</div>
-            <div className="entry-actions">{download.status === 'progressing' && iconButton(X, 'cancel', () => { void run({ type: 'cancel-download', id: download.id }); })}{iconButton(FolderOpen, 'showFolder', () => { void run({ type: 'show-download', id: download.id }); }, download.status !== 'completed')}{iconButton(Trash2, 'removeDownload', () => { void destructive({ type: 'remove-download', id: download.id }, 'downloads', 'downloadRemoved'); }, download.status === 'progressing')}</div>
-          </li>)}
-        </ul> : <ul className="library-list">
-          {!filteredEntries.length && (filter ? <NoResults language={language} onAction={() => { setFilter(''); panelRef.current?.querySelector<HTMLInputElement>('input')?.focus(); }} /> : panel === 'history' ? <EmptyHistory language={language} onAction={focusAddress} /> : <EmptyBookmarks language={language} onAction={focusAddress} />)}
-          {filteredEntries.map(item => <li key={item.url}><div className="entry-body">
-            <a className="entry-link" href={item.url} onClick={event => { event.preventDefault(); if (event.ctrlKey) void run({ type: 'new-tab', input: item.url, background: true }); else navigate(item.url); }} onAuxClick={event => { event.preventDefault(); if (event.button === 1) void run({ type: 'new-tab', input: item.url, background: true }); }}>{item.title || item.url}</a><p className="entry-url">{item.url}</p>
-            {'lastVisit' in item && <time dateTime={new Date(item.lastVisit).toISOString()}>{new Date(item.lastVisit).toLocaleString(language)}</time>}
-            {renameUrl === item.url && <form className="rename-form" onSubmit={event => { event.preventDefault(); if (renameTitle.trim()) { void run({ type: 'rename-bookmark', url: item.url, title: renameTitle }).then(success => { if (success) { setRenameUrl(''); setAnnouncement(t('bookmarkRenamed')); } }); } }}><input autoFocus aria-label={t('bookmarkName')} value={renameTitle} maxLength={1024} onChange={event => setRenameTitle(event.target.value)} /><button className="text-button" type="submit" disabled={!renameTitle.trim()}>{t('save')}</button><button className="text-button" type="button" onClick={() => setRenameUrl('')}>{t('cancel')}</button></form>}
-          </div><div className="entry-actions">{panel === 'bookmarks' && <button className="text-button" type="button" onClick={() => { setAnnouncement(''); setRenameUrl(item.url); setRenameTitle(item.title); }}>{t('rename')}</button>}{iconButton(Trash2, 'delete', () => { void destructive({ type: panel === 'history' ? 'delete-history' : 'delete-bookmark', url: item.url }, panel, panel === 'history' ? 'entryDeleted' : 'bookmarkDeleted'); })}</div></li>)}
-        </ul>}
-      </section> : active?.settings && state ? <Settings key={state.activeProfileId} state={state} section={active.settings} language={language} onOpen={openSettings} /> : active?.notebook && state ? <NotebookView key={`${state.activeProfileId}:${active.notebook}`} id={active.notebook} selected={active.notebookItem} version={state.notebooksVersion} language={language} edits={edits} readOnly={notebookLeaving} locked={state.notebookLocked} run={run} onOpen={openNotebook} onDelete={deleteNotebookEntry} /> : active?.error && failure ? <section className="error-page" role="alert"><ErrorIcon aria-hidden="true" /><h1>{t(failure.heading)}</h1><p>{t(failure.sentence)}</p><div className="error-details"><p>{active.url}</p><p>{active.error}</p></div><button className="text-button" type="button" onClick={() => { void run({ type: 'reload' }); }}>{t('retry')}</button></section> : activeUrl ? (snapshot && <img className={`web-snapshot${active?.fullscreen ? ' fullscreen-snapshot' : ''}`} ref={snapshotRef} src={snapshot.url} alt="" aria-hidden="true" />) : !state ? <p role="status">{t('loading')}</p> : <div className="start-page">
+    <main id="content" className={active?.settings ? 'settings-content-area' : active?.notebook ? 'notebook-content' : activeUrl ? 'web-content' : 'start-content'} tabIndex={-1}>
+      {active?.settings && state ? <Settings key={state.activeProfileId} state={state} section={active.settings} language={language} onOpen={openSettings} openClearDialog={clearDialogRequested} onClearDialogOpened={() => setClearDialogRequested(false)} /> : active?.notebook && state ? <NotebookView key={`${state.activeProfileId}:${active.notebook}`} id={active.notebook} selected={active.notebookItem} version={state.notebooksVersion} language={language} edits={edits} readOnly={notebookLeaving} locked={state.notebookLocked} run={run} onOpen={openNotebook} onDelete={deleteNotebookEntry} /> : active?.error && failure ? <section className="error-page" role="alert"><ErrorIcon aria-hidden="true" /><h1>{t(failure.heading)}</h1><p>{t(failure.sentence)}</p><div className="error-details"><p>{active.url}</p><p>{active.error}</p></div><button className="text-button" type="button" onClick={() => { void run({ type: 'reload' }); }}>{t('retry')}</button></section> : activeUrl ? (snapshot && <img className={`web-snapshot${active?.fullscreen ? ' fullscreen-snapshot' : ''}`} ref={snapshotRef} src={snapshot.url} alt="" aria-hidden="true" />) : !state ? <p role="status">{t('loading')}</p> : <div className="start-page">
         <div className="start-sky"><div className="start-browsing">
           <h1>{t('product')}</h1>
           <form className="search-field start-search" onSubmit={event => { event.preventDefault(); navigate(startSearch); }}><Search aria-hidden="true" /><input spellCheck={false} autoComplete="off" aria-label={t('search')} placeholder={t('search')} value={startSearch} maxLength={8192} onChange={event => setStartSearch(event.target.value)} /><Sparkles className="accent" aria-hidden="true" /></form>

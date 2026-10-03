@@ -430,12 +430,14 @@
   --height-suggestions-viewport: 70vh;
   --gap-error-top: 5vh;
   --width-suggestion-hint: 40%;
-  --width-menu: 22rem;
+  --width-menu: 22.5rem;
+  --width-browser-panel: 23.75rem;
+  --height-menu-row: 2.125rem;
+  --width-about: 22.5rem;
   --width-context-menu: 13.75rem;
   --width-find: 20rem;
   --width-matches: 5rem;
   --height-suggestions-maximum: 28rem;
-  --width-library: 64rem;
   --width-rename: 8rem;
   --width-error: 44rem;
   --type-panel-heading: 1.5rem;

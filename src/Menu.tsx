@@ -43,6 +43,10 @@ export function Menu({ id, label, keyboard, point, opener, onDismiss, children, 
     if (event.key === 'Tab') { dismiss.current('tab'); return; }
     const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('[role^=menuitem]:not(:disabled), [role=switch]:not(:disabled)') ?? [])];
     const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (['ArrowLeft', 'ArrowRight'].includes(event.key) && (event.target as HTMLElement).closest('.browser-menu-zoom')) {
+      const buttons = items.filter(item => item.closest('.browser-menu-zoom'));
+      event.preventDefault(); buttons[(buttons.indexOf(document.activeElement as HTMLButtonElement) + (event.key === 'ArrowRight' ? 1 : buttons.length - 1)) % buttons.length]?.focus(); return;
+    }
     const filter = ref.current?.querySelector<HTMLInputElement>('input:not(:disabled)');
     if (filter && (event.key === 'ArrowUp' && index === 0 || event.key === 'ArrowDown' && index === items.length - 1)) { event.preventDefault(); filter.focus(); return; }
     const next = event.key === 'ArrowDown' ? (index + 1) % items.length : event.key === 'ArrowUp' ? index < 0 ? items.length - 1 : (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : -1;
