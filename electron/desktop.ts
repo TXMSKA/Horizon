@@ -6,6 +6,7 @@ import { isWebURL } from './browsing';
 import { isProfileId } from './profiles';
 import { encryptedStore, readStoreFile, writeStoreFile } from './store';
 import type { StoreCipher, StoreReadStatus } from './store';
+export { desktopAddress } from '../src/shared/desktop-address';
 
 export const PROJECT_LIMIT = 200;
 export const PROJECT_ITEM_LIMIT = 2000;
@@ -33,7 +34,6 @@ export function folderName(value: unknown): string {
     throw new Error(error instanceof Error ? error.message.replace('PROJECT_', 'FOLDER_') : 'FOLDER_NAME_INVALID');
   }
 }
-export const desktopAddress = (name: string) => `horizon://desktop/${name.toLowerCase().replace(/\s+/g, '-').replace(/[<>"/\\?#%{}|^`]/g, '')}`;
 function integer(value: unknown, minimum = 0, maximum = 8640000000000000): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 }

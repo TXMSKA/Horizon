@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { AppWindow, LoaderCircle, NotebookPen, SquareDashed, Type } from 'lucide-react';
+import { AppWindow, LoaderCircle, ChevronDown, SquareDashed, Type } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import type { BrowserState, CaptureRect, Language, ProjectSummary } from './shared/api';
-import { NotebookPicker, notebookError } from './Notebooks';
+import { CaptureProjectPicker, desktopError } from './Desktop';
 
 export type CaptureKind = 'text' | 'area' | 'page';
 const choices = [{ kind: 'text', label: 'captureText', icon: Type }, { kind: 'area', label: 'captureArea', icon: SquareDashed }, { kind: 'page', label: 'capturePage', icon: AppWindow }] as const;
@@ -14,7 +14,7 @@ const rectangle = (a: Point, b: Point): CaptureRect => ({ x: Math.min(a.x, b.x),
 
 export function CaptureOverlay({ state, language, header, onClose, onSave, onRetryStorage }: {
   state: BrowserState; language: Language; header: RefObject<HTMLElement | null>; onClose: () => void;
-  onSave: (notebook: ProjectSummary, kind: CaptureKind, rect: CaptureRect) => Promise<void>;
+  onSave: (project: ProjectSummary | null, kind: CaptureKind, rect: CaptureRect) => Promise<void>;
   onRetryStorage: () => Promise<void>;
 }) {
   const t = (key: CopyKey) => text(key, language);
@@ -22,7 +22,7 @@ export function CaptureOverlay({ state, language, header, onClose, onSave, onRet
   const [rect, setRect] = useState<CaptureRect>({ x: 310, y: 262, width: 820, height: 300 });
   const layer = useRef<HTMLDivElement>(null), selection = useRef<HTMLDivElement>(null), save = useRef<HTMLButtonElement>(null), group = useRef<HTMLDivElement>(null);
   const corner = useRef<Point | null>(null), gesture = useRef<{ anchor: Point; start: Point; moved: boolean; hadCorner: boolean } | null>(null), pending = useRef(false);
-  const last = useRef<ProjectSummary | null>(null);
+  const last = useRef<{ project: ProjectSummary | null } | null>(null);
   const [size, setSize] = useState('');
   useLayoutEffect(() => {
     const area = layer.current;
@@ -63,12 +63,12 @@ export function CaptureOverlay({ state, language, header, onClose, onSave, onRet
     const bounds = layer.current!.getBoundingClientRect();
     return { x: Math.max(0, Math.min(event.clientX - bounds.left, bounds.width)), y: Math.max(0, Math.min(event.clientY - bounds.top, bounds.height)) };
   };
-  const submit = async (notebook: ProjectSummary) => {
+  const submit = async (project: ProjectSummary | null) => {
     if (pending.current) return;
     if (state.desktopLocked) { setError(t('DESKTOP_LOCKED')); setChooser(false); return; }
-    pending.current = true; setBusy(true); setError(''); setChooser(false); last.current = notebook; save.current?.focus();
-    try { await onSave(notebook, kind, rect); }
-    catch (reason) { setError(notebookError(reason, language)); }
+    pending.current = true; setBusy(true); setError(''); setChooser(false); last.current = { project }; save.current?.focus();
+    try { await onSave(project, kind, rect); }
+    catch (reason) { setError(desktopError(reason, language)); }
     finally { pending.current = false; setBusy(false); }
   };
   return createPortal(<div className="capture-overlay" ref={layer} role="dialog" aria-modal="true" aria-label={t('capturePurpose')} aria-busy={busy} onPointerDown={event => {
@@ -98,11 +98,11 @@ export function CaptureOverlay({ state, language, header, onClose, onSave, onRet
         if (next < 0) return;
         event.preventDefault(); setKind(choices[next]!.kind); setError(''); group.current?.querySelectorAll<HTMLButtonElement>('button')[next]?.focus();
       }}><choice.icon aria-hidden="true" />{t(choice.label)}</button>)}</div>
-      <button ref={save} className="profile-action primary capture-save" type="button" disabled={busy} aria-haspopup="dialog" aria-expanded={chooser} onClick={() => { if (state.desktopLocked) setError(t('DESKTOP_LOCKED')); else setChooser(previous => !previous); }}>{busy ? <LoaderCircle className="spinner" aria-hidden="true" /> : <NotebookPen aria-hidden="true" />}{t('saveToNotebook')}</button>
+      <button ref={save} className="profile-action primary capture-save" type="button" disabled={busy} aria-haspopup="menu" aria-expanded={chooser} onClick={() => { if (state.desktopLocked) setError(t('DESKTOP_LOCKED')); else setChooser(previous => !previous); }}>{busy && <LoaderCircle className="spinner" aria-hidden="true" />}<span>{t('saveTo')}</span><span className="capture-save-chevron"><ChevronDown aria-hidden="true" /></span></button>
       <button className="profile-action quiet" type="button" onClick={onClose}>{t('cancel')}</button>
     </div><div className="capture-guidance">{kind === 'area' && <p id="capture-instructions" className="visually-hidden">{t('captureInstructions')}</p>}<p id="capture-size" className="visually-hidden" role="status" aria-live="polite">{kind === 'area' ? size : kind === 'text' ? t('captureTextHint') : ''}</p>
-      {(error || state.desktopLocked || state.desktopStorageError) && <div className="capture-error" role="alert"><span>{error || t(state.desktopLocked ? 'DESKTOP_LOCKED' : 'DESKTOP_STORAGE_FAILED')}</span><button className="text-button" type="button" onClick={() => { if (error && last.current) void submit(last.current); else void onRetryStorage(); }}>{t('retry')}</button></div>}
+      {(error || state.desktopLocked || state.desktopStorageError) && <div className="capture-error" role="alert"><span>{error || t(state.desktopLocked ? 'DESKTOP_LOCKED' : 'DESKTOP_STORAGE_FAILED')}</span><button className="text-button" type="button" onClick={() => { if (error && last.current) void submit(last.current.project); else void onRetryStorage(); }}>{t('retry')}</button></div>}
     </div></div>
-    {chooser && <NotebookPicker state={state} language={language} opener={save} portalHost={layer} choosing onClose={() => { setChooser(false); save.current?.focus(); }} onChoose={submit} />}
+    {chooser && <CaptureProjectPicker state={state} language={language} opener={save} portalHost={layer} screenshots={kind !== 'text'} onClose={() => { setChooser(false); save.current?.focus(); }} onChoose={submit} />}
   </div>, document.body);
 }

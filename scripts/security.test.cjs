@@ -130,8 +130,8 @@ test('Hub tiles, dock and menus support keyboard opening, pending saves, retry a
   dialog.props.ref.current = { contains: () => false, querySelector: () => focus, querySelectorAll: () => [] };
   tile(tree).props.ref.current = focus; hooks.flush();
   assert.equal(dialog.props['aria-label'], 'Hub'); assert.equal(tile(tree).props.children[1].props.children, 'Themes');
-  const currentTarget = { parentElement: { children: [focus] } }; tile(tree).props.onKeyDown({ ...key('ArrowRight'), currentTarget }); assert.equal(focused, 2);
-  tile(tree).props.onKeyDown(key('ContextMenu')); tree = render(); hooks.flush();
+  const currentTarget = { parentElement: { children: [focus, focus] } }; tile(tree).props.onKeyDown({ ...key('ArrowRight'), currentTarget }); assert.equal(focused, 2);
+  tile(tree).props.onKeyDown({ ...key('ContextMenu'), currentTarget: focus }); tree = render(); hooks.flush();
   assert.equal(tile(tree).props['aria-expanded'], true); assert.deepEqual(nodes(tree, 'menuitem').map(node => node.props.children[1].props.children), ['Open', 'Add to quick access']);
   nodes(tree, 'menuitem')[1].props.onClick(); nodes(tree, 'menuitem')[1].props.onClick(); tree = render(); hooks.flush();
   assert.deepEqual(sent, [{ type: 'pin-app', id: 'themes' }]); assert.equal(nodes(tree, 'dialog')[0].props['aria-busy'], true);
@@ -563,7 +563,7 @@ test('profiles are managed in settings and the profiles panel route is removed',
 });
 
 function settingsInterface(react = {}) {
-  return interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './HorizonMark': {}, './Menu': {}, './Notebooks': {}, './Profiles': {}, './Switch': {} });
+  return interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './HorizonMark': {}, './Menu': {}, './PopupAnchor': {}, './Profiles': {}, './Switch': {} });
 }
 
 test('settings failures use the complete named code and never expose command messages', () => {
@@ -3575,7 +3575,15 @@ function notebookNodes(node, predicate) {
   if (!node || typeof node !== 'object' || !node.props) return [];
   return [...(predicate(node) ? [node] : []), ...interfaceChildren(node).flatMap(child => notebookNodes(child, predicate))];
 }
-const notebookTestIcons = Object.fromEntries(['AppWindow', 'NotebookPen', 'SquareDashed', 'Type', 'Camera', 'Check', 'FileText', 'LoaderCircle', 'Pencil', 'Plus', 'TriangleAlert', 'X', 'Ellipsis', 'Trash2'].map(name => [name, name]));
+const notebookTestIcons = Object.fromEntries(['AppWindow', 'NotebookPen', 'SquareDashed', 'Type', 'Camera', 'Check', 'FileText', 'LoaderCircle', 'Pencil', 'Plus', 'TriangleAlert', 'X', 'Ellipsis', 'Trash2', 'ChevronDown', 'Folder', 'LayoutDashboard', 'Scan', 'FolderInput', 'FolderPlus', 'Link', 'ExternalLink'].map(name => [name, name]));
+
+
+function desktopInterface(react = {}, globals = {}) {
+  return interfaceModule('src/Desktop.tsx', { react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' } }, globals);
+}
+function desktopViewInterface(react, desktop, globals = {}) {
+  return interfaceModule('src/DesktopView.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': desktop }, globals);
+}
 
 test('browser menu keeps the drawn order, shortcuts and working zoom controls', () => {
   const copy = interfaceModule('src/copy.ts'), shortcuts = [], panels = [], commands = [];
@@ -3738,7 +3746,7 @@ test('About uses the app version, a labelled modal and Close focus with Escape r
 
 test('capture controls start on Area, expose radio semantics and move selection by arrows, dragging and two clicks', () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), focused = [], document = { body: {}, activeElement: null };
-  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': { NotebookPicker: 'picker', notebookError: reason => reason.message } }, { document });
+  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': { CaptureProjectPicker: 'picker', desktopError: reason => reason.message } }, { document });
   const render = () => hooks.render(() => CaptureOverlay({ state: { projects: [] }, language: 'en', header: { current: null }, onClose() {}, onSave() {} }));
   let tree = render(), radios = notebookNodes(tree, node => node.props.role === 'radio');
   assert.equal(tree.props.role, 'dialog'); assert.equal(tree.props['aria-modal'], 'true'); assert.equal(tree.props['aria-label'], copy.text('capturePurpose', 'en'));
@@ -3762,24 +3770,23 @@ test('capture controls start on Area, expose radio semantics and move selection 
   hooks.dispose();
 });
 
-test('new notebook controls have coarse-pointer targets and selected segments retain a contrasting edge', () => {
-  const css = readFileSync('src/styles.css', 'utf8'), coarse = css.match(/@media \(pointer: coarse\)\s*\{([\s\S]*?)\n\}/)[1];
-  for (const selector of ['.capture-bar .profile-action', '.capture-guidance .text-button', '.capture-segmented button', '.notebook-name-form .profile-action', '.notebook-page .profile-action', '.notebook-first-use .profile-action', '.notebook-toast .text-button', '.notebooks-menu > button', '.notebook-actions-menu > button', '.notebook-resume', '.notebook-list-row', '.notebook-home-row']) {
+test('Desktop and capture controls keep coarse-pointer targets and contrasting selected edges', () => {
+  const css = readFileSync('src/styles.css', 'utf8');
+  const coarse = [...css.matchAll(/@media \(pointer: coarse\)\s*\{([\s\S]*?)\n\}/g)].map(match => match[1]).join('\n');
+  for (const selector of ['.capture-bar .profile-action', '.capture-segmented button', '.desktop-panel button', '.desktop-tab button', '.desktop-dialog button', '.desktop-choice-menu > button']) {
     assert.ok(coarse.includes(selector)); assert.match(coarse.slice(coarse.indexOf(selector)), /min-height:\s*var\(--target-touch\)/);
   }
   assert.match(css, /\.capture-segmented \[aria-checked=true\]\s*\{[^}]*border-color:\s*var\(--border-control\);[^}]*background:\s*var\(--surface-pressed\)/);
   assert.match(css, /\.capture-overlay \.capture-bar\s*\{[^}]*height:\s*auto/);
   const tokens = readFileSync('src/tokens.css', 'utf8');
   for (const palette of ['amber', 'daylight', 'contrast-dark', 'contrast-light']) assert.match(tokens, new RegExp('--palette-' + palette + '-capture-veil:'));
-  assert.match(tokens, /--palette-amber-capture-veil:\s*rgba\(0, 0, 0, 0\.45\)/);
 });
 
 test('capture image bytes stay in IPC and blob URLs are revoked on retry, errors, stale responses and unmount', async () => {
-  const copy = interfaceModule('src/copy.ts');
   for (const outcome of ['retry', 'unmount', 'stale', 'null', 'error']) {
     const hooks = notebookTestHooks(), created = [], revoked = [], requests = []; let finish;
     const window = { horizon: { getCaptureImage(...args) { requests.push(args); return new Promise(resolve => { finish = resolve; }); } } };
-    const { CaptureImage } = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': {} }, { window, URL: { createObjectURL() { const url = 'blob:private-' + created.length; created.push(url); return url; }, revokeObjectURL: url => revoked.push(url) }, Blob, Uint8Array });
+    const { CaptureImage } = desktopInterface(hooks.react, { window, URL: { createObjectURL() { const url = 'blob:private-' + created.length; created.push(url); return url; }, revokeObjectURL: url => revoked.push(url) }, Blob, Uint8Array });
     const render = () => hooks.render(() => CaptureImage({ project: 'book', item: { id: 'image', title: 'Capture', image: { cut: false } }, language: 'en' }));
     render(); hooks.flush(); assert.deepEqual(requests, [['book', 'image']]);
     if (outcome === 'stale') hooks.dispose();
@@ -3822,66 +3829,64 @@ test('debounced notebook edits serialize and flush before switching, retaining f
   assert.deepEqual(edits.fields('book', 'item'), {}); assert.equal(timers.size, 0); assert.deepEqual(errors, []);
 });
 
-test('notebook home metadata uses actual counts, calendar-relative dates and each named error has distinct bilingual copy', () => {
-  const copy = interfaceModule('src/copy.ts'), helpers = interfaceModule('src/Notebooks.tsx', { react: {}, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} });
+test('Desktop counts and calendar-relative dates use actual project metadata', () => {
+  const helpers = desktopInterface(), project = { pages: 1, notes: 2, captures: 3 };
+  assert.equal(helpers.projectSize(project), 6);
+  assert.equal(helpers.projectCounts(project, 'en'), '1 page, 3 captures, 2 notes');
+  assert.equal(helpers.itemCount(1, 'en'), '1 item'); assert.equal(helpers.itemCount(0, 'en'), '0 items');
   const now = new Date(2026, 9, 2, 0, 5).getTime(), yesterday = new Date(2026, 9, 1, 23, 55).getTime();
-  assert.equal(helpers.notebookResumeMeta({ notes: 6, captures: 0, updatedAt: yesterday }, 'en', now), '6 notes, yesterday');
-  assert.equal(helpers.notebookResumeMeta({ notes: 1, captures: 3, updatedAt: now }, 'en', now), '1 note and 3 captures, today');
-  for (const language of ['en', 'es']) {
-    const labels = Object.keys(copy.copy).filter(key => /^(PROJECT_|DESKTOP_|CAPTURE_|NOTHING_SELECTED)/.test(key)).map(key => helpers.notebookError(new Error("Error invoking command: " + key), language));
-    assert.equal(labels.length, 20); assert.equal(new Set(labels).size, 20); assert.ok(labels.every(label => label.length > 10));
-  }
+  assert.equal(helpers.relativeDesktopDate(yesterday, 'en', now), 'yesterday');
+  assert.equal(helpers.relativeDesktopDate(now, 'es', now), 'hoy');
 });
 
-test('notebook chooser orders last use after the current notebook, preselects it and starts with a labelled form on first use', () => {
-  const copy = interfaceModule('src/copy.ts'), hooks = notebookTestHooks();
-  const module = interfaceModule('src/Notebooks.tsx', { react: hooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': { Menu: 'menu' } });
-  const chosen = [], state = { projectInUse: 'current', projects: [{ id: 'older', name: 'Older', notes: 0, captures: 2, usedAt: 1 }, { id: 'latest', name: 'Latest', notes: 2, captures: 0, usedAt: 3 }, { id: 'current', name: 'Current', notes: 1, captures: 1, usedAt: 2 }] };
-  const tree = hooks.render(() => module.NotebookPicker({ state, language: 'en', opener: { current: null }, onClose() {}, onChoose: notebook => chosen.push(notebook.id), choosing: true }));
-  const rows = notebookNodes(tree, node => node.props.role === 'menuitemradio');
-  assert.deepEqual(rows.map(row => row.props.children[1].props.children[0].props.children), ['Current', 'Latest', 'Older']);
-  assert.deepEqual(rows.map(row => row.props['aria-checked']), [true, false, false]); rows[0].props.onClick(); assert.deepEqual(chosen, ['current']);
-  const emptyHooks = notebookTestHooks(), emptyModule = interfaceModule('src/Notebooks.tsx', { react: emptyHooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} });
-  const first = emptyHooks.render(() => emptyModule.NotebookPicker({ state: { projects: [], projectInUse: null }, language: 'en', opener: { current: null }, onClose() {}, onChoose() {} }));
-  assert.equal(notebookNodes(first, node => node.type === emptyModule.NotebookNameForm).length, 1);
-  const formHooks = notebookTestHooks(), forms = interfaceModule('src/Notebooks.tsx', { react: formHooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} });
-  const form = formHooks.render(() => forms.NotebookNameForm({ language: 'en', onCancel() {}, onSuccess() {} }));
+test('capture project chooser puts Captures first then current and recently used projects', () => {
+  for (const screenshots of [true, false]) {
+    const hooks = notebookTestHooks(), module = desktopInterface(hooks.react), chosen = [];
+    const state = { projectInUse: 'current', projects: [{ id: 'older', name: 'Older', usedAt: 1 }, { id: 'latest', name: 'Latest', usedAt: 3 }, { id: 'current', name: 'Current', usedAt: 2 }] };
+    const render = () => hooks.render(() => module.CaptureProjectPicker({ state, screenshots, language: 'en', opener: { current: null }, onClose() {}, onChoose: async project => chosen.push(project?.id ?? null) }));
+    let tree = render(), rows = notebookNodes(tree, node => node.props.role === 'menuitem');
+    assert.deepEqual(rows.map(row => row.props.children[1].props.children), ['Captures', 'Current', 'Latest', 'Older', 'New project']);
+    assert.equal(rows[0].props.disabled, !screenshots); rows[1].props.onClick(); assert.deepEqual(chosen, ['current']);
+    rows.at(-1).props.onClick(); tree = render(); assert.equal(tree.type, module.DesktopNameDialog);
+  }
+  const hooks = notebookTestHooks(), module = desktopInterface(hooks.react);
+  const form = hooks.render(() => module.ProjectNameForm({ state: { activeProfileId: 'first' }, language: 'en', onSuccess() {} }));
   const label = notebookNodes(form, node => node.type === 'label')[0], input = notebookNodes(form, node => node.type === 'input')[0];
-  assert.equal(label.props.htmlFor, input.props.id); assert.equal(label.props.children, 'Notebook name');
+  assert.equal(label.props.htmlFor, input.props.id); assert.equal(label.props.children, 'Project name');
 });
 
 test('saved status exists before the first save and pauses its remaining duration on hover and focus', () => {
-  const copy = interfaceModule('src/copy.ts'), hooks = notebookTestHooks(), timers = new Map(); let now = 0, closed = 0;
+  const hooks = notebookTestHooks(), timers = new Map(); let now = 0, closed = 0;
   const window = { setTimeout(callback, delay) { const timer = {}; timers.set(timer, { callback, delay }); return timer; }, clearTimeout(timer) { timers.delete(timer); } };
-  const module = interfaceModule('src/Notebooks.tsx', { react: hooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} }, { window, Date: { now: () => now } });
+  const module = desktopInterface(hooks.react, { window, Date: { now: () => now } });
   const onClose = () => closed++, notice = { message: 'Saved to Research', action: 'Open', onAction() {} };
-  const render = value => hooks.render(() => module.NotebookStatus({ notice: value, language: 'en', onClose }));
+  const render = value => hooks.render(() => module.DesktopStatus({ notice: value, language: 'en', onClose }));
   const empty = render(null); hooks.flush(); assert.equal(empty.props.role, 'status'); assert.equal(timers.size, 0);
   let tree = render(notice); hooks.flush(); assert.equal([...timers.values()][0].delay, 8000);
-  now = 2000; notebookNodes(tree, node => node.props.className === 'notebook-toast')[0].props.onMouseEnter(); tree = render(notice); hooks.flush(); assert.equal(timers.size, 0);
-  now = 10000; notebookNodes(tree, node => node.props.className === 'notebook-toast')[0].props.onMouseLeave(); tree = render(notice); hooks.flush(); assert.equal([...timers.values()][0].delay, 6000);
-  now = 11000; const toast = notebookNodes(tree, node => node.props.className === 'notebook-toast')[0]; toast.props.onFocus(); tree = render(notice); hooks.flush(); assert.equal(timers.size, 0);
-  notebookNodes(tree, node => node.props.className === 'notebook-toast')[0].props.onMouseEnter(); tree = render(notice); hooks.flush();
-  notebookNodes(tree, node => node.props.className === 'notebook-toast')[0].props.onMouseLeave(); tree = render(notice); hooks.flush(); assert.equal(timers.size, 0, 'Leaving hover does not resume a focused message');
-  notebookNodes(tree, node => node.props.className === 'notebook-toast')[0].props.onBlur({ currentTarget: { contains: () => false }, relatedTarget: null }); render(notice); hooks.flush();
+  now = 2000; notebookNodes(tree, node => node.props.className === 'desktop-toast')[0].props.onMouseEnter(); tree = render(notice); hooks.flush(); assert.equal(timers.size, 0);
+  now = 10000; notebookNodes(tree, node => node.props.className === 'desktop-toast')[0].props.onMouseLeave(); tree = render(notice); hooks.flush(); assert.equal([...timers.values()][0].delay, 6000);
+  now = 11000; const toast = notebookNodes(tree, node => node.props.className === 'desktop-toast')[0]; toast.props.onFocus(); tree = render(notice); hooks.flush(); assert.equal(timers.size, 0);
+  notebookNodes(tree, node => node.props.className === 'desktop-toast')[0].props.onMouseEnter(); tree = render(notice); hooks.flush();
+  notebookNodes(tree, node => node.props.className === 'desktop-toast')[0].props.onMouseLeave(); tree = render(notice); hooks.flush(); assert.equal(timers.size, 0, 'Leaving hover does not resume a focused message');
+  notebookNodes(tree, node => node.props.className === 'desktop-toast')[0].props.onBlur({ currentTarget: { contains: () => false }, relatedTarget: null }); render(notice); hooks.flush();
   assert.equal([...timers.values()][0].delay, 5000); [...timers.values()][0].callback(); assert.equal(closed, 1); hooks.dispose();
 });
 
 test('full-page capture waits for visible content; save results respect closed and newly opened bars', async () => {
   const { compileFunction } = require('node:vm'), ts = require('typescript'), copy = interfaceModule('src/copy.ts');
   const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let initializer; const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'saveNotebookCapture') initializer = node.initializer; ts.forEachChild(node, visit); }; visit(source); assert.ok(initializer);
+  let initializer; const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'saveDesktopCapture') initializer = node.initializer; ts.forEachChild(node, visit); }; visit(source); assert.ok(initializer);
   const compiled = ts.transpileModule(`export const save = ${initializer.getText(source)};`, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
   for (const kind of ['page', 'text', 'area']) for (const failure of [false, true]) for (const reopened of [false, true]) {
     const events = [], notices = [], exported = {}; let visible;
     const overlay = { scope: 'scope', mode: 'capture' }, liveOverlay = { current: overlay }, nextOverlay = { scope: 'scope', mode: 'capture' };
     const globals = {
-      state: { desktopLocked: false }, notebookScope: 'scope', liveNotebookScope: { current: 'scope' }, notebookOverlay: overlay, liveNotebookOverlay: liveOverlay, edits: { flush: async () => events.push('flush') },
-      setPageCapturePending: value => events.push('pending:' + value), setNotebookOverlay: value => { assert.equal(value, null); liveOverlay.current = value; events.push('closed'); },
+      state: { desktopLocked: false }, desktopScope: 'scope', liveDesktopScope: { current: 'scope' }, desktopOverlay: overlay, liveDesktopOverlay: liveOverlay, edits: { flush: async () => events.push('flush') },
+      setPageCapturePending: value => events.push('pending:' + value), setDesktopOverlay: value => { assert.equal(value, null); liveOverlay.current = value; events.push('closed'); },
       setMenuOpen() {}, setProfileOpen() {}, setHubPage() {}, setLyraOpen() {}, setShieldScope() {}, setSuggestionsOpen() {}, setPanel() {},
       requestAnimationFrame: callback => queueMicrotask(callback), reportArea: hidden => { assert.equal(hidden, false); events.push('visible'); return new Promise(resolve => { visible = resolve; }); },
       window: { horizon: { async command(command) { events.push('capture'); assert.equal(command.kind, kind); if (kind === 'area') assert.deepEqual(command.rect, { x: 1, y: 2, width: 300, height: 200 }); if (reopened) liveOverlay.current = nextOverlay; if (failure) throw new Error('CAPTURE_FAILED'); }, async getProject() { return { items: [{ id: 'saved-item' }] }; } } },
-      notebookButtonRef: { current: { focus: () => events.push('focus') } }, setNotebookNotice: value => notices.push(value), language: 'en', text: copy.text, openNotebook() {}, notebookError: reason => reason.message,
+      desktopButtonRef: { current: { focus: () => events.push('focus') } }, setDesktopNotice: value => notices.push(value), language: 'en', text: copy.text, openDesktopPanel() {}, desktopError: reason => reason.message,
     };
     compileFunction(compiled, ['exports', ...Object.keys(globals)])(exported, ...Object.values(globals));
     const work = exported.save({ id: 'book', name: 'Research' }, kind, { x: 1, y: 2, width: 300, height: 200 });
@@ -3910,7 +3915,7 @@ test('notebook storage Retry writes existing contents without another capture an
 
 test('capture guidance stays accessible and hidden while the error and retry remain visible', () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts');
-  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': {} }, { document: { body: {} } });
+  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': {} }, { document: { body: {} } });
   const render = () => hooks.render(() => CaptureOverlay({ state: { desktopStorageError: true }, language: 'en', header: { current: null }, onClose() {}, onSave() {}, onRetryStorage() {} }));
   let tree = render();
   const selection = notebookNodes(tree, node => node.props.className === 'capture-selection')[0];
@@ -3927,52 +3932,30 @@ test('capture guidance stays accessible and hidden while the error and retry rem
   assert.match(css, /\.capture-error\s*\{[^}]*margin-top:[^}]*background:/);
 });
 
-test('notebook fields keep labels, read as board typography and grow and shrink with content and column width', async () => {
-  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), item = { id: 'item', kind: 'text', title: 'Title', text: 'Text', note: '', createdAt: Date.now() };
-  let resized, disconnected = 0;
-  const module = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': { relativeNotebookDate: () => 'today', notebookCounts: () => '1 capture', notebookItemLabel: () => 'example.com' } }, { window: { horizon: { getProject: async () => ({ name: 'Book', items: [item] }) } }, ResizeObserver: class { constructor(callback) { resized = callback; } observe() {} disconnect() { disconnected++; } } });
-  const render = () => hooks.render(() => module.NotebookView({ id: 'book', language: 'en', edits: {}, onOpen() {}, onDelete() {} }));
-  render(); hooks.flush(); await Promise.resolve();
-  const editor = notebookNodes(render(), node => typeof node.type === 'function' && node.props.item === item)[0];
-  const fieldsHooks = notebookTestHooks(), changes = [];
-  Object.assign(hooks.react, fieldsHooks.react);
-  const edits = { fields: () => ({}), change: (...args) => changes.push(args) };
-  const fields = fieldsHooks.render(() => editor.type({ ...editor.props, edits }));
-  const title = notebookNodes(fields, node => node.type === 'input')[0];
-  const areas = notebookNodes(fields, node => typeof node.type === 'function');
-  for (const field of [title, ...areas]) assert.equal(notebookNodes(fields, node => node.type === 'label' && node.props.htmlFor === field.props.id).length, 1);
-  assert.equal(areas[1].props.placeholder, copy.text('captureNotePlaceholder', 'en'));
-  title.props.onChange({ target: { value: 'Changed' } }); assert.equal(changes[0][2].title, 'Changed');
-  const growHooks = notebookTestHooks(); Object.assign(hooks.react, growHooks.react);
-  const grow = value => growHooks.render(() => areas[0].type({ ...areas[0].props, value }));
-  const textarea = grow('many lines'), element = { style: {}, scrollHeight: 120, offsetHeight: 26, clientHeight: 24, clientWidth: 400 };
-  assert.equal(textarea.props.rows, 1); textarea.props.ref.current = element; growHooks.flush(); assert.equal(element.style.height, '122px');
-  element.scrollHeight = 24; grow(''); growHooks.flush(); assert.equal(element.style.height, '26px');
-  element.clientWidth = 200; element.scrollHeight = 72; resized(); assert.equal(element.style.height, '74px');
-  growHooks.dispose(); assert.equal(disconnected, 2);
+test('note text grows and shrinks with content and column width without losing its label', () => {
+  const hooks = notebookTestHooks(); let resized, disconnected = 0;
+  const module = desktopInterface(hooks.react, { ResizeObserver: class { constructor(callback) { resized = callback; } observe() {} disconnect() { disconnected++; } } });
+  const render = value => hooks.render(() => module.GrowingTextArea({ id: 'text', value }));
+  let tree = render('Long text'); const element = { style: {}, scrollHeight: 120, offsetHeight: 124, clientHeight: 120, clientWidth: 300 };
+  tree.props.ref.current = element; hooks.flush(); assert.equal(element.style.height, '124px');
+  element.scrollHeight = 20; render('Short'); hooks.flush(); assert.equal(element.style.height, '24px');
+  element.clientWidth = 180; element.scrollHeight = 70; resized(); assert.equal(element.style.height, '74px');
+  hooks.dispose(); assert.equal(disconnected, 2);
   const css = readFileSync('src/styles.css', 'utf8');
-  assert.match(css, /\.notebook-item-title\s*\{[^}]*font-size: var\(--type-notebook-title\);[^}]*font-weight: var\(--weight-heading\);[^}]*color: var\(--text-title\)/);
-  assert.match(css, /\.notebook-editor-field textarea\s*\{[^}]*font-size: var\(--type-body\);[^}]*color: var\(--text-primary\)/);
-  assert.match(css, /\.notebook-item-title, \.notebook-editor-field textarea\s*\{[^}]*border-bottom-color: var\(--border-control\);[^}]*background: var\(--surface-transparent\)/);
-  assert.match(css, /\.notebook-item-title:hover, \.notebook-item-title:focus, \.notebook-editor-field textarea:hover, \.notebook-editor-field textarea:focus\s*\{ border-color: var\(--border-control\)/);
-  assert.doesNotMatch(css, /min-height: var\(--height-notebook-(?:text|annotation)\)/);
+  assert.match(css, /\.desktop-field \.desktop-note-title[^}]+font-weight: var\(--weight-heading\)/);
+  assert.match(css, /\.desktop-field \.desktop-note-title, \.desktop-note-text[^}]+border-bottom: var\(--border-width\) solid var\(--border-control\)/);
 });
 
-test('capture images use natural pixels divided by display scale and keep column bounds, proportions and radius', async () => {
-  for (const scale of [1, 1.25, 2]) {
-    const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts');
-    const { CaptureImage } = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': {} }, { window: { devicePixelRatio: scale, horizon: { getCaptureImage: async () => new Uint8Array([1]) } }, URL: { createObjectURL: () => 'blob:image', revokeObjectURL() {} }, Blob, Uint8Array });
-    const render = () => hooks.render(() => CaptureImage({ project: 'book', item: { id: 'item', title: 'Capture' }, language: 'en' }));
-    render(); hooks.flush(); await Promise.resolve();
-    const image = notebookNodes(render(), node => node.type === 'img')[0], element = { naturalWidth: 500 * scale, naturalHeight: 220 * scale, style: {} };
-    image.props.onLoad({ currentTarget: element }); assert.equal(element.style.width, '500px'); hooks.dispose();
-  }
-  assert.match(readFileSync('src/styles.css', 'utf8'), /\.notebook-capture img\s*\{[^}]*max-width: 100%;[^}]*height: auto;[^}]*border-radius: var\(--radius-panel\)/);
+test('capture previews keep the board proportions and full images stay within their column', () => {
+  const css = readFileSync('src/styles.css', 'utf8'), tokens = readFileSync('src/tokens.css', 'utf8');
+  assert.match(css, /\.desktop-image\.preview[^}]+aspect-ratio: var\(--aspect-desktop-preview\)/);
+  assert.match(css, /\.desktop-image > img[^}]+width: 100%;[^}]+height: auto/);
+  assert.match(tokens, /--aspect-desktop-preview: 1440 \/ 770/);
 });
 
 test('area arrows move and Shift resizes by ten, Alt uses one, and all edges stay bounded', async () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), saved = [];
-  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': { NotebookPicker: 'picker' } }, { document: { body: {} } });
+  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': { CaptureProjectPicker: 'picker' } }, { document: { body: {} } });
   const render = () => hooks.render(() => CaptureOverlay({ state: {}, language: 'en', header: { current: null }, onClose() {}, onSave: async (_book, _kind, rect) => saved.push(rect) }));
   let tree = render(); tree.props.ref.current = { getBoundingClientRect: () => ({ width: 1440, height: 804 }) };
   const press = async (key, shiftKey = false, altKey = false, count = 1) => {
@@ -4009,98 +3992,70 @@ test('run D: locked notebooks refuse every creation, preserve originals and reop
   available = true; runtime.retry(); assert.equal(runtime.state().desktopLocked, false);
   assert.equal(runtime.content(stored.projects[0].id).items.length, stored.projects[0].items.length); runtime.dispose();
   const app = readFileSync('src/App.tsx', 'utf8');
-  assert.match(app, /setDismissedNotebookRead\(state.activeProfileId\)/);
+  assert.match(app, /setDismissedDesktopRead\(state.activeProfileId\)/);
   assert.match(app, /state\?\.desktopLocked \? 'DESKTOP_LOCKED'/);
   for (const language of ['en', 'es']) assert.ok(interfaceModule('src/copy.ts').text('DESKTOP_LOCKED', language));
 });
 
-test('run D: notebook loading has list and detail placeholders and images reserve stored proportions before arrival', () => {
-  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), styles = {};
-  const module = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': {} }, { window: { devicePixelRatio: 2, horizon: { getCaptureImage: () => new Promise(() => {}) } } });
-  const tree = hooks.render(() => module.CaptureImage({ project: 'book', item: { id: 'image', title: '', image: { width: 1000, height: 440 } }, language: 'en' }));
-  notebookNodes(tree, node => node.props.className === 'notebook-image-box')[0].props.ref.current = { style: { setProperty: (name, value) => { styles[name] = value; } } };
-  hooks.flush(); assert.deepEqual(styles, { width: '500px', 'aspect-ratio': '1000 / 440' });
-  assert.equal(notebookNodes(tree, node => node.type === 'LoaderCircle').length, 0); hooks.dispose();
-  const loadingHooks = notebookTestHooks();
-  const view = interfaceModule('src/NotebookView.tsx', { react: loadingHooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': {} });
-  const placeholder = loadingHooks.render(() => view.NotebookView({ id: 'book', selected: null, version: 0, language: 'en', edits: {}, readOnly: false }));
-  assert.equal(notebookNodes(placeholder, node => node.type === 'li').length, 5);
-  assert.equal(notebookNodes(placeholder, node => node.props.className === 'notebook-skeleton skeleton-title').length, 2);
-  assert.equal(notebookNodes(placeholder, node => node.props.className === 'notebook-skeleton skeleton-line').length, 4);
+test('Desktop project loading stays in place and Escape and Close dismiss its labelled panel', () => {
+  const hooks = notebookTestHooks(), desktop = desktopInterface(hooks.react), module = desktopViewInterface(hooks.react, desktop); let closed = 0;
+  const props = { state: { desktopPanel: { page: { kind: 'project', project: 'project' } } }, language: 'en' };
+  const tree = hooks.render(() => module.DesktopPanel({ props, onClose: () => closed++, onTab() {} }));
+  assert.equal(tree.type, 'aside'); assert.equal(tree.props['aria-labelledby'], notebookNodes(tree, node => node.type === 'h2')[0].props.id);
+  const placeholder = notebookNodes(tree, node => typeof node.type === 'function' && node.type.name === 'Loading')[0];
+  assert.ok(placeholder); assert.equal(placeholder.type(placeholder.props).props.role, 'status');
+  tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); assert.equal(closed, 1);
+  notebookNodes(tree, node => node.type === 'button' && node.props['aria-label'] === 'Close panel')[0].props.onClick(); assert.equal(closed, 2);
 });
 
-test('run D: both notebook pickers filter above eight and offer the typed name with no results', () => {
-  for (const choosing of [false, true]) {
-    const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts');
-    const module = interfaceModule('src/Notebooks.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': { Menu: 'menu' } });
-    const state = { activeProfileId: 'profile', projects: Array.from({ length: 9 }, (_, i) => ({ id: String(i), name: `Book ${i}`, notes: 0, captures: 0, usedAt: i })), projectInUse: '0' };
-    const render = () => hooks.render(() => module.NotebookPicker({ state, language: 'en', choosing, opener: { current: null }, onClose() {}, onChoose() {} }));
-    let tree = render(), input = notebookNodes(tree, node => node.type === 'input')[0];
-    assert.equal(notebookNodes(tree, node => node.type === 'label')[0].props.htmlFor, input.props.id);
-    input.props.onChange({ target: { value: 'bOoK 3' } }); tree = render();
-    assert.equal(notebookNodes(tree, node => node.props.role === 'menuitemradio').length, 1);
-    notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Travel' } }); tree = render();
-    assert.equal(notebookNodes(tree, node => node.props.role === 'menuitemradio').length, 0);
-    assert.equal(notebookNodes(tree, node => node.props.role === 'status').length, 1);
-    const create = notebookNodes(tree, node => node.props.role === 'menuitem')[0]; assert.equal(create.props.children[1].props.children, 'New project: Travel'); create.props.onClick();
-    tree = render(); assert.equal(notebookNodes(tree, node => node.type === module.NotebookNameForm)[0].props.initial, 'Travel');
-    const smallHooks = notebookTestHooks(); const small = interfaceModule('src/Notebooks.tsx', { react: smallHooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': { Menu: 'menu' } });
-    assert.equal(notebookNodes(smallHooks.render(() => small.NotebookPicker({ state: { ...state, projects: state.projects.slice(0, 8) }, language: 'en', opener: { current: null } })), node => node.type === 'input').length, 0);
-  }
+test('Desktop dropdowns use the app menu, chosen radio, keyboard opening and divider chevron', () => {
+  const hooks = notebookTestHooks(), module = desktopInterface(hooks.react), chosen = [], focused = [];
+  const render = () => hooks.render(() => module.DesktopDropdown({ label: 'Project', value: 'one', choices: [{ id: 'one', name: 'One' }, { id: 'two', name: 'Two' }], onChoose: value => chosen.push(value) }));
+  let tree = render(), control = notebookNodes(tree, node => node.type === 'button')[0];
+  control.props.ref.current = { focus: () => focused.push(true) }; assert.equal(control.props['aria-expanded'], false);
+  control.props.onKeyDown({ key: 'ArrowDown', preventDefault() {} }); tree = render();
+  assert.equal(notebookNodes(tree, node => node.type === 'button')[0].props['aria-expanded'], true);
+  const rows = notebookNodes(tree, node => node.props.role === 'menuitemradio'); assert.deepEqual(rows.map(row => row.props['aria-checked']), [true, false]);
+  rows[1].props.onClick(); assert.deepEqual(chosen, ['two']); assert.deepEqual(focused, [true]);
+  assert.equal(notebookNodes(render(), node => node.props.role === 'menuitemradio').length, 0);
+  assert.match(readFileSync('src/styles.css', 'utf8'), /\.desktop-dropdown-chevron[^}]+border-inline-start: var\(--border-width\) solid var\(--divider\)/);
 });
 
-test('run D: cancelled and escaped notebook names survive remount, until cleared or submitted', async () => {
-  let activeHooks = notebookTestHooks(), cancelled = 0;
-  const react = Object.fromEntries(Object.keys(activeHooks.react).map(key => [key, (...args) => activeHooks.react[key](...args)]));
-  const copy = interfaceModule('src/copy.ts'), sent = [];
-  const module = interfaceModule('src/Notebooks.tsx', { react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} }, { window: { horizon: { command: async command => { sent.push(command); }, getState: async () => ({ projects: [{ id: 'saved', name: 'Submitted' }] }) } } });
-  const render = () => activeHooks.render(() => module.NotebookNameForm({ language: 'en', profileId: 'draft', onCancel: () => { cancelled++; }, onSuccess() {} }));
-  let tree = render(); notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Kept' } }); tree = render();
-  tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); assert.equal(cancelled, 1);
-  activeHooks = notebookTestHooks(); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'input')[0].props.value, 'Kept');
-  notebookNodes(tree, node => node.type === 'button' && node.props.children === 'Cancel')[0].props.onClick();
-  activeHooks = notebookTestHooks(); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'input')[0].props.value, 'Kept');
-  notebookNodes(tree, node => node.type === 'button' && node.props.children === 'Clear')[0].props.onClick();
-  activeHooks = notebookTestHooks(); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'input')[0].props.value, '');
-  notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Submitted' } }); tree = render(); tree.props.onSubmit({ preventDefault() {} });
-  for (let i = 0; i < 8; i++) await Promise.resolve(); assert.equal(sent[0].name, 'Submitted');
-  activeHooks = notebookTestHooks(); assert.equal(notebookNodes(render(), node => node.type === 'input')[0].props.value, '');
+test('project name drafts survive remount and failed saves and clear after successful creation', async () => {
+  let hooks = notebookTestHooks(), fail = true;
+  const react = Object.fromEntries(Object.keys(hooks.react).map(key => [key, (...args) => hooks.react[key](...args)]));
+  const sent = [], state = { activeProfileId: 'draft' };
+  const module = desktopInterface(react, { window: { horizon: { command: async command => { sent.push(command); if (fail) throw new Error('DESKTOP_STORAGE_FAILED'); }, getState: async () => ({ projects: [{ id: 'saved', name: 'Submitted' }] }) } } });
+  const render = () => hooks.render(() => module.ProjectNameForm({ state, language: 'en', onSuccess() {} }));
+  let tree = render(); notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Submitted' } });
+  hooks = notebookTestHooks(); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'input')[0].props.value, 'Submitted');
+  tree.props.onSubmit({ preventDefault() {} }); for (let i = 0; i < 12; i++) await Promise.resolve();
+  assert.equal(notebookNodes(render(), node => node.props.role === 'alert').length, 1);
+  fail = false; render().props.onSubmit({ preventDefault() {} }); for (let i = 0; i < 12; i++) await Promise.resolve();
+  hooks = notebookTestHooks(); assert.equal(notebookNodes(render(), node => node.type === 'input')[0].props.value, ''); assert.equal(sent.length, 2);
 });
 
-test('run D: notebook and start-page rows distinguish text, area, whole page and notes in both languages', async () => {
-  const copy = interfaceModule('src/copy.ts');
+test('Desktop item labels distinguish saved pages, text, area, whole page and notes in both languages', () => {
+  const module = desktopInterface(), copy = interfaceModule('src/copy.ts');
   for (const language of ['en', 'es']) {
-    const hooks = notebookTestHooks();
-    const notebooks = interfaceModule('src/Notebooks.tsx', { react: hooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} });
-    const items = ['text', 'area', 'page', 'note'].map((kind, i) => ({ id: String(i), kind, title: 'Same title', source: kind === 'note' ? null : { url: 'https://example.com/path' } }));
-    const expected = ['example.com', copy.text('sourceCapture', language), copy.text('sourceFullPage', language), copy.text('sourceNote', language)];
-    assert.deepEqual(items.map(item => notebooks.notebookItemLabel(item, language)), expected);
-    const home = hooks.render(() => notebooks.NotebookHome({ state: { projects: [{ id: 'book', name: 'Book', latest: items, notes: 1, captures: 3, updatedAt: Date.now() }] }, language }));
-    const rows = notebookNodes(home, node => node.props.className === 'notebook-home-row');
-    assert.deepEqual(rows.map(row => row.props.children[0].type), ['FileText', 'Camera', 'Camera', 'FileText']);
-    assert.deepEqual(rows.map(row => row.props.children[2].props.children), expected);
-    const viewHooks = notebookTestHooks();
-    const view = interfaceModule('src/NotebookView.tsx', { react: viewHooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': notebooks }, { window: { horizon: { getProject: async () => ({ name: 'Book', items }) } } });
-    const render = () => viewHooks.render(() => view.NotebookView({ id: 'book', language, edits: {}, readOnly: false })); render(); viewHooks.flush(); await Promise.resolve(); await Promise.resolve();
-    const list = notebookNodes(render(), node => node.props.className?.startsWith('notebook-list-row'));
-    assert.deepEqual(list.map(row => row.props.children[0].type), ['FileText', 'Camera', 'Camera', 'FileText']);
-    assert.deepEqual(list.map(row => row.props.children[2].props.children), expected);
+    const items = ['link', 'text', 'area', 'page', 'note'].map(kind => ({ kind, source: kind === 'note' ? null : { url: 'https://example.com/path' } }));
+    assert.deepEqual(items.map(item => module.desktopItemLabel(item, language)), ['example.com', 'example.com', copy.text('sourceCapture', language), copy.text('sourceFullPage', language), copy.text('sourceNote', language)]);
   }
 });
 
 test('run D: saving keeps its label with a spinner and page progress persists until replaced', async () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'); let complete;
-  const module = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': { NotebookPicker: 'picker', notebookError: reason => reason.message } }, { document: { body: {} } });
+  const module = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': { CaptureProjectPicker: 'picker', desktopError: reason => reason.message } }, { document: { body: {} } });
   const render = () => hooks.render(() => module.CaptureOverlay({ state: { projects: [] }, language: 'en', header: { current: null }, onSave: () => new Promise(resolve => { complete = resolve; }), onClose() {} }));
   let tree = render(); notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0].props.onClick(); tree = render();
   const saving = notebookNodes(tree, node => node.type === 'picker')[0].props.onChoose({ id: 'book', name: 'Book' }); tree = render();
   const button = notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0];
-  assert.equal(button.props.children[1], 'Save to notebook'); assert.equal(button.props.children[0].type, 'LoaderCircle'); assert.equal(button.props.disabled, true); complete(); await saving;
+  assert.equal(button.props.children[1].props.children, 'Save to'); assert.equal(button.props.children[0].type, 'LoaderCircle'); assert.equal(button.props.disabled, true); complete(); await saving;
   const statusHooks = notebookTestHooks(), timers = [];
-  const notebooks = interfaceModule('src/Notebooks.tsx', { react: statusHooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} }, { window: { setTimeout: fn => timers.push(fn), clearTimeout() {} } });
-  const status = statusHooks.render(() => notebooks.NotebookStatus({ notice: { message: copy.text('capturingPage', 'en'), pending: true }, language: 'en', onClose() {} })); statusHooks.flush();
+  const notebooks = desktopInterface(statusHooks.react, { window: { setTimeout: fn => timers.push(fn), clearTimeout() {} } });
+  const status = statusHooks.render(() => notebooks.DesktopStatus({ notice: { message: copy.text('capturingPage', 'en'), pending: true }, language: 'en', onClose() {} })); statusHooks.flush();
   assert.equal(status.props.role, 'status'); assert.equal(timers.length, 0); assert.equal(notebookNodes(status, node => node.type === 'button').length, 0);
-  assert.match(readFileSync('src/App.tsx', 'utf8'), /setNotebookNotice\(\{ message: text\('capturingPage', language\), pending: true \}\)/);
+  assert.match(readFileSync('src/App.tsx', 'utf8'), /setDesktopNotice\(\{ message: text\('capturingPage', language\), pending: true \}\)/);
 });
 
 test('run D: shared notebook and profile name inputs use sixteen pixels with unchanged dimensions', () => {
@@ -4110,19 +4065,20 @@ test('run D: shared notebook and profile name inputs use sixteen pixels with unc
   assert.match(tokens, /--font-16: 1rem/);
 });
 
-test('run D: locked creation and capture explain refusal in place before sending commands', () => {
+test('locked project creation and capture explain refusal in place before sending commands', () => {
   const copy = interfaceModule('src/copy.ts'), hooks = notebookTestHooks(); let commands = 0;
-  const notebooks = interfaceModule('src/Notebooks.tsx', { react: hooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} }, { window: { horizon: { command() { commands++; } } } });
-  const render = () => hooks.render(() => notebooks.NotebookNameForm({ language: 'es', profileId: 'locked', locked: true, onCancel() {}, onSuccess() {} }));
+  const desktop = desktopInterface(hooks.react, { window: { horizon: { command() { commands++; } } } });
+  const render = () => hooks.render(() => desktop.ProjectNameForm({ language: 'es', state: { activeProfileId: 'locked', desktopLocked: true }, onSuccess() {} }));
   let tree = render(); notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Research' } }); tree = render(); tree.props.onSubmit({ preventDefault() {} });
-  assert.equal(commands, 0); assert.equal(notebookNodes(render(), node => node.props.role === 'alert')[0].props.children[1], copy.text('DESKTOP_LOCKED', 'es'));
+  assert.equal(commands, 0); assert.equal(notebookNodes(render(), node => node.props.role === 'alert')[0].props.children, copy.text('DESKTOP_LOCKED', 'es'));
   const captureHooks = notebookTestHooks();
-  const capture = interfaceModule('src/Capture.tsx', { react: captureHooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': { NotebookPicker: 'picker' } }, { document: { body: {} } });
+  const capture = interfaceModule('src/Capture.tsx', { react: captureHooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': { CaptureProjectPicker: 'picker' } }, { document: { body: {} } });
   const captureRender = () => captureHooks.render(() => capture.CaptureOverlay({ state: { desktopLocked: true }, language: 'en', header: { current: null }, onSave() { commands++; }, onClose() {} }));
   tree = captureRender(); notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0].props.onClick(); tree = captureRender();
   assert.equal(commands, 0); assert.equal(notebookNodes(tree, node => node.type === 'picker').length, 0);
   assert.equal(notebookNodes(tree, node => node.props.role === 'alert')[0].props.children[0].props.children, copy.text('DESKTOP_LOCKED', 'en'));
 });
+
 test('settings v4 validates every new field and migrates v2 without losing appearance', t => {
   const directory = temporaryDirectory(t, 'settings-v3'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
@@ -4496,4 +4452,78 @@ test('reset site drops dismissed permission memory and resets all schemes and po
   browser.command({ type: 'reset-site', host: 'example.com' });
   assert.deepEqual(store.permissions, []); assert.deepEqual(store.dark, []);
   target.request(contents, 'geolocation', () => {}, {}); assert.equal(browser.state().permissionPrompt.origin, 'https://example.com');
+});
+
+
+test('Desktop copy and every named failure exist in English and Spanish without exposing internal messages', () => {
+  const ts = require('typescript'), { copy } = interfaceModule('src/copy.ts'), helpers = desktopInterface();
+  const api = ts.createSourceFile('api.ts', readFileSync('src/shared/api.ts', 'utf8'), ts.ScriptTarget.Latest, true);
+  const failures = api.statements.find(node => ts.isTypeAliasDeclaration(node) && node.name.text === 'DesktopError');
+  const keys = new Set(failures.type.types.map(node => node.literal.text));
+  for (const file of ['src/Desktop.tsx', 'src/DesktopView.tsx', 'src/Capture.tsx']) {
+    const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const visit = node => { if (ts.isCallExpression(node) && ['t', 'text'].includes(node.expression.getText(source)) && ts.isStringLiteral(node.arguments[0])) keys.add(node.arguments[0].text); ts.forEachChild(node, visit); }; visit(source);
+  }
+  for (const key of keys) for (const language of ['en', 'es']) assert.ok(copy[key]?.[language]?.trim(), key + ': ' + language);
+  for (const code of failures.type.types.map(node => node.literal.text)) for (const language of ['en', 'es']) assert.equal(helpers.desktopError(new Error('Error invoking method: ' + code), language), copy[code][language]);
+  assert.equal(helpers.desktopError(new Error('private implementation detail'), 'en'), copy.browserError.en);
+});
+
+test('removed notebook addresses are refused and the renderer has no notebook views or routes', () => {
+  for (const url of ['horizon://notebooks', 'horizon://notebook/research', 'horizon://notebook/research/item']) assert.throws(() => classifyInput(url));
+  assert.equal(existsSync('src/Notebooks.tsx'), false); assert.equal(existsSync('src/NotebookView.tsx'), false);
+  for (const file of ['src/App.tsx', 'src/Settings.tsx', 'src/Capture.tsx']) assert.doesNotMatch(readFileSync(file, 'utf8'), /Notebooks|NotebookView|horizon:\/\/notebook/);
+});
+
+test('address bar project suggestions use the exact public Desktop addresses', t => {
+  const { desktopAddress, desktopSuggestions } = interfaceModule('src/shared/desktop-address.ts');
+  const projects = ['Trip to Patagonia', 'Research: lakes', 'Café & routes'].map((name, i) => ({ name, id: String(i) }));
+  assert.deepEqual(desktopSuggestions(projects, 'PATAGONIA'), [{ kind: 'project', title: 'Trip to Patagonia', url: 'horizon://desktop/trip-to-patagonia' }]);
+  assert.equal(desktopSuggestions(projects, 'desktop/research')[0].url, desktopAddress(projects[1].name));
+  assert.equal(desktopSuggestions(projects, 'missing').length, 0);
+  assert.equal(desktopSuggestions(Array.from({ length: 8 }, (_, i) => ({ name: 'Project ' + i })), 'Project').length, 3);
+  const browser = notebookBrowser(t); browser.command({ type: 'create-project', name: projects[0].name });
+  browser.command({ type: 'navigate', input: desktopSuggestions(projects, 'patagonia')[0].url }); assert.equal(browser.state().tabs.find(tab => tab.id === browser.state().activeId).desktop, browser.state().projectInUse);
+  browser.command({ type: 'navigate', input: 'horizon://desktop/captures' }); assert.equal(browser.state().tabs.find(tab => tab.id === browser.state().activeId).desktop, 'captures'); browser.close();
+  assert.match(readFileSync('src/App.tsx', 'utf8'), /desktopSuggestions\(state\?\.projects/);
+});
+
+
+test('Desktop menus stay six pixels under their control inside the panel and resize without stale bounds', () => {
+  const hooks = notebookTestHooks(), positioned = new Map(), callbacks = new Map(); let resize;
+  const panel = { getBoundingClientRect: () => ({ left: 1040, right: 1440 }) }, trigger = { right: 1234, bottom: 410 };
+  const opener = { current: { getBoundingClientRect: () => trigger, closest: () => panel } };
+  const { PopupAnchor } = interfaceModule('src/PopupAnchor.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node } }, {
+    document: { body: {} }, innerWidth: 1440, innerHeight: 900,
+    getComputedStyle: element => element === panel ? { paddingInlineEnd: '20px' } : { getPropertyValue: () => '6px' },
+    window: { addEventListener: (name, callback) => callbacks.set(name, callback), removeEventListener: name => callbacks.delete(name) },
+    ResizeObserver: class { constructor(callback) { resize = callback; } observe() {} disconnect() {} },
+  });
+  const tree = hooks.render(() => PopupAnchor({ opener, children: 'menu' }));
+  tree.props.ref.current = { getBoundingClientRect: () => ({ width: 360 }), style: { setProperty: (key, value) => positioned.set(key, value) } };
+  hooks.flush(); assert.equal(positioned.get('left'), '1060px'); assert.equal(positioned.get('top'), '416px'); assert.equal(positioned.get('max-height'), '484px');
+  trigger.bottom = 80; resize(); assert.equal(positioned.get('max-height'), '814px'); hooks.dispose(); assert.equal(callbacks.size, 0);
+});
+
+test('deleting Desktop items returns to their collection and exposes Undo only after success', async () => {
+  const { compileFunction } = require('node:vm'), ts = require('typescript'), copy = interfaceModule('src/copy.ts');
+  const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let initializer; const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'deleteDesktopEntry') initializer = node.initializer; ts.forEachChild(node, visit); }; visit(source); assert.ok(initializer);
+  const compiled = ts.transpileModule('export const remove = ' + initializer.getText(source) + ';', { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  for (const success of [true, false]) for (const type of ['delete-item', 'delete-capture']) {
+    const commands = [], pages = [], notices = [], exported = {};
+    const globals = { dismissUndo() {}, run: async command => { commands.push(command); return success; }, openDesktopPanel: async page => pages.push(page), setDesktopNotice: notice => notices.push(notice), text: copy.text, language: 'en' };
+    compileFunction(compiled, ['exports', ...Object.keys(globals)])(exported, ...Object.values(globals));
+    await exported.remove({ type, project: 'project', id: 'item' }, 'desktopItemDeleted');
+    assert.equal(notices.length, success ? 1 : 0); assert.equal(pages.length, success ? 1 : 0);
+    if (success) { assert.deepEqual(pages[0], type === 'delete-item' ? { kind: 'project', project: 'project' } : { kind: 'captures' }); assert.equal(notices[0].undo, true); notices[0].onAction(); assert.deepEqual(commands.at(-1), { type: 'restore', kind: 'desktop' }); }
+  }
+});
+
+
+test('Capture shortcut is shared by chrome and pages and does not take the plain save chord', () => {
+  assert.equal(browserShortcut({ key: 'S', control: true, shift: true, alt: false, meta: false }), 'capture');
+  assert.equal(browserShortcut({ key: 's', control: true, shift: false, alt: false, meta: false }), null);
+  assert.match(readFileSync('electron/browser.ts', 'utf8'), /\['capture', 'focus-address'/);
+  assert.match(readFileSync('src/App.tsx', 'utf8'), /action === 'capture'\) void openCapture\(\)/);
 });

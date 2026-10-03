@@ -7,7 +7,7 @@ import { PROFILE_COLORS, SEARCH_ENGINES, SITE_PERMISSIONS } from './shared/api';
 import type { BrowserCommand, BrowserState, ClearedBrowsingData, Language, SettingsSection, SitePermission, SiteSettingsEntry } from './shared/api';
 import { HorizonMark } from './HorizonMark';
 import { Menu } from './Menu';
-import { NotebookAnchor } from './Notebooks';
+import { PopupAnchor } from './PopupAnchor';
 import { ProfilesSettings } from './Profiles';
 import { Switch } from './Switch';
 
@@ -80,9 +80,9 @@ function SettingsDropdown<T extends string>({ id, label, value, choices, disable
   return <div className="settings-dropdown"><button className="settings-dropdown-button" type="button" ref={opener} disabled={disabled} aria-labelledby={`${id}-title ${id}-value`} aria-describedby={`${id}-hint`} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? `${id}-menu` : undefined} onClick={() => setOpen(previous => !previous)} onKeyDown={event => {
     if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); setOpen(true); }
   }}><span id={`${id}-value`}>{selected?.label}</span><span className="settings-dropdown-chevron"><ChevronDown aria-hidden="true" /></span></button>
-    {open && <NotebookAnchor opener={opener}><Menu id={`${id}-menu`} className="settings-dropdown-menu" label={text(label, language)} keyboard initialFocus="[aria-checked=true]" opener={opener} onDismiss={reason => close(reason !== 'outside')}>
+    {open && <PopupAnchor opener={opener}><Menu id={`${id}-menu`} className="settings-dropdown-menu" label={text(label, language)} keyboard initialFocus="[aria-checked=true]" opener={opener} onDismiss={reason => close(reason !== 'outside')}>
       {choices.map(choice => <button type="button" role="menuitemradio" tabIndex={-1} aria-checked={choice.value === value} key={choice.value} onClick={() => { close(); if (choice.value !== value) onChange(choice.value); }}><span>{choice.label}</span>{choice.value === value && <Check aria-hidden="true" />}</button>)}
-    </Menu></NotebookAnchor>}
+    </Menu></PopupAnchor>}
   </div>;
 }
 

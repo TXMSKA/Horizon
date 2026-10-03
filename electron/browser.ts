@@ -659,7 +659,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (shortcut === 'stop' && !contents.isLoading()) return;
         event.preventDefault();
         if (!isCurrent() || tab.state.id !== activeId) return;
-        if (['focus-address', 'find', 'favorites', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
+        if (['capture', 'focus-address', 'find', 'favorites', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
         window.webContents.send(IPC.shortcut, shortcut);
       });
       contents.on('zoom-changed', (_event, direction) => { if (tab.view === view && isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
