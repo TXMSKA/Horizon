@@ -2,17 +2,18 @@ import { useLayoutEffect, useRef } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { createPortal } from 'react-dom';
 
-export function PopupAnchor({ opener, children, portalHost }: { opener: RefObject<HTMLElement | null>; children: ReactNode; portalHost?: RefObject<HTMLElement | null> }) {
+export function PopupAnchor({ opener, children, portalHost, anchor }: { opener: RefObject<HTMLElement | null>; children: ReactNode; portalHost?: RefObject<HTMLElement | null>; anchor?: RefObject<HTMLElement | null> }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const popup = ref.current;
     if (!popup) return;
     const position = () => {
-      const trigger = opener.current?.getBoundingClientRect();
+      const trigger = (anchor?.current ?? opener.current)?.getBoundingClientRect();
       if (!trigger) return;
       const gap = Number.parseFloat(getComputedStyle(popup).getPropertyValue('--toolbar-popup-gap'));
+      if (anchor?.current) popup.style.setProperty('width', `${trigger.width}px`);
       const { width } = popup.getBoundingClientRect();
-      const panel = opener.current?.closest<HTMLElement>('.desktop-panel');
+      const panel = opener.current?.closest<HTMLElement>('.desktop-panel-body');
       const area = panel?.getBoundingClientRect(), padding = panel ? Number.parseFloat(getComputedStyle(panel).paddingInlineEnd) : gap;
       const start = area ? area.left + padding : gap, end = area ? area.right - padding : innerWidth - gap;
       // Capture choosers stay inside the panel, clear of the native page view.
@@ -23,9 +24,9 @@ export function PopupAnchor({ opener, children, portalHost }: { opener: RefObjec
       popup.style.setProperty('max-height', `${Math.max(0, innerHeight - trigger.bottom - gap)}px`);
     };
     const observer = new ResizeObserver(position);
-    observer.observe(popup); if (opener.current) observer.observe(opener.current);
+    observer.observe(popup); if (opener.current) observer.observe(opener.current); if (anchor?.current) observer.observe(anchor.current);
     window.addEventListener('resize', position); window.addEventListener('scroll', position, true); position();
     return () => { observer.disconnect(); window.removeEventListener('resize', position); window.removeEventListener('scroll', position, true); };
-  }, [opener]);
+  }, [opener, anchor]);
   return createPortal(<div className="popup-anchor" ref={ref}>{children}</div>, portalHost?.current ?? document.body);
 }

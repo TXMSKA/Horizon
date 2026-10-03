@@ -272,7 +272,7 @@ test('Hub tiles, dock and menus support keyboard opening, pending saves, retry a
   const state = { quickAccess: [] }, opener = { current: { contains: () => false } }, focus = { focus: () => focused++ };
   const render = () => hooks.render(() => Hub({ state, language: 'en', page, opener, onPage: value => { page = value; }, onAnnounce: value => announced.push(value), onDismiss: value => dismissed.push(value) }));
   const nodes = (tree, role) => notebookNodes(tree, node => node.props.role === role);
-  const tile = tree => notebookNodes(tree, node => node.props.className === 'hub-tile')[0];
+  const tile = tree => notebookNodes(tree, node => node.props.className === 'hub-tile').find(node => node.props.children[1].props.children === 'Themes');
   const key = (key, shiftKey = false) => ({ key, shiftKey, preventDefault() {}, stopPropagation() {} });
   let tree = render(), dialog = nodes(tree, 'dialog')[0];
   dialog.props.ref.current = { contains: () => false, querySelector: () => focus, querySelectorAll: () => [] };
@@ -4674,4 +4674,77 @@ test('Capture shortcut is shared by chrome and pages and does not take the plain
   assert.equal(browserShortcut({ key: 's', control: true, shift: false, alt: false, meta: false }), null);
   assert.match(readFileSync('electron/browser.ts', 'utf8'), /\['capture', 'focus-address'/);
   assert.match(readFileSync('src/App.tsx', 'utf8'), /action === 'capture'\) void openCapture\(\)/);
+});
+
+
+test('Desktop tab titles and card metadata follow the board in both languages', () => {
+  const helpers = desktopInterface(), now = new Date(2026, 9, 3, 12).getTime(), yesterday = new Date(2026, 9, 2, 12).getTime();
+  for (const [language, title, captures, updated, from] of [['en', 'Desktop: Research', 'Desktop: Captures', 'Updated yesterday', 'From example.com · today'], ['es', 'Escritorio: Research', 'Escritorio: Capturas', 'Actualizado ayer', 'De example.com · hoy']]) {
+    assert.equal(helpers.desktopTabTitle({ desktop: 'project', title: 'Research' }, language), title);
+    assert.equal(helpers.desktopTabTitle({ desktop: 'captures', title: 'Captures' }, language), captures);
+    assert.equal(helpers.desktopCardLabel({ kind: 'note', updatedAt: yesterday }, language, now), updated);
+    for (const kind of ['area', 'page']) assert.equal(helpers.desktopCardLabel({ kind, source: { url: 'https://example.com/map' }, createdAt: now }, language, now), from);
+    assert.equal(helpers.desktopCardLabel({ kind: 'link', source: { url: 'https://example.com/page' } }, language, now), 'example.com');
+  }
+  const app = readFileSync('src/App.tsx', 'utf8');
+  assert.equal(app.split('tab.desktop ? desktopTabTitle(tab, language)').length - 1, 2);
+  assert.ok(readFileSync('src/DesktopView.tsx', 'utf8').includes('desktopCardLabel(item, language)'));
+});
+
+test('the Hub draws Desktop first and focuses its first built tile', () => {
+  assert.deepEqual(require('../dist/src/shared/api.js').HUB_APPS, ['desktop', 'themes']);
+  const hub = readFileSync('src/Hub.tsx', 'utf8');
+  assert.match(hub, /HUB_APPS.map/);
+  assert.ok(hub.includes("querySelector<HTMLButtonElement>(page === 'home' ? '.hub-tile'"));
+});
+
+test('non-project panel pages expose a drop hint only during a candidate drag and keep dropping', async () => {
+  for (const language of ['en', 'es']) {
+    const hooks = notebookTestHooks(), commands = [], items = [], state = { activeProfileId: 'profile', tabs: [] };
+    const { DesktopDrop } = dropInterface(hooks.react, { window: { horizon: { getState: async () => state, getProject: async () => ({ items: [...items] }), command: async command => { commands.push(command); items.push({ id: 'kept' }); } } } });
+    const props = { state, language, edits: { flush: async () => {} }, onDropped() {} };
+    const render = () => hooks.render(() => DesktopDrop({ props, project: 'project', className: 'desktop-panel-body', transientName: 'Research', children: 'Panel content' }));
+    let tree = render(); hooks.flush();
+    const hint = () => notebookNodes(render(), node => node.props.className === 'desktop-project-foot');
+    assert.equal(hint().length, 0);
+    const event = types => ({ preventDefault() {}, stopPropagation() {}, currentTarget: { contains: () => false }, relatedTarget: null, dataTransfer: { types, getData: type => type === 'text/uri-list' ? 'https://example.com/' : '' } });
+    const target = () => notebookNodes(render(), node => !!node.props.onDrop)[0];
+    target().props.onDragEnter(event(['Files'])); assert.equal(hint().length, 0);
+    target().props.onDragOver(event(['text/uri-list'])); assert.equal(hint().length, 1);
+    target().props.onDragLeave(event([])); assert.equal(hint().length, 0);
+    target().props.onDragEnter(event(['text/uri-list'])); target().props.onDrop(event(['text/uri-list']));
+    await new Promise(setImmediate); assert.equal(commands.length, 1); assert.equal(hint().length, 0); hooks.dispose();
+    for (const page of [{ kind: 'home' }, { kind: 'captures' }, { kind: 'new-project' }, { kind: 'item', project: 'project', id: 'page' }, { kind: 'item', project: 'project', id: 'note' }, { kind: 'project', project: 'project' }]) {
+      const panelHooks = notebookTestHooks(), module = desktopViewInterface(panelHooks.react, desktopInterface(panelHooks.react));
+      tree = panelHooks.render(() => module.DesktopPanel({ props: { ...props, state: { ...state, desktopPanel: { page }, projectInUse: 'project', projects: [{ id: 'project', name: 'Research' }] } }, onClose() {}, onTab() {} }));
+      const transient = notebookNodes(tree, node => node.type === 'drop' && node.props.transientName);
+      assert.equal(transient.length, page.kind === 'project' ? 0 : 1);
+    }
+  }
+});
+
+
+test('link and action chooser openers keep menus without field decorations', () => {
+  for (const [variant, className] of [['link', 'desktop-small-link'], ['action', 'desktop-action']]) {
+    const hooks = notebookTestHooks(), module = desktopInterface(hooks.react);
+    const render = () => hooks.render(() => module.DesktopDropdown({ label: 'Choose', value: '', variant, choices: [{ id: 'one', name: 'One' }], onChoose() {} }));
+    let tree = render(), button = notebookNodes(tree, node => node.type === 'button')[0];
+    assert.equal(button.props.className, className);
+    assert.equal(notebookNodes(tree, node => node.props.className === 'desktop-dropdown-chevron').length, 0);
+    button.props.onClick(); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'menu').length, 1);
+  }
+});
+
+test('capture chooser follows the whole bar width and opens six pixels below it', () => {
+  const hooks = notebookTestHooks(), positioned = new Map(); let resize, bounds = { left: 507, right: 948, bottom: 170, width: 441 };
+  const anchor = { current: { getBoundingClientRect: () => bounds } }, opener = { current: { closest: () => null } };
+  const { PopupAnchor } = interfaceModule('src/PopupAnchor.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node } }, {
+    document: { body: {} }, innerWidth: 1455, innerHeight: 900, getComputedStyle: () => ({ getPropertyValue: () => '6px' }),
+    window: { addEventListener() {}, removeEventListener() {} }, ResizeObserver: class { constructor(callback) { resize = callback; } observe() {} disconnect() {} },
+  });
+  const tree = hooks.render(() => PopupAnchor({ opener, anchor, children: 'chooser' }));
+  tree.props.ref.current = { style: { setProperty: (key, value) => positioned.set(key, value) }, getBoundingClientRect: () => ({ width: Number.parseFloat(positioned.get('width')) }) };
+  hooks.flush(); assert.equal(positioned.get('width'), '441px'); assert.equal(positioned.get('left'), '507px'); assert.equal(positioned.get('top'), '176px');
+  bounds = { left: 480, right: 980, bottom: 180, width: 500 }; resize();
+  assert.equal(positioned.get('width'), '500px'); assert.equal(positioned.get('left'), '480px'); assert.equal(positioned.get('top'), '186px'); hooks.dispose();
 });

@@ -1,10 +1,10 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode, RefObject, TextareaHTMLAttributes } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, FileText, Folder, LayoutDashboard, LoaderCircle, Plus, Scan, X } from 'lucide-react';
+import { Camera, Check, ChevronDown, FileText, Folder, LayoutDashboard, LoaderCircle, Plus, Scan, X } from 'lucide-react';
 import { copy, text } from './copy';
 import type { CopyKey } from './copy';
-import type { BrowserState, CaptureSummary, DesktopItemContent, Language, ProjectSummary } from './shared/api';
+import type { BrowserState, CaptureSummary, DesktopItemContent, Language, ProjectSummary, TabState } from './shared/api';
 import { Menu } from './Menu';
 import { PopupAnchor } from './PopupAnchor';
 
@@ -35,6 +35,14 @@ export function desktopItemLabel(item: Pick<DesktopItemContent, 'kind' | 'source
   if (item.kind === 'note') return text('sourceNote', language);
   if (item.kind === 'link' || item.kind === 'text') return itemSite(item.source?.url ?? '') || text('noteText', language);
   return text(item.kind === 'page' ? 'sourceFullPage' : 'sourceCapture', language);
+}
+export function desktopTabTitle(tab: Pick<TabState, 'desktop' | 'title'>, language: Language): string {
+  return text('desktopTabTitle', language).replace('{name}', tab.desktop === 'captures' ? text('captures', language) : tab.title);
+}
+export function desktopCardLabel(item: Pick<DesktopItemContent, 'kind' | 'source' | 'createdAt' | 'updatedAt'>, language: Language, now = Date.now()): string {
+  if (item.kind === 'note') return text('desktopUpdatedDate', language).replace('{date}', relativeDesktopDate(item.updatedAt, language, now));
+  if (item.kind === 'area' || item.kind === 'page') return text('desktopFromDate', language).replace('{site}', itemSite(item.source?.url ?? '')).replace('{date}', relativeDesktopDate(item.createdAt, language, now));
+  return desktopItemLabel(item, language);
 }
 export function ItemMark({ item }: { item: Pick<DesktopItemContent, 'kind' | 'source' | 'title'> }) {
   return <span className="desktop-mark" aria-hidden="true">{item.kind === 'link' ? <span className="desktop-site-badge">{(itemSite(item.source?.url ?? '') || item.title).slice(0, 1).toUpperCase()}</span> : item.kind === 'area' || item.kind === 'page' ? <Scan className="accent" /> : <FileText />}</span>;
@@ -72,11 +80,11 @@ export function CaptureImage({ project, item, language, preview = false }: { pro
   return <div ref={box} className={`desktop-image${preview ? ' preview' : ''}`} aria-busy={!image && !failed}>{failed ? <div className="desktop-image-error" role="alert"><p className={preview ? 'visually-hidden' : undefined}>{text('captureImageFailed', language)}</p><button className="desktop-small-link" type="button" onClick={() => setAttempt(previous => previous + 1)}>{text('retry', language)}</button></div> : image ? <img src={image} alt={text('captureImage', language).replace('{title}', item.title)} onError={() => { URL.revokeObjectURL(image); setImage(null); setFailed(true); }} /> : <div className="desktop-skeleton" role="status"><span className="visually-hidden">{text('loading', language)}</span></div>}</div>;
 }
 
-export function DesktopDropdown({ label, value, lead, choices, onChoose, disabled = false, display }: { label: string; value: string; lead?: ReactNode; choices: { id: string; name: string; lead?: ReactNode }[]; onChoose: (id: string) => void; disabled?: boolean; display?: string }) {
+export function DesktopDropdown({ label, value, lead, choices, onChoose, disabled = false, display, variant = 'field' }: { label: string; value: string; lead?: ReactNode; choices: { id: string; name: string; lead?: ReactNode }[]; onChoose: (id: string) => void; disabled?: boolean; display?: string; variant?: 'field' | 'link' | 'action' }) {
   const [open, setOpen] = useState(false), opener = useRef<HTMLButtonElement>(null), id = useId();
   const close = (focus = true) => { setOpen(false); if (focus) opener.current?.focus(); };
-  return <div className="desktop-dropdown"><button className="desktop-dropdown-control" ref={opener} type="button" disabled={disabled} aria-label={label} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(previous => !previous)} onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true); } }}>
-    {lead}<span>{display ?? choices.find(choice => choice.id === value)?.name ?? label}</span><span className="desktop-dropdown-chevron"><ChevronDown aria-hidden="true" /></span>
+  return <div className="desktop-dropdown"><button className={variant === 'link' ? 'desktop-small-link' : variant === 'action' ? 'desktop-action' : 'desktop-dropdown-control'} ref={opener} type="button" disabled={disabled} aria-label={label} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(previous => !previous)} onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true); } }}>
+    {lead}<span>{display ?? choices.find(choice => choice.id === value)?.name ?? label}</span>{variant === 'field' && <span className="desktop-dropdown-chevron"><ChevronDown aria-hidden="true" /></span>}
   </button>{open && <PopupAnchor opener={opener}><Menu id={id} className="desktop-choice-menu" label={label} keyboard initialFocus="[aria-checked=true]" opener={opener} onDismiss={reason => close(reason !== 'outside')}>
     {choices.map(choice => <button key={choice.id} type="button" role="menuitemradio" aria-checked={choice.id === value} tabIndex={-1} onClick={() => { close(); onChoose(choice.id); }}>{choice.lead}<span>{choice.name}</span>{choice.id === value && <Check aria-hidden="true" />}</button>)}
   </Menu></PopupAnchor>}</div>;
@@ -109,10 +117,10 @@ export function DesktopNameDialog({ state, language, folder, opener, onClose, on
   }, [onModalChange, opener]);
   return createPortal(<dialog ref={dialog} className="desktop-dialog" aria-labelledby={id} onCancel={event => { event.preventDefault(); onClose(); }} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); } }}><h2 id={id}>{text(folder ? 'newFolder' : 'newProject', language)}</h2><ProjectNameForm state={state} language={language} folder={folder} onSuccess={onSuccess} /><button className="desktop-action" type="button" onClick={onClose}>{text('cancel', language)}</button></dialog>, document.body);
 }
-export function CaptureProjectPicker({ state, language, opener, screenshots, onClose, onChoose, portalHost }: { state: BrowserState; language: Language; opener: RefObject<HTMLElement | null>; screenshots: boolean; onClose: () => void; onChoose: (project: ProjectSummary | null) => Promise<void>; portalHost?: RefObject<HTMLElement | null> }) {
+export function CaptureProjectPicker({ state, language, opener, screenshots, onClose, onChoose, portalHost, anchor }: { state: BrowserState; language: Language; opener: RefObject<HTMLElement | null>; screenshots: boolean; onClose: () => void; onChoose: (project: ProjectSummary | null) => Promise<void>; portalHost?: RefObject<HTMLElement | null>; anchor?: RefObject<HTMLElement | null> }) {
   const [creating, setCreating] = useState(false), id = useId();
   const sorted = [...state.projects].sort((a, b) => Number(b.id === state.projectInUse) - Number(a.id === state.projectInUse) || b.usedAt - a.usedAt);
-  return creating ? <DesktopNameDialog state={state} language={language} opener={opener} onClose={onClose} onSuccess={onChoose} /> : <PopupAnchor opener={opener} portalHost={portalHost}><Menu id={id} className="desktop-choice-menu capture-project-menu" label={text('saveTo', language)} keyboard opener={opener} onDismiss={reason => { onClose(); if (reason !== 'outside') opener.current?.focus(); }}>
+  return creating ? <DesktopNameDialog state={state} language={language} opener={opener} onClose={onClose} onSuccess={onChoose} /> : <PopupAnchor opener={opener} portalHost={portalHost} anchor={anchor}><Menu id={id} className="desktop-choice-menu capture-project-menu" label={text('saveTo', language)} keyboard opener={opener} onDismiss={reason => { onClose(); if (reason !== 'outside') opener.current?.focus(); }}>
     <button type="button" role="menuitem" tabIndex={-1} disabled={!screenshots} onClick={() => { void onChoose(null); }}><Scan aria-hidden="true" /><span>{text('captures', language)}</span>{!screenshots && <small>{text('screenshotsOnly', language)}</small>}</button>
     {sorted.map(project => <button type="button" role="menuitem" tabIndex={-1} key={project.id} onClick={() => { void onChoose(project); }}><Folder aria-hidden="true" /><span>{project.name}</span></button>)}
     <hr role="separator" /><button type="button" role="menuitem" tabIndex={-1} onClick={() => setCreating(true)}><Plus aria-hidden="true" /><span>{text('newProject', language)}</span></button>
@@ -125,7 +133,7 @@ export function DesktopResume({ state, language, onOpen, onNew }: { state: Brows
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 60000); return () => window.clearInterval(timer); }, []);
   const t = (key: CopyKey) => text(key, language);
   if (!project) return <section className="desktop-first-use"><h2><LayoutDashboard className="accent" aria-hidden="true" />{t('emptyDesktopTitle')}</h2><p>{t('emptyDesktop')}</p><button className="desktop-action primary" type="button" onClick={event => onNew(event.currentTarget)}>{t('newProject')}</button></section>;
-  return <section aria-label={t('resumeProject').replace('{name}', project.name)}><button className="desktop-resume" type="button" onClick={() => onOpen(project.id)}><LayoutDashboard className="accent" aria-hidden="true" /><strong>{project.name}</strong><small>{itemCount(projectSize(project), language)}, {relativeDesktopDate(project.updatedAt, language, now)}</small></button><ul className="notes">{project.latest.map(item => <li key={item.id}><button className="desktop-home-row" type="button" onClick={() => onOpen(project.id, item.id)}><ItemMark item={item} /><span>{item.title || t('newNote')}</span><small>{desktopItemLabel(item, language)}</small></button></li>)}</ul></section>;
+  return <section aria-label={t('resumeProject').replace('{name}', project.name)}><button className="desktop-resume" type="button" onClick={() => onOpen(project.id)}><LayoutDashboard className="accent" aria-hidden="true" /><strong>{project.name}</strong><small>{itemCount(projectSize(project), language)}, {relativeDesktopDate(project.updatedAt, language, now)}</small></button><ul className="notes">{project.latest.map(item => <li key={item.id}><button className="desktop-home-row" type="button" onClick={() => onOpen(project.id, item.id)}><span className="desktop-mark" aria-hidden="true">{item.kind === 'area' || item.kind === 'page' ? <Camera /> : <FileText />}</span><span>{item.title || t('newNote')}</span><small>{desktopItemLabel(item, language)}</small></button></li>)}</ul></section>;
 }
 
 export type DesktopNotice = { message: string; action?: string; onAction?: () => void; failure?: boolean; undo?: boolean; pending?: boolean };

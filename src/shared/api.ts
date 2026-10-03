@@ -15,7 +15,7 @@ export interface ClearedBrowsingData { history: boolean; cookies: boolean; cache
 export type SettingsError = 'SETTINGS_COMMAND_INVALID' | 'SETTINGS_TAB_LIMIT' | 'SITE_SETTINGS_SAVE_FAILED' | 'SETTINGS_SAVE_FAILED' | 'SEARCH_ENGINE_INVALID' | 'LANGUAGE_INVALID' | 'DOWNLOADS_FOLDER_INVALID' | 'DOWNLOADS_FOLDER_PICK_FAILED' | 'ASK_WHERE_TO_SAVE_INVALID' | 'BLOCK_ADS_INVALID' | 'BLOCK_THIRD_PARTY_COOKIES_INVALID' | 'PROFILE_SETTINGS_SAVE_FAILED' | 'CLEAR_IN_PROGRESS' | 'CLEAR_HISTORY_FAILED' | 'CLEAR_SITE_DATA_FAILED' | 'CLEAR_CACHE_FAILED' | 'DEFAULT_BROWSER_UNSUPPORTED' | 'DEFAULT_BROWSER_DEVELOPMENT_BUILD' | 'DEFAULT_BROWSER_REGISTRATION_FAILED' | 'DEFAULT_BROWSER_SETTINGS_FAILED';
 export type Theme = 'system' | 'amber' | 'daylight';
 export type Contrast = 'standard' | 'high';
-export const HUB_APPS = ['themes', 'desktop'] as const;
+export const HUB_APPS = ['desktop', 'themes'] as const;
 export type HubApp = typeof HUB_APPS[number];
 export const QUICK_ACCESS_LIMIT = 6;
 export type DarkPagesMode = 'off' | 'on' | 'system';

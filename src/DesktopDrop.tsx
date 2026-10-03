@@ -30,9 +30,9 @@ type DropProps = {
   state: BrowserState; language: Language; edits: DesktopEdits; readOnly: boolean;
   onDropped: (project: string, item: string) => void;
 };
-export function DesktopDrop({ props, project, folder = null, children, className = 'desktop-drop', onKept }: {
+export function DesktopDrop({ props, project, folder = null, children, className = 'desktop-drop', onKept, transientName }: {
   props: DropProps; project: string; folder?: string | null; children?: ReactNode; className?: string;
-  onKept?: () => void;
+  onKept?: () => void; transientName?: string;
 }) {
   const { state, language, edits, onDropped } = props;
   const [over, setOver] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
@@ -84,7 +84,7 @@ export function DesktopDrop({ props, project, folder = null, children, className
     onDragEnter={enter} onDragOver={enter} onDrop={drop} onDragLeave={event => {
       if (!event.currentTarget.contains(event.relatedTarget as Node | null)) { setOver(false); origin.current = null; }
     }}>
-    {children ?? <><Link aria-hidden="true" /><p>{text(over ? 'desktopDropRelease' : 'desktopDropHint', language)}</p></>}
+    {children}{transientName ? over && <div className="desktop-project-foot"><small>{text('desktopDropInto', language).replace('{name}', transientName)}</small><div className="desktop-drop drag-over"><Link aria-hidden="true" /><p>{text('desktopDropRelease', language)}</p></div></div> : !children && <><Link aria-hidden="true" /><p>{text(over ? 'desktopDropRelease' : 'desktopDropHint', language)}</p></>}
   </div><div className="desktop-drop-status" role="status" aria-live="polite">{busy && <><LoaderCircle className="spinner" aria-hidden="true" />{text('desktopDropSaving', language)}</>}</div>
     {error && <p className="desktop-error" role="alert">{error}</p>}
   </>;
