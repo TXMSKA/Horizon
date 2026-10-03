@@ -6,6 +6,8 @@ import { isWebURL } from './browsing';
 import { isProfileId } from './profiles';
 import { encryptedStore, readStoreFile, writeStoreFile } from './store';
 import type { StoreCipher, StoreReadStatus } from './store';
+import { desktopText, desktopInputText, desktopTitle } from '../src/shared/desktop-input';
+export { desktopText, desktopInputText, desktopTitle } from '../src/shared/desktop-input';
 export { desktopAddress } from '../src/shared/desktop-address';
 
 export const PROJECT_LIMIT = 200;
@@ -19,15 +21,6 @@ const captureName = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}
 function object(value: unknown, keys: string[]): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
-}
-export function desktopText(value: unknown, maximum: number): value is string {
-  return typeof value === 'string' && value.length <= maximum && !value.includes('\0');
-}
-export function desktopInputText(value: unknown, maximum: number): value is string {
-  return desktopText(value, maximum) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(value);
-}
-export function desktopTitle(value: unknown, maximum = 200): value is string {
-  return desktopInputText(value, maximum) && !/[\t\r\n]/.test(value);
 }
 export function folderName(value: unknown): string {
   try { return projectName(value); } catch (error) {

@@ -30,6 +30,7 @@ import type { DesktopNotice } from './Desktop';
 import { DesktopPanel, DesktopTab } from './DesktopView';
 import { desktopSuggestions } from './shared/desktop-address';
 import { DesktopEdits } from './shared/desktop-edits';
+import { DESKTOP_TAB_DRAG, parseDesktopDrag } from './shared/desktop-drag';
 import { Settings, settingsError } from './Settings';
 
 type Panel = LibraryPanel | null;
@@ -511,7 +512,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
     catch { setError(t('actionError')); }
   };
   const closeDesktopNotice = useCallback(() => setDesktopNotice(null), []);
-  const desktopProps = state ? { state, language, edits, readOnly: desktopLeaving, run, onPage: openDesktopPanel, onDelete: deleteDesktopEntry, onModalChange: setDesktopModalOpen } : null;
+  const [addedItem, setAddedItem] = useState<{ profile: string; project: string; id: string } | null>(null);
+  useEffect(() => { if (addedItem) { const timer = window.setTimeout(() => setAddedItem(null), 8000); return () => window.clearTimeout(timer); } }, [addedItem]);
+  const desktopProps = state ? { state, language, edits, readOnly: desktopLeaving, run, onPage: openDesktopPanel, onDelete: deleteDesktopEntry, onModalChange: setDesktopModalOpen, addedItem, onDropped: (project: string, id: string) => setAddedItem({ profile: state.activeProfileId, project, id }) } : null;
 
   return <>
     <div className="visually-hidden" role="status" aria-live="polite">{announcement}</div>
@@ -522,6 +525,14 @@ export function App({ language: initialLanguage }: { language: Language }) {
         <nav className="tabs" role="tablist" aria-label={t('tabs')}>
           {state?.tabs.map((tab, index) => <div className={`tab${tab.id === state.activeId ? ' active' : ''}`} key={tab.id} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'close-tab', id: tab.id }); } }}>
             <button id={`tab-${tab.id}`} className="tab-select" role="tab" type="button" aria-selected={tab.id === state.activeId} aria-controls="content" tabIndex={tab.id === state.activeId ? 0 : -1}
+              draggable={!tab.desktop && !tab.settings && Boolean(parseDesktopDrag({ tab: { url: tab.url, title: tab.title } }))}
+              onDragStart={event => {
+                if (tab.desktop || tab.settings || !parseDesktopDrag({ tab: { url: tab.url, title: tab.title } })) { event.preventDefault(); return; }
+                event.dataTransfer.effectAllowed = 'copy';
+                event.dataTransfer.setData(DESKTOP_TAB_DRAG, JSON.stringify({ profile: state.activeProfileId, tab: tab.id }));
+                event.dataTransfer.setData('text/uri-list', tab.url);
+                event.dataTransfer.setData('text/plain', tab.title || tab.url);
+              }}
               title={tab.settings ? t('settings') : tab.title || t('home')} onClick={() => { closeFind(); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }); }}
               onKeyDown={event => {
                 let next = index;

@@ -1,11 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ExternalLink, Folder, FolderInput, FolderPlus, LayoutDashboard, Link, LoaderCircle, Plus, Trash2, X } from 'lucide-react';
+import { ExternalLink, Folder, FolderInput, FolderPlus, LayoutDashboard, LoaderCircle, Plus, Trash2, X } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import type { BrowserCommand, BrowserState, DesktopItemContent, DesktopPanelPage, Language, ProjectContent } from './shared/api';
 import type { DesktopEdits } from './shared/desktop-edits';
 import { CaptureImage, DesktopDropdown, DesktopNameDialog, desktopError, desktopItemLabel, GrowingTextArea, itemCount, ItemMark, itemSite, ProjectNameForm, projectCounts, projectSize, relativeDesktopDate } from './Desktop';
+import { DesktopDrop } from './DesktopDrop';
 
 type DesktopProps = {
   state: BrowserState; language: Language; edits: DesktopEdits; readOnly: boolean;
@@ -13,6 +14,8 @@ type DesktopProps = {
   onPage: (page: DesktopPanelPage, opener?: HTMLElement) => Promise<boolean>;
   onDelete: (command: BrowserCommand, message: CopyKey) => Promise<void>;
   onModalChange: (open: boolean) => void;
+  onDropped: (project: string, item: string) => void;
+  addedItem?: { profile: string; project: string; id: string } | null;
 };
 function Feedback({ error, language, onRetry }: { error: string; language: Language; onRetry: () => void }) {
   return <div className="desktop-feedback" role="alert"><p>{error}</p><button className="desktop-action" type="button" onClick={onRetry}>{text('retry', language)}</button></div>;
@@ -50,6 +53,7 @@ function ProjectBody({ project, folder, props, tab = false, selected }: { projec
   const chosenFolder = tab ? project.folders.some(entry => entry.id === tabFolder) ? tabFolder : null : folder;
   const items = [...project.items].reverse().filter(item => !chosenFolder || item.folder === chosenFolder);
   const summary = state.projects.find(entry => entry.id === project.id);
+  const added = props.addedItem?.profile === state.activeProfileId && props.addedItem.project === project.id ? props.addedItem.id : null;
   const disabled = state.desktopLocked || props.readOnly || busy;
   const add = async () => {
     if (pending.current) return;
@@ -64,15 +68,15 @@ function ProjectBody({ project, folder, props, tab = false, selected }: { projec
   };
   const noteButton = <button className="desktop-action" type="button" disabled={disabled} onClick={() => { void add(); }}><Plus aria-hidden="true" />{t('newNote')}</button>;
   const filter = (folder: string | null) => { if (tab) setTabFolder(folder); else void onPage({ kind: 'project', project: project.id, folder }); };
-  if (!project.items.length) return <><div className="desktop-title-block"><h1>{project.name}</h1><small>{itemCount(0, language)}</small></div><p className="desktop-empty-hint">{t('emptyProject')}</p>{noteButton}{error && <Feedback language={language} error={error} onRetry={() => { void add(); }} />}</>;
+  if (!project.items.length) return <><div className="desktop-title-block"><h1>{project.name}</h1><small>{itemCount(0, language)}</small></div><DesktopDrop props={props} project={project.id} folder={chosenFolder} className="desktop-empty"><p className="desktop-empty-hint">{t('emptyProject')}</p></DesktopDrop>{noteButton}{error && <Feedback language={language} error={error} onRetry={() => { void add(); }} />}</>;
   return <>{tab ? <><div className="desktop-tab-heading"><h1>{project.name}</h1><small>{summary && projectCounts(summary, language)}</small></div><div className="desktop-actions">{noteButton}</div></> : <div className="desktop-project-heading"><DesktopDropdown label={t('chooseProject')} value={project.id} lead={<LayoutDashboard className="accent" aria-hidden="true" />} choices={state.projects.map(entry => ({ id: entry.id, name: entry.name, lead: <Folder aria-hidden="true" /> }))} disabled={disabled} onChoose={id => { void onPage({ kind: 'project', project: id }); }} /><small>{summary && projectCounts(summary, language)}</small></div>}
     <Filters project={project} folder={chosenFolder} onFilter={filter} language={language} tab={tab} />
     {error && <Feedback language={language} error={error} onRetry={() => { void add(); }} />}
-    {items.length ? <div className={tab ? 'desktop-cards' : 'desktop-items'}>{items.map(item => tab ? <article className={`desktop-card${selected === item.id ? ' selected' : ''}`} key={item.id}>
+    <DesktopDrop props={props} project={project.id} folder={chosenFolder} className={tab ? 'desktop-cards' : 'desktop-items'}>{items.length ? items.map(item => tab ? <article className={`desktop-card${selected === item.id || added === item.id ? ' selected' : ''}`} key={item.id}>
       {item.image ? <CaptureImage project={project.id} item={item} language={language} preview /> : item.kind === 'link' ? <PagePreview item={item} /> : <div className="desktop-card-kind"><ItemMark item={item} /><small>{t(item.kind === 'note' ? 'captureNote' : 'noteText')}</small></div>}
-      <button className="desktop-card-target" type="button" onClick={event => { void onPage({ kind: 'item', project: project.id, id: item.id }, event.currentTarget); }}><div className="desktop-card-title">{item.kind === 'link' && <ItemMark item={item} />}<strong>{item.title || t('newNote')}</strong></div><small>{desktopItemLabel(item, language)}</small>{!item.image && item.kind !== 'link' && <p>{item.text}</p>}
-    </button></article> : <button className={`desktop-item-row${selected === item.id ? ' selected' : ''}`} type="button" key={item.id} onClick={() => { void onPage({ kind: 'item', project: project.id, id: item.id }); }}><ItemMark item={item} /><span><strong>{item.title || t('newNote')}</strong><small>{item.kind === 'note' ? item.text || desktopItemLabel(item, language) : item.kind === 'link' ? itemSite(item.source?.url ?? '') : t('savedDate').replace('{date}', relativeDesktopDate(item.createdAt, language))}</small></span></button>)}</div> : <p className="desktop-empty-hint">{t('emptyFolder')}</p>}
-    {!tab && <div className="desktop-project-foot"><div className="desktop-drop"><Link aria-hidden="true" /><p>{t('desktopDropHint')}</p></div><div className="desktop-actions">{noteButton}<button className="desktop-action" ref={folderButton} type="button" disabled={disabled} onClick={() => setNewFolder(true)}><FolderPlus aria-hidden="true" />{t('newFolder')}</button></div></div>}
+      <button className="desktop-card-target" type="button" onClick={event => { void onPage({ kind: 'item', project: project.id, id: item.id }, event.currentTarget); }}><div className="desktop-card-title">{item.kind === 'link' && <ItemMark item={item} />}<strong>{item.title || t('newNote')}</strong></div><small>{added === item.id ? t('desktopAddedNow') : desktopItemLabel(item, language)}</small>{!item.image && item.kind !== 'link' && <p>{item.text}</p>}
+    </button></article> : <button className={`desktop-item-row${selected === item.id || added === item.id ? ' selected' : ''}`} type="button" key={item.id} onClick={() => { void onPage({ kind: 'item', project: project.id, id: item.id }); }}><ItemMark item={item} /><span><strong>{item.title || t('newNote')}</strong><small>{added === item.id ? t('desktopAddedNow') : item.kind === 'note' ? item.text || desktopItemLabel(item, language) : item.kind === 'link' ? itemSite(item.source?.url ?? '') : t('savedDate').replace('{date}', relativeDesktopDate(item.createdAt, language))}</small></span></button>) : <p className="desktop-empty-hint">{t('emptyFolder')}</p>}</DesktopDrop>
+    {!tab && <div className="desktop-project-foot"><DesktopDrop props={props} project={project.id} folder={chosenFolder} /><div className="desktop-actions">{noteButton}<button className="desktop-action" ref={folderButton} type="button" disabled={disabled} onClick={() => setNewFolder(true)}><FolderPlus aria-hidden="true" />{t('newFolder')}</button></div></div>}
     {newFolder && <DesktopNameDialog state={state} language={language} folder={project.id} opener={folderButton} onModalChange={onModalChange} onClose={() => setNewFolder(false)} onSuccess={async () => { setNewFolder(false); await run({ type: 'set-project', id: project.id }); }} />}
   </>;
 }
@@ -113,6 +117,7 @@ export function DesktopPanel({ props, onClose, onTab }: { props: DesktopProps; o
   }, [page.kind, project, focusPage]);
   useLayoutEffect(() => { if (page.kind === 'item') lastSelected.current = page.id; }, [page]);
   const item = page.kind === 'item' ? (data.content?.items ?? data.captures)?.find(item => item.id === page.id) : null;
+  const destination = project ?? state.projectInUse;
   let content: ReactNode;
   if (page.kind === 'home') content = <Home props={props} />;
   else if (page.kind === 'new-project') content = <><h1>{t('newProject')}</h1><ProjectNameForm state={state} language={language} onSuccess={project => { void onPage({ kind: 'project', project: project.id }); }} /></>;
@@ -123,7 +128,7 @@ export function DesktopPanel({ props, onClose, onTab }: { props: DesktopProps; o
   else if (page.kind === 'item' && item) content = <ItemDetail key={item.id} project={data.content} item={item} props={props} />;
   else if (!data.loading && page.kind === 'item' && (data.content || data.captures)) content = <Feedback language={language} error={t('DESKTOP_ITEM_NOT_FOUND')} onRetry={data.retry} />;
   else content = <Loading language={language} />;
-  return <aside ref={region} className="desktop-panel" tabIndex={-1} aria-labelledby={titleId} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); } }}><header className="desktop-panel-header"><h2 id={titleId}>{t('desktop')}</h2><button className="icon-button" type="button" aria-label={t('openInTab')} title={t('openInTab')} onClick={onTab}><ExternalLink aria-hidden="true" /></button><button className="icon-button" type="button" aria-label={t('closePanel')} title={t('closePanel')} onClick={onClose}><X aria-hidden="true" /></button></header><hr /><div className="desktop-panel-body"><StorageState props={props} />{data.error && (data.content || data.captures) && <Feedback language={language} error={data.error} onRetry={data.retry} />}{content}</div></aside>;
+  return <aside ref={region} className="desktop-panel" tabIndex={-1} aria-labelledby={titleId} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); } }}><header className="desktop-panel-header"><h2 id={titleId}>{t('desktop')}</h2><button className="icon-button" type="button" aria-label={t('openInTab')} title={t('openInTab')} onClick={onTab}><ExternalLink aria-hidden="true" /></button><button className="icon-button" type="button" aria-label={t('closePanel')} title={t('closePanel')} onClick={onClose}><X aria-hidden="true" /></button></header><hr /><div className="desktop-panel-body"><StorageState props={props} />{data.error && (data.content || data.captures) && <Feedback language={language} error={data.error} onRetry={data.retry} />}{content}{page.kind !== 'project' && destination && state.projects.some(project => project.id === destination) && <div className="desktop-project-foot"><small>{t('desktopDropInto').replace('{name}', state.projects.find(project => project.id === destination)!.name)}</small><DesktopDrop props={props} project={destination} onKept={() => { void onPage({ kind: 'project', project: destination }); }} /></div>}</div></aside>;
 }
 export function DesktopTab({ id, selected, props, onOpen }: { id: string; selected: string | null; props: DesktopProps; onOpen: (id: string) => void }) {
   const { state, language, onPage } = props, t = (key: CopyKey) => text(key, language), data = useDesktopContent(id === 'captures' ? null : id, props);

@@ -592,6 +592,10 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .desktop-project-foot { display: flex; flex-direction: column; gap: var(--space-16); margin-top: auto; }
 .desktop-drop { display: flex; align-items: center; justify-content: center; gap: var(--space-8); min-height: var(--height-desktop-drop); padding: var(--space-12); border: var(--border-width) dashed var(--accent); border-radius: var(--radius-panel); background: var(--surface-selected); color: var(--accent); text-align: center; }
 .desktop-drop svg { width: var(--size-18); height: var(--size-18); }
+.desktop-drop.drag-over { border-style: solid; outline: var(--focus-width) solid var(--accent); }
+.desktop-items.drag-over, .desktop-cards.drag-over, .desktop-empty.drag-over { outline: var(--focus-width) solid var(--accent); background: var(--surface-selected); border-radius: var(--radius-panel); }
+.desktop-drop-status:not(:empty) { display: flex; align-items: center; gap: var(--space-8); font-size: var(--type-caption); }
+.desktop-drop-status:empty { display: none; }
 .desktop-field { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
 .desktop-field label { color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); font-weight: var(--weight-emphasis); }
 .desktop-name-form { display: flex; flex-direction: column; gap: var(--space-16); }

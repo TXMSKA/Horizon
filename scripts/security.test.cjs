@@ -17,6 +17,154 @@ const { contextMenuGroups, PageMenuSession } = require('../dist/electron/context
 const { PermissionQueue, defaultPermissions, requestedPermissions, setPermission, setBlocking, setSiteDark, siteSettings, stripCookieHeaders, cookieSite, secureOrigin, SITE_SETTINGS_LIMIT } = require('../dist/electron/site-settings.js');
 const testTemporaryRoot = resolve(process.env.HORIZON_TEST_TEMP ?? '.runtime');
 
+test('Desktop drag parser keeps links, tabs and image addresses using only plain data', () => {
+  const { parseDesktopDrag } = require('../dist/src/shared/desktop-drag.js');
+  const address = 'https://example.com/routes', expected = { kind: 'link', address, title: 'Routes' };
+  assert.deepEqual(parseDesktopDrag({ uriList: address, text: 'Routes' }), expected);
+  assert.deepEqual(parseDesktopDrag({ uriList: '# Comment\r\n' + address + '\r\n', text: 'Routes' }), expected);
+  assert.deepEqual(parseDesktopDrag({ mozURL: address + '\nRoutes' }), expected);
+  assert.deepEqual(parseDesktopDrag({ tab: { url: address, title: 'Routes' }, text: 'irrelevant' }), expected);
+  for (const url of [address, 'http://example.com/image.png']) {
+    assert.deepEqual(parseDesktopDrag({ uriList: url, text: url }), { kind: 'link', address: url, title: url });
+    assert.deepEqual(parseDesktopDrag({ text: url }), { kind: 'link', address: url, title: url });
+  }
+  const long = 'https://example.com/' + 'x'.repeat(400);
+  assert.deepEqual(parseDesktopDrag({ uriList: long }), { kind: 'link', address: long, title: 'example.com' });
+  const hostile = { uriList: address, text: '<img src=x onerror=alert(1)>' };
+  Object.defineProperty(hostile, 'html', { get() { throw new Error('Markup must never be read'); } });
+  assert.deepEqual(parseDesktopDrag(hostile), { kind: 'link', address, title: hostile.text });
+});
+
+test('Desktop dragged selections remain text with a validated page source and line breaks', () => {
+  const { parseDesktopDrag } = require('../dist/src/shared/desktop-drag.js');
+  const source = { url: 'https://example.com/page', title: 'Page' };
+  for (const value of ['Selected words', 'Budget: accommodation and car', '<script>alert(1)</script>', 'First line\nSecond\tline']) {
+    assert.deepEqual(parseDesktopDrag({ text: value, source }), { kind: 'text', text: value, source });
+  }
+  assert.deepEqual(parseDesktopDrag({ text: 'Words without a page' }), { kind: 'text', text: 'Words without a page', source: null });
+  for (const value of ['https://example.com/selected', 'javascript:alert(1)', 'Note:value']) assert.deepEqual(parseDesktopDrag({ text: value, source, selection: true }), { kind: 'text', text: value, source });
+  assert.equal(parseDesktopDrag({ text: 'Selection', source: { ...source, url: 'file:///private' } }), null);
+  assert.equal(parseDesktopDrag({ text: 'Selection', source: { ...source, title: 'x'.repeat(201) } }), null);
+  assert.deepEqual(parseDesktopDrag({ html: '<a href="https://example.com/">Only HTML</a>' }), null);
+});
+
+test('Desktop drag refuses schemes, credentials, multiple addresses, controls and overlong values', () => {
+  const { parseDesktopDrag } = require('../dist/src/shared/desktop-drag.js');
+  const address = 'https://example.com/';
+  for (const value of ['javascript:alert(1)', 'javascript: alert(1)', ' javascript:alert(1)', ' https://example.com/', 'data:text/plain,words', 'file:///private', 'blob:https://example.com/id', 'horizon://app/', 'about:blank', 'ftp://example.com/', 'mailto:user@example.com', 'custom:value', 'https://user:password@example.com/', 'https://example.com/\0', 'https://example.com/pa\nth', 'https://example.com/\u0085', address + 'x'.repeat(8193)]) {
+    assert.equal(parseDesktopDrag({ uriList: value, text: 'Title' }), null);
+    assert.equal(parseDesktopDrag({ text: value }), null);
+    assert.equal(parseDesktopDrag({ tab: { url: value, title: 'Title' } }), null);
+  }
+  for (const value of ['', '  ', '\u0001words', '\u007fwords', '\u0085words', 'x'.repeat(100001)]) assert.equal(parseDesktopDrag({ text: value }), null);
+  for (const value of ['x'.repeat(201), 'Line\nbreak', 'Title\twith tab', 'Title\u0001']) {
+    assert.equal(parseDesktopDrag({ uriList: address, text: value }), null);
+    assert.equal(parseDesktopDrag({ tab: { url: address, title: value } }), null);
+  }
+  assert.equal(parseDesktopDrag({ uriList: address + '\nhttps://example.org/' }), null);
+  assert.equal(parseDesktopDrag({ mozURL: address + '\nTitle\nExtra' }), null);
+  assert.ok(parseDesktopDrag({ uriList: address + 'x'.repeat(8192 - address.length) }));
+  assert.ok(parseDesktopDrag({ text: 'x'.repeat(100000) }));
+});
+
+test('parsed Desktop drops pass run A command validation and persist in the chosen project folder', t => {
+  const { parseDesktopDrag } = require('../dist/src/shared/desktop-drag.js');
+  const { createDesktop } = require('../dist/electron/desktop.js');
+  const directory = temporaryDirectory(t, 'desktop-drops'), path = join(directory, 'notebooks.json');
+  const desktop = createDesktop(path, plainCipher, () => {}), project = desktop.create('Dragged project');
+  desktop.createFolder(project.id, 'Routes');
+  const folder = desktop.get(project.id).folders[0].id;
+  for (const data of [{ uriList: 'https://example.com/link', text: 'Link' }, { tab: { url: 'https://example.com/tab', title: 'Tab' } }, { uriList: 'https://example.com/image.png' }, { text: 'Selected text', source: { url: 'https://example.com/source', title: 'Source' } }]) {
+    const item = parseDesktopDrag(data), command = item.kind === 'link'
+      ? { type: 'add-link', address: item.address, title: item.title, project: project.id, folder }
+      : { type: 'add-text', text: item.text, source: item.source, project: project.id, folder };
+    assert.deepEqual(validateCommand(command, undefined, desktop.list()), command);
+    if (item.kind === 'link') desktop.addLink(project.id, folder, item.address, item.title);
+    else desktop.addText(project.id, folder, item.text, item.source);
+  }
+  const items = desktop.get(project.id).items;
+  assert.deepEqual(items.map(item => item.kind), ['link', 'link', 'link', 'text']);
+  assert.ok(items.every(item => item.folder === folder));
+  assert.deepEqual(items[3].source, { url: 'https://example.com/source', title: 'Source' });
+  desktop.flush(); desktop.dispose();
+  const reopened = createDesktop(path, plainCipher, () => {});
+  assert.deepEqual(reopened.get(project.id).items, items); reopened.dispose();
+});
+
+test('Desktop drop copy is available in English and Spanish', () => {
+  const { copy, text } = interfaceModule('src/copy.ts');
+  for (const key of ['desktopDropHint', 'desktopDropInto', 'desktopDropRelease', 'desktopDropSaving', 'desktopAddedNow']) {
+    for (const language of ['en', 'es']) assert.ok(copy[key]?.[language]?.trim() && text(key, language).trim(), key + ': ' + language);
+  }
+  assert.equal(text('desktopAddedNow', 'en'), 'Added just now');
+  for (const language of ['en', 'es']) assert.ok(text('desktopDropInto', language).includes('{name}'));
+});
+
+function dropInterface(react, globals) {
+  return interfaceModule('src/DesktopDrop.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': { desktopError: () => 'Save failed' }, './shared/desktop-drag': require('../dist/src/shared/desktop-drag.js') }, globals);
+}
+test('Desktop drop adapter ignores HTML and refuses stale, foreign or malformed tab bindings', () => {
+  const { readDesktopDrag } = dropInterface({}, {}), { DESKTOP_TAB_DRAG } = require('../dist/src/shared/desktop-drag.js');
+  const state = { activeProfileId: 'profile', tabs: [{ id: 'tab', url: 'https://example.com/', title: 'Tab', desktop: null, settings: null }] };
+  const transfer = values => ({ getData(type) { assert.notEqual(type, 'text/html'); return values[type] ?? ''; } });
+  assert.deepEqual(readDesktopDrag(transfer({ [DESKTOP_TAB_DRAG]: JSON.stringify({ profile: 'profile', tab: 'tab' }) }), state, null), { kind: 'link', address: 'https://example.com/', title: 'Tab' });
+  for (const internal of ['{', 'x'.repeat(513), JSON.stringify({ profile: 'other', tab: 'tab' }), JSON.stringify({ profile: 'profile', tab: 'closed' }), JSON.stringify({ profile: 'profile', tab: 'tab', extra: true })]) {
+    assert.equal(readDesktopDrag(transfer({ [DESKTOP_TAB_DRAG]: internal, 'text/uri-list': 'https://example.com/' }), state, null), null);
+  }
+  state.tabs[0].desktop = 'project';
+  assert.equal(readDesktopDrag(transfer({ [DESKTOP_TAB_DRAG]: JSON.stringify({ profile: 'profile', tab: 'tab' }) }), state, null), null);
+  assert.equal(readDesktopDrag({ ...transfer({ 'text/plain': 'notes.txt' }), types: ['Files', 'text/plain'] }, state, null), null);
+  assert.deepEqual(readDesktopDrag({ ...transfer({ 'text/uri-list': 'https://example.com/image.png' }), types: ['Files', 'text/uri-list'] }, state, null), { kind: 'link', address: 'https://example.com/image.png', title: 'https://example.com/image.png' });
+});
+
+test('Desktop target highlights candidates, clears on leave and keeps one sourced item in the shown project', async () => {
+  const hooks = notebookTestHooks(), commands = [], dropped = [], items = [];
+  const state = { activeProfileId: 'profile', activeId: 'page', tabs: [{ id: 'page', url: 'https://example.com/source', title: 'Source' }], projectInUse: 'another' };
+  const { DesktopDrop } = dropInterface(hooks.react, { window: { horizon: { getState: async () => state, getProject: async () => ({ items: [...items] }), command: async command => { commands.push(command); items.push({ id: 'new' }); } } } });
+  const props = { state, language: 'en', readOnly: false, edits: { flush: async () => {} }, onDropped: (...args) => dropped.push(args) };
+  const render = () => hooks.render(() => DesktopDrop({ props, project: 'shown', folder: 'folder' }));
+  const target = () => notebookNodes(render(), node => !!node.props.onDrop)[0];
+  render(); hooks.flush();
+  const event = values => ({ preventDefault() {}, stopPropagation() {}, dataTransfer: { types: Object.keys(values), getData: type => values[type] ?? '' }, currentTarget: { contains: () => false }, relatedTarget: null });
+  const drag = event({ 'text/plain': 'Selected\nwords', 'text/html': '<script>ignored</script>' });
+  target().props.onDragEnter(drag); assert.match(target().props.className, /drag-over/); assert.equal(drag.dataTransfer.dropEffect, 'copy');
+  target().props.onDragLeave(drag); assert.doesNotMatch(target().props.className, /drag-over/);
+  target().props.onDragOver(drag); target().props.onDrop(drag); target().props.onDrop(drag);
+  await new Promise(setImmediate);
+  assert.deepEqual(commands, [{ type: 'add-text', project: 'shown', folder: 'folder', text: 'Selected\nwords', source: { url: 'https://example.com/source', title: 'Source' } }]);
+  assert.deepEqual(dropped, [['shown', 'new']]); assert.doesNotMatch(target().props.className, /drag-over/);
+  target().props.onDrop(event({ 'text/uri-list': 'javascript:alert(1)' }));
+  target().props.onDragEnter(event({ Files: '' })); assert.doesNotMatch(target().props.className, /drag-over/);
+  props.readOnly = true; target().props.onDrop(event({ 'text/plain': 'https://example.com/' }));
+  await new Promise(setImmediate); assert.equal(commands.length, 1); hooks.dispose();
+});
+
+test('Desktop drop abandons a profile change or unmount while drafts are flushing', async () => {
+  for (const unmount of [false, true]) {
+    const hooks = notebookTestHooks(); let flush, commands = 0;
+    const state = { activeProfileId: 'profile', tabs: [] };
+    const { DesktopDrop } = dropInterface(hooks.react, { window: { horizon: { getState: async () => ({ ...state, activeProfileId: unmount ? 'profile' : 'other' }), command: async () => { commands++; }, getProject: async () => ({ items: [] }) } } });
+    const props = { state, language: 'en', readOnly: false, edits: { flush: () => new Promise(resolve => { flush = resolve; }) }, onDropped() {} };
+    const tree = hooks.render(() => DesktopDrop({ props, project: 'shown' })); hooks.flush();
+    notebookNodes(tree, node => !!node.props.onDrop)[0].props.onDrop({ preventDefault() {}, stopPropagation() {}, dataTransfer: { getData: type => type === 'text/uri-list' ? 'https://example.com/' : '' } });
+    if (unmount) hooks.dispose(); flush(); await new Promise(setImmediate); assert.equal(commands, 0);
+    if (!unmount) hooks.dispose();
+  }
+});
+
+test('changing the drop folder during draft flush cancels the save without leaving the new target busy', async () => {
+  const hooks = notebookTestHooks(); let finish, commands = 0;
+  const state = { activeProfileId: 'profile', tabs: [] };
+  const { DesktopDrop } = dropInterface(hooks.react, { window: { horizon: { getState: async () => state, getProject: async () => ({ items: [] }), command: async () => { commands++; } } } });
+  const props = { state, language: 'en', readOnly: false, edits: { flush: () => new Promise(resolve => { finish = resolve; }) }, onDropped() {} };
+  const render = folder => hooks.render(() => DesktopDrop({ props, project: 'shown', folder }));
+  let tree = render('first'); hooks.flush();
+  notebookNodes(tree, node => !!node.props.onDrop)[0].props.onDrop({ preventDefault() {}, stopPropagation() {}, dataTransfer: { getData: type => type === 'text/uri-list' ? 'https://example.com/' : '' } });
+  assert.equal(notebookNodes(render('first'), node => !!node.props.onDrop)[0].props['aria-busy'], true); hooks.flush();
+  render('second'); hooks.flush(); finish(); await new Promise(setImmediate);
+  tree = render('second'); assert.equal(notebookNodes(tree, node => !!node.props.onDrop)[0].props['aria-busy'], false); assert.equal(commands, 0); hooks.dispose();
+});
+
 test('quick access migrates settings versions 1 through 3 without losing their saved choices', t => {
   const directory = temporaryDirectory(t, 'quick-access-migration'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
@@ -3582,7 +3730,7 @@ function desktopInterface(react = {}, globals = {}) {
   return interfaceModule('src/Desktop.tsx', { react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' } }, globals);
 }
 function desktopViewInterface(react, desktop, globals = {}) {
-  return interfaceModule('src/DesktopView.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': desktop }, globals);
+  return interfaceModule('src/DesktopView.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': desktop, './DesktopDrop': { DesktopDrop: 'drop' } }, globals);
 }
 
 test('browser menu keeps the drawn order, shortcuts and working zoom controls', () => {
