@@ -9,7 +9,7 @@ import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { SEARCH_ENGINES } from './shared/api';
-import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureRect, ContextMenuItemId, DesktopPanelPage, Language, ProjectSummary, PageContextMenu, SettingsSection, WindowAction } from './shared/api';
+import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureShot, ContextMenuItemId, DesktopPanelPage, Language, ProjectSummary, PageContextMenu, SettingsSection, WindowAction } from './shared/api';
 import { browserShortcut } from './shared/shortcuts';
 import { applyTheme } from './theme';
 import { Menu } from './Menu';
@@ -23,8 +23,7 @@ import { BrowserMenu } from './BrowserMenu';
 import { HorizonMark } from './HorizonMark';
 
 import { blockedCount, blockedTotal, PermissionDialog, ShieldPopover } from './SiteControls';
-import { CaptureOverlay } from './Capture';
-import type { CaptureKind } from './Capture';
+import { CapturePreview } from './Capture';
 import { desktopTabTitle, DesktopResume, DesktopStatus, desktopError } from './Desktop';
 import type { DesktopNotice } from './Desktop';
 import { DesktopPanel, DesktopTab } from './DesktopView';
@@ -42,7 +41,7 @@ const pageMenuRows: Record<Exclude<ContextMenuItemId, `spell:${string}`>, { labe
   'open-link': { label: 'openLink', icon: ExternalLink }, 'copy-link': { label: 'copyLink', icon: Copy },
   'open-image': { label: 'openImage', icon: Image }, 'save-image': { label: 'saveImage', icon: Download },
   'copy-image': { label: 'copyImage', icon: Copy }, 'copy-image-address': { label: 'copyImageAddress', icon: Copy },
-  copy: { label: 'copy', icon: Copy }, 'search-selection': { label: 'searchWeb', icon: Search },
+  'add-to-desktop': { label: 'addToDesktop', icon: Folder }, copy: { label: 'copy', icon: Copy }, 'search-selection': { label: 'searchWeb', icon: Search },
   undo: { label: 'undo', icon: Undo2 }, redo: { label: 'redo', icon: Redo2 }, cut: { label: 'cut', icon: Scissors },
   paste: { label: 'paste', icon: ClipboardPaste }, 'select-all': { label: 'selectAll', icon: TextSelect },
   back: { label: 'back', icon: ArrowLeft }, forward: { label: 'forward', icon: ArrowRight }, reload: { label: 'reload', icon: RotateCw },
@@ -84,11 +83,15 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const hubButtonRef = useRef<HTMLButtonElement>(null), lyraButtonRef = useRef<HTMLButtonElement>(null), lyraRef = useRef<HTMLDivElement>(null);
   const [profileOpen, setProfileOpen] = useState<'menu' | 'new' | null>(null);
   const [desktopOverlay, setDesktopOverlay] = useState<{ scope: string; mode: 'capture' } | null>(null);
+  const liveDesktopOverlay = useRef(desktopOverlay);
+  useLayoutEffect(() => { liveDesktopOverlay.current = desktopOverlay; }, [desktopOverlay]);
   const [desktopModalOpen, setDesktopModalOpen] = useState(false);
   const [pageCapturePending, setPageCapturePending] = useState(false);
   const [desktopLeaving, setDesktopLeaving] = useState(false);
   const desktopLeaves = useRef(0);
-  const liveDesktopOverlay = useRef(desktopOverlay);
+  const [captureShot, setCaptureShot] = useState<CaptureShot | null>(null);
+  const [captureHint, setCaptureHint] = useState(false);
+  const capturePending = useRef(false);
   const desktopButtonRef = useRef<HTMLButtonElement>(null);
   const desktopOpener = useRef<HTMLElement | null>(null);
   const [dismissedDesktopRead, setDismissedDesktopRead] = useState<string | null>(null);
@@ -127,7 +130,6 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const liveDesktopScope = useRef(desktopScope);
   useLayoutEffect(() => { liveDesktopScope.current = desktopScope; }, [desktopScope]);
   const desktopMode = desktopOverlay?.scope === desktopScope ? desktopOverlay.mode : null;
-  useLayoutEffect(() => { liveDesktopOverlay.current = desktopOverlay; }, [desktopOverlay]);
   const bookmarked = state?.store.bookmarks.some(item => item.url === activeUrl) ?? false;
   const site = state?.siteSettings;
   const siteScope = site ? `${state?.activeProfileId}:${state?.activeId}:${site.origin}` : null;
@@ -136,7 +138,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.permissionPrompt;
   const permissionOpen = Boolean(!desktopModalOpen && !aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !shieldOpen && !panel && !findOpen);
-  const popover = desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
+  const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
+  const popover = showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
@@ -159,7 +162,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     catch (reason) { setError(command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
     finally { if (leaving && --desktopLeaves.current === 0) setDesktopLeaving(false); }
   }, [language, edits]);
-  const closeCapture = useCallback(() => { setDesktopOverlay(null); desktopButtonRef.current?.focus(); }, []);
+  const closeCapture = useCallback(() => { setDesktopOverlay(null); (desktopButtonRef.current ?? hubButtonRef.current)?.focus(); }, []);
   const retryDesktopStorage = useCallback(async function retry(): Promise<void> {
     try { await edits.flush(); await window.horizon.command({ type: 'retry-desktop-storage' }); setDesktopNotice(null); }
     catch (reason) { setDesktopNotice({ message: desktopError(reason, language), failure: true, action: text('retry', language), onAction: () => { void retry(); } }); }
@@ -171,36 +174,23 @@ export function App({ language: initialLanguage }: { language: Language }) {
     setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setDirty(false);
     void run({ type: 'open-desktop', id, ...(item ? { item } : {}) });
   };
-  const saveDesktopCapture = async (project: ProjectSummary | null, kind: CaptureKind, rect: CaptureRect) => {
+  const saveDesktopCapture = async (project: ProjectSummary) => {
+    if (!captureShot) return;
+    const overlay = desktopOverlay, scope = desktopScope;
+    await edits.flush();
+    await window.horizon.command({ type: 'add-capture-to-project', id: captureShot.id, project: project.id, folder: null });
+    if (liveDesktopOverlay.current === overlay && liveDesktopScope.current === scope) closeCapture();
+    setDesktopNotice({ capture: true, message: text('desktopSaved', language).replace('{name}', project.name), action: text('openApp', language), onAction: () => { setDesktopNotice(null); void openDesktopPanel({ kind: 'project', project: project.id }); } });
+  };
+  const captureVisible = async (work: () => Promise<CaptureShot>) => {
     const scope = desktopScope;
-    const overlay = desktopOverlay;
-    if (kind === 'text' && !project) throw new Error('CAPTURE_UNAVAILABLE');
-    const command: BrowserCommand = kind === 'area' ? { type: 'save-capture', project: project?.id ?? null, kind, rect } : kind === 'text' ? { type: 'save-capture', project: project!.id, kind } : { type: 'save-capture', project: project?.id ?? null, kind };
-    const save = async () => {
+    setPageCapturePending(true);
+    try {
+      await reportArea(false);
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       if (liveDesktopScope.current !== scope) throw new Error('CAPTURE_CHANGED');
-      if (state?.desktopLocked) throw new Error('DESKTOP_LOCKED');
-      await edits.flush();
-      if (kind === 'page') {
-        setDesktopNotice({ message: text('capturingPage', language), pending: true });
-        setPageCapturePending(true); setDesktopOverlay(null); setMenuOpen(false); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setShieldScope(null); setSuggestionsOpen(false); setPanel(null);
-        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-        await reportArea(false);
-        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-      }
-      if (liveDesktopScope.current !== scope) throw new Error('CAPTURE_CHANGED');
-      await window.horizon.command(command);
-      const items = project ? (await window.horizon.getProject(project.id)).items : await window.horizon.getCaptures(), item = items.at(-1)?.id;
-      if (liveDesktopOverlay.current === overlay) setDesktopOverlay(null);
-      if (liveDesktopScope.current === scope && (!liveDesktopOverlay.current || liveDesktopOverlay.current === overlay)) desktopButtonRef.current?.focus();
-      setDesktopNotice({ message: text('desktopSaved', language).replace('{name}', project?.name ?? text('captures', language)), action: text('openApp', language), onAction: () => { setDesktopNotice(null); void openDesktopPanel(item ? { kind: 'item', project: project?.id ?? null, id: item } : project ? { kind: 'project', project: project.id } : { kind: 'captures' }); } });
-    };
-    const retry = () => { setDesktopNotice(null); void save().catch(reason => setDesktopNotice({ message: desktopError(reason, language), failure: true, action: text('retry', language), onAction: retry })).finally(() => setPageCapturePending(false)); };
-    try { await save(); }
-    catch (reason) {
-      if (kind === 'page' || liveDesktopOverlay.current !== overlay || liveDesktopScope.current !== scope) setDesktopNotice({ message: desktopError(reason, language), failure: true, action: text('retry', language), onAction: retry });
-      else throw reason;
-    }
-    finally { setPageCapturePending(false); }
+      return await work();
+    } finally { setPageCapturePending(false); if (liveDesktopScope.current === scope) await reportArea(true); }
   };
   const deleteDesktopEntry = async (command: BrowserCommand, message: CopyKey) => {
     dismissUndo();
@@ -274,11 +264,21 @@ export function App({ language: initialLanguage }: { language: Language }) {
     });
   }, [run]);
   const openCapture = useCallback(async () => {
-    if (!/^https?:/.test(activeUrl) || active?.desktop || active?.settings || active?.error) { setError(text('CAPTURE_UNAVAILABLE', language)); return; }
+    if (capturePending.current) return;
+    setCaptureHint(false);
+    const reason = active?.settings ? 'CAPTURE_SETTINGS' : active?.desktop ? 'CAPTURE_DESKTOP' : active?.error ? 'CAPTURE_CRASHED' : active?.loading ? 'CAPTURE_LOADING' : !/^https?:/.test(activeUrl) ? 'CAPTURE_UNAVAILABLE' : null;
+    if (reason) { setDesktopNotice({ message: text(reason, language) }); return; }
+    capturePending.current = true;
     closeFind(); closeContextMenu(); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
-    if (state?.desktopPanel.open && !await run({ type: 'close-desktop-panel' })) return;
-    setDesktopOverlay(previous => previous?.scope === desktopScope ? null : { scope: desktopScope, mode: 'capture' });
-  }, [activeUrl, active?.desktop, active?.settings, active?.error, state?.desktopPanel.open, desktopScope, language, closeFind, closeContextMenu, run]);
+    setDesktopOverlay(null); setPageCapturePending(true); setDesktopNotice(null);
+    try {
+      await reportArea(false);
+      const shot = await window.horizon.command({ type: 'take-capture' });
+      if (liveDesktopScope.current !== desktopScope) return;
+      setCaptureShot(shot); setDesktopOverlay({ scope: desktopScope, mode: 'capture' });
+    } catch (reason) { setDesktopNotice({ message: desktopError(reason, language), failure: true, action: text('retry', language), onAction: () => { void openCapture(); } }); }
+    finally { capturePending.current = false; setPageCapturePending(false); }
+  }, [activeUrl, active?.desktop, active?.settings, active?.error, active?.loading, desktopScope, language, closeFind, closeContextMenu, reportArea]);
   const panelToTab = () => {
     if (!state) return;
     const page = state.desktopPanel.page;
@@ -376,6 +376,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     return () => { observer.disconnect(); window.removeEventListener('resize', report); };
   }, [reportArea]);
   useLayoutEffect(() => {
+    if (pageCapturePending) return;
     const generation = ++captureGeneration.current;
     const removeSnapshot = () => {
       if (captureGeneration.current !== generation) return;
@@ -395,14 +396,14 @@ export function App({ language: initialLanguage }: { language: Language }) {
       }).catch(() => { if (captureGeneration.current === generation) setError(text('browserError', language)); });
     }
     return () => { captureGeneration.current++; };
-  }, [panel, popover, pageShowing, state?.activeId, state?.desktopPanel.open, reportArea, language]);
+  }, [panel, popover, pageShowing, pageCapturePending, state?.activeId, state?.desktopPanel.open, reportArea, language]);
   useLayoutEffect(() => {
     const image = snapshotRef.current;
-    if (!snapshot || !image) return;
+    if (!snapshot || !image || pageCapturePending) return;
     void image.decode().then(() => requestAnimationFrame(() => {
       if (captureGeneration.current === snapshot.generation) void reportArea(true);
     })).catch(() => { if (captureGeneration.current === snapshot.generation) setError(text('browserError', language)); });
-  }, [snapshot, reportArea, language]);
+  }, [snapshot, pageCapturePending, reportArea, language]);
   useEffect(() => {
     if (!lyraOpen) return;
     lyraRef.current?.focus();
@@ -463,6 +464,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     else if (action === 'stop') {
       if (aboutOpen) setAboutOpen(false);
       else if (desktopMode) closeCapture();
+      else if (captureHint) setCaptureHint(false);
       else if (contextMenu) closeContextMenu(true);
       else if (shieldOpen) closeShield();
       else if (permissionOpen) void answerPermission('dismiss');
@@ -578,7 +580,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
           {showBlocked && <span className="address-blocked">{blockedCount(totalBlocked, language)}</span>}
           <button className={`icon-button${bookmarked ? ' accent bookmarked' : ''}`} type="button" disabled={!/^https?:/.test(activeUrl)} aria-label={t(bookmarked ? 'removeBookmark' : 'bookmark')} aria-pressed={bookmarked} title={t(bookmarked ? 'removeBookmark' : 'bookmark')} onClick={() => shortcut('bookmark')}><Star aria-hidden="true" /></button>
         </form>
-        <div className="tools"><button className="icon-button" ref={desktopButtonRef} type="button" aria-label={t('captureShortcut')} title={t('captureShortcut')} aria-haspopup="dialog" aria-expanded={Boolean(desktopMode)} disabled={!/^https?:/.test(activeUrl) || Boolean(active?.desktop || active?.settings || active?.error)} onClick={() => { void openCapture(); }}><Scan aria-hidden="true" /></button>
+        <div className="tools">{state?.showCapture !== false && <button className="icon-button" ref={desktopButtonRef} type="button" aria-label={t('captureShortcut')} aria-describedby={showCaptureHint ? 'capture-shortcut' : undefined} aria-haspopup="dialog" aria-expanded={Boolean(desktopMode)} onMouseEnter={() => setCaptureHint(true)} onMouseLeave={() => setCaptureHint(false)} onFocus={() => setCaptureHint(true)} onBlur={() => setCaptureHint(false)} onClick={() => { setCaptureHint(false); void openCapture(); }}><Scan aria-hidden="true" /></button>}
           {state?.quickAccess.map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={event => { if (app === 'desktop') void openDesktopPanel({ kind: 'home' }, event.currentTarget); else openHub(app); }}><Icon aria-hidden="true" /></button>; })}
           <button className="icon-button" ref={hubButtonRef} type="button" aria-label={t('hub')} title={t('hub')} aria-haspopup="dialog" aria-expanded={Boolean(hubPage)} aria-controls="hub-popup" onClick={() => { if (hubPage) { setHubPage(null); hubButtonRef.current?.focus(); } else openHub('home'); }}><LayoutGrid aria-hidden="true" /></button>
           <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { setDesktopOverlay(null); setShieldScope(null); dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); setHubPage(null); setLyraOpen(false); setPanel(null); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
@@ -595,7 +597,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
       {(error || state?.storageReadError || state?.storageError || (state?.desktopReadError && dismissedDesktopRead !== state.activeProfileId) || state?.desktopLocked || state?.desktopStorageError) && <div className="shell-status" role="alert"><span>{error || t(state?.desktopLocked ? 'DESKTOP_LOCKED' : state?.desktopReadError && dismissedDesktopRead !== state.activeProfileId ? 'desktopReadFailed' : state?.desktopStorageError ? 'DESKTOP_STORAGE_FAILED' : state?.storageReadError ? 'storageReadError' : 'storageError')}</span>{state?.desktopLocked && <button className="text-button" type="button" onClick={() => { void retryDesktopStorage(); }}>{t('retry')}</button>}{(error || state?.desktopReadError && !state.desktopLocked && dismissedDesktopRead !== state.activeProfileId) && iconButton(X, 'close', () => { if (error) setError(''); else if (state) setDismissedDesktopRead(state.activeProfileId); })}</div>}
       <div className={`loading-line${active?.loading ? ' loading' : ''}`} aria-hidden="true" />
     </header>
-    {desktopMode === 'capture' && state && <CaptureOverlay state={state} language={language} header={headerRef} onClose={closeCapture} onSave={saveDesktopCapture} onRetryStorage={retryDesktopStorage} />}
+    {showCaptureHint && <ToolbarPopover opener={desktopButtonRef}><span className="capture-shortcut-tooltip" id="capture-shortcut" role="tooltip">{t('captureShortcut')}</span></ToolbarPopover>}
+    {desktopMode === 'capture' && state && <CapturePreview state={state} language={language} shot={captureShot} header={headerRef} opener={desktopButtonRef} onClose={closeCapture} onSave={saveDesktopCapture} onVisible={captureVisible} onShot={setCaptureShot} />}
     {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} counts={active.blocked} ready={state.blockingReady} blockAds={state.blockAds} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}
     {permissionOpen && permissionPrompt && <PermissionDialog key={`${siteScope}:${permissionPrompt.id}`} prompt={permissionPrompt} language={language} favicon={siteFavicon} initial={siteInitial} onAnswer={answerPermission} />}
     {hubPage && state && <Hub onAnnounce={setAnnouncement} state={state} language={language} page={hubPage} opener={hubButtonRef} onPage={page => { if (page === 'desktop') void openDesktopPanel({ kind: 'home' }, hubButtonRef.current ?? undefined); else setHubPage(page); }} onDismiss={focus => { setHubPage(null); if (focus) hubButtonRef.current?.focus(); }} />}
@@ -621,7 +624,12 @@ export function App({ language: initialLanguage }: { language: Language }) {
           return <button type="button" role="menuitem" tabIndex={-1} key={item.id} disabled={!item.enabled} onClick={() => {
             const menuId = contextMenu.id;
             contextMenuRef.current = null; setContextMenu(null);
-            void run({ type: 'context-menu', id: menuId, item: item.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); });
+            if (item.id === 'add-to-desktop') {
+              void edits.flush().then(() => window.horizon.command({ type: 'context-menu', id: menuId, item: item.id })).then(() => window.horizon.getState()).then(next => {
+                const project = next.projects.find(project => project.id === next.projectInUse);
+                if (project) setDesktopNotice({ message: t('desktopSaved').replace('{name}', project.name) });
+              }).catch(reason => setDesktopNotice({ message: desktopError(reason, language), failure: true }));
+            } else void run({ type: 'context-menu', id: menuId, item: item.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); });
           }}><Icon aria-hidden="true" /><span>{label}</span></button>;
         }),
       ])}

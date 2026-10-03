@@ -1,20 +1,9 @@
 import type { WebContents } from 'electron';
-import type { CaptureRect } from '../src/shared/api';
 import { CAPTURE_LIMIT } from './desktop';
 
-export const SELECTION_WORLD = 1006;
-export const SELECTION_CODE = 'String(getSelection())';
 export const CAPTURE_DEADLINE = 10000;
 export const PAGE_HEIGHT_LIMIT = 16384;
-export function captureRectangle(rect: CaptureRect, zoom: number, bounds: { width: number; height: number }): CaptureRect {
-  const x = Math.max(0, Math.min(bounds.width, Math.floor(rect.x * zoom)));
-  const y = Math.max(0, Math.min(bounds.height, Math.floor(rect.y * zoom)));
-  const right = Math.max(0, Math.min(bounds.width, Math.ceil((rect.x + rect.width) * zoom)));
-  const bottom = Math.max(0, Math.min(bounds.height, Math.ceil((rect.y + rect.height) * zoom)));
-  if (right - x < 8 || bottom - y < 8) throw new Error('CAPTURE_AREA_SMALL');
-  return { x, y, width: right - x, height: bottom - y };
-}
-function deadline<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+export function deadline<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       clearTimeout(timer); signal?.removeEventListener('abort', abort);
@@ -34,13 +23,6 @@ export function pngSize(bytes: Buffer): { width: number; height: number } {
   const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
   if (!width || !height || width > 100000 || height > 100000) throw new Error('CAPTURE_TOO_LARGE');
   return { width, height };
-}
-export async function captureSelection(contents: WebContents): Promise<string> {
-  const selection: unknown = await contents.executeJavaScriptInIsolatedWorld(SELECTION_WORLD, [{ code: SELECTION_CODE }]);
-  if (typeof selection !== 'string') throw new Error('CAPTURE_FAILED');
-  const text = selection.trim().slice(0, 100000);
-  if (!text) throw new Error('NOTHING_SELECTED');
-  return text;
 }
 export async function captureWholePage(contents: WebContents, visible: boolean, deviceScale: number, check: () => void, signal?: AbortSignal) {
   if (!visible) throw new Error('CAPTURE_PAGE_HIDDEN');

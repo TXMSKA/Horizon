@@ -1,4 +1,4 @@
-import { app, clipboard, dialog, ipcMain, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
+import { app, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
 import type { BrowserWindow, DownloadItem, Session, WebContents, WebPreferences } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
@@ -22,8 +22,10 @@ import type { ProfileRegistry } from './profiles';
 import { createBlockingEngine } from './blocking';
 import { listSites, PermissionQueue, requestedPermissions, resetSite, secureOrigin, setBlocking, setPermission, setSiteDark, siteHost, siteSettings, stripCookieHeaders } from './site-settings';
 import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages';
+import { desktopInputText } from '../src/shared/desktop-input';
 import { createDesktop, desktopAddress } from './desktop';
-import { captureRectangle, captureSelection, captureWholePage, pngSize } from './captures';
+import { captureWholePage, deadline, pngSize } from './captures';
+import { validCaptureRect } from '../src/shared/capture';
 
 interface Tab { state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
 
@@ -55,7 +57,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     ...current().state(), version: app.getVersion(), activeProfileId: registry.activeId,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
-    quickAccess: settings.quickAccess,
+    quickAccess: settings.quickAccess, showCapture: settings.showCapture,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
     searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
     ...resolvedDownloadsFolder(settings, downloads), askWhereToSave: settings.askWhereToSave,
@@ -107,6 +109,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       case 'set-search-engine': settings.setSearchEngine(command.value); publish(); return;
       case 'set-language': settings.setLanguage(command.value); publish(); return;
       case 'set-ask-where-to-save': settings.setAskWhereToSave(command.value); publish(); return;
+      case 'set-show-capture': settings.setShowCapture(command.value); publish(); return;
       case 'reset-downloads-folder': settings.setDownloadsFolder(null); publish(); return;
       case 'choose-downloads-folder': return (async () => {
         let choice: Electron.OpenDialogReturnValue;
@@ -187,6 +190,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let clearingData = false;
     let captureGeneration = 0;
     const captureRequests = new Set<AbortController>();
+    let screenCapture: { id: string; bytes: Buffer; width: number; height: number; generation: number } | undefined;
     const invalidateCaptures = () => { captureGeneration++; for (const request of captureRequests) request.abort(); captureRequests.clear(); };
     const isCurrent = () => registry.activeId === profile.id;
     let kept: { [Kind in 'history' | 'bookmarks' | 'downloads']: { kind: Kind; entries: BrowserStore[Kind] } }['history' | 'bookmarks' | 'downloads'] | undefined;
@@ -744,10 +748,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         catch { desktopPanel.page = page.project === null ? { kind: 'captures' } : desktop.list().some(project => project.id === page.project) ? { kind: 'project', project: page.project } : { kind: 'home' }; }
       }
     };
-    const saveCapture = async (command: Extract<BrowserCommand, { type: 'save-capture' }>) => {
+    const takeCapture = async (id?: string) => {
       desktop.assertUnlocked();
       const tab = active(), view = tab?.view, contents = page(view);
-      if (!tab || !view || !contents || tab.state.desktop || tab.state.error || tab.navigating || !isWebURL(tab.state.url)) throw new Error('CAPTURE_UNAVAILABLE');
+      if (tab?.state.loading || tab?.navigating) throw new Error('CAPTURE_LOADING');
+      if (tab?.state.error) throw new Error('CAPTURE_CRASHED');
+      if (!tab || !view || !contents || tab.state.desktop || tab.state.settings || !isWebURL(tab.state.url)) throw new Error('CAPTURE_UNAVAILABLE');
       const request = new AbortController(); captureRequests.add(request);
       const generation = captureGeneration, navigation = tab.navigation, pageLoad = tab.pageLoad, url = tab.state.url;
       const check = () => {
@@ -755,16 +761,18 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           || page(view) !== contents || tab.navigation !== navigation || tab.pageLoad !== pageLoad || tab.state.url !== url || tab.state.error) throw new Error('CAPTURE_CHANGED');
       };
       const now = Date.now(), title = tab.state.title;
-      const entry: DesktopItem = { id: randomUUID(), folder: command.folder ?? null, kind: command.kind, title: title.slice(0, 200), text: '', note: '',
+      const entry: DesktopItem = { id: id ?? randomUUID(), folder: null, kind: id ? 'page' : 'area', title: title.slice(0, 200), text: '', note: '',
         source: { url, title: title.slice(0, 4096) }, image: null, createdAt: now, updatedAt: now };
       try {
-        if (command.kind === 'text') { entry.text = await captureSelection(contents); check(); desktop.addCapture(command.project, entry); }
-        else if (command.kind === 'area') {
-          const rect = captureRectangle(command.rect, window.webContents.getZoomFactor(), view.getBounds());
-          const image = await contents.capturePage(rect, { stayHidden: true }); check();
-          const bytes = image.toPNG();
-          desktop.addCapture(command.project, entry, bytes, { ...pngSize(bytes), cut: false });
+        let bytes: Buffer, image: { width: number; height: number; cut: boolean };
+        if (!id) {
+          const shot = await deadline(contents.capturePage(), request.signal); check();
+          bytes = shot.toPNG({ scaleFactor: screen.getDisplayMatching(window.getContentBounds()).scaleFactor });
+          image = { ...pngSize(bytes), cut: false };
+          desktop.addCapture(null, entry, bytes, image);
+          screenCapture = { id: entry.id, bytes, width: image.width, height: image.height, generation };
         } else {
+          if (!screenCapture || screenCapture.id !== id || screenCapture.generation !== generation) throw new Error('CAPTURE_CHANGED');
           const visible = () => {
             const bounds = view.getBounds(), windowBounds = window.getContentBounds();
             return view.getVisible() && !area.hidden && !tab.cosmeticPending && bounds.width > 0 && bounds.height > 0
@@ -772,11 +780,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           };
           const scale = screen.getDisplayMatching(window.getContentBounds()).scaleFactor * contents.getZoomFactor();
           const result = await captureWholePage(contents, visible(), scale, () => { check(); if (!visible()) throw new Error('CAPTURE_PAGE_HIDDEN'); }, request.signal);
-          check(); desktop.addCapture(command.project, entry, result.bytes, result.image);
+          check(); bytes = result.bytes; image = result.image;
+          desktop.replaceCapture(id, bytes, image, 'page');
         }
         update();
+        return { id: entry.id, bytes, ...image };
       } catch (error: unknown) {
-        if (error instanceof Error && /^(PROJECT_|FOLDER_|DESKTOP_|CAPTURE_|NOTHING_SELECTED$)/.test(error.message)) throw error;
+        if (error instanceof Error && /^(PROJECT_|FOLDER_|DESKTOP_|CAPTURE_)/.test(error.message)) throw error;
         try { check(); } catch { throw new Error('CAPTURE_CHANGED'); }
         throw new Error('CAPTURE_FAILED');
       } finally { captureRequests.delete(request); }
@@ -846,7 +856,30 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           forget(); desktop.deleteItem(command.project, command.id);
           for (const target of tabs) if (target.state.desktop === command.project && target.state.desktopItem === command.id) target.state.desktopItem = null;
           break;
-        case 'save-capture': return saveCapture(command);
+        case 'take-capture': return takeCapture();
+        case 'capture-full-page': return takeCapture(command.id);
+        case 'capture-screen': {
+          if (!screenCapture || screenCapture.id !== command.id) throw new Error('CAPTURE_CHANGED');
+          const { bytes, width, height } = screenCapture;
+          desktop.replaceCapture(command.id, bytes, { width, height, cut: false }, 'area'); update();
+          return { id: command.id, bytes, width, height, cut: false };
+        }
+        case 'edit-capture': case 'copy-capture': return (async () => {
+          desktop.assertUnlocked(); const entry = desktop.item(null, command.id), generation = captureGeneration;
+          let bytes = desktop.image(null, command.id);
+          if (!bytes || !entry.image) throw new Error('CAPTURE_FAILED');
+          if (command.rect) {
+            if (!validCaptureRect(command.rect, entry.image)) throw new Error('CAPTURE_AREA_SMALL');
+            bytes = nativeImage.createFromBuffer(bytes).crop(command.rect).toPNG();
+          }
+          if (command.type === 'copy-capture') {
+            try { await clipboard.write([new ClipboardItem({ 'image/png': new Blob([new Uint8Array(bytes)], { type: 'image/png' }) })]); }
+            catch { throw new Error('CAPTURE_FAILED'); }
+          }
+          if (!isCurrent() || disposed || closing || generation !== captureGeneration) throw new Error('CAPTURE_CHANGED');
+          if (command.rect) desktop.replaceCapture(command.id, bytes, { ...pngSize(bytes), cut: entry.image.cut }, entry.kind === 'page' ? 'page' : 'area');
+          update(); return { id: command.id, bytes, ...pngSize(bytes), cut: entry.image.cut };
+        })();
         case 'set-site-dark': {
           const site = siteSettings(store.siteSettings, tab.topURL ?? tab.state.url);
           if (!site) throw new Error('SITE_UNAVAILABLE');
@@ -889,6 +922,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
             break;
           }
           switch (command.item) {
+            case 'add-to-desktop': {
+              if (!desktopInputText(params.selectionText, 100000)) throw new Error('TEXT_INVALID');
+              const project = desktop.state().projectInUse ?? [...desktop.list()].sort((a, b) => b.usedAt - a.usedAt)[0]?.id;
+              if (!project) { desktopPanel.open = true; desktopPanel.page = { kind: 'new-project' }; window.webContents.focus(); break; }
+              desktop.addText(project, null, params.selectionText.trim(), { url: tab.state.url, title: tab.state.title.slice(0, 200) });
+              desktop.retry(); break;
+            }
             case 'open-link': if (isWebURL(params.linkURL)) newTab(params.linkURL, false); break;
             case 'copy-link': if (isWebURL(params.linkURL)) clipboard.writeText(params.linkURL); break;
             case 'open-image': if (isWebURL(params.srcURL)) newTab(params.srcURL); break;
@@ -1004,12 +1044,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       reconcileDesktop(); refresh(tab); update();
     };
     const suspend = () => {
+      screenCapture = undefined;
       invalidateCaptures(); desktop.forget();
       forget();
       const tab = active();
       if (tab) { leaveFullscreen(tab); page(tab.view)?.stopFindInPage('clearSelection'); tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; }
     };
     const dispose = (discard = false) => {
+      screenCapture = undefined;
       const attempt = (cleanup: () => void) => {
         if (!discard) { cleanup(); return; }
         try { cleanup(); } catch (error: unknown) { storageFailure(error); }

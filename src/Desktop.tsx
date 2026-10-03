@@ -1,12 +1,13 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode, RefObject, TextareaHTMLAttributes } from 'react';
 import { createPortal } from 'react-dom';
-import { Camera, Check, ChevronDown, FileText, Folder, LayoutDashboard, LoaderCircle, Plus, Scan, X } from 'lucide-react';
+import { Camera, Check, ChevronDown, FileText, Folder, LayoutDashboard, LoaderCircle, Plus, Scan, Search, X } from 'lucide-react';
 import { copy, text } from './copy';
 import type { CopyKey } from './copy';
 import type { BrowserState, CaptureSummary, DesktopItemContent, Language, ProjectSummary, TabState } from './shared/api';
 import { Menu } from './Menu';
 import { PopupAnchor } from './PopupAnchor';
+import { captureProjects } from './shared/capture';
 
 export function desktopError(reason: unknown, language: Language): string {
   const message = reason instanceof Error ? reason.message : String(reason);
@@ -117,14 +118,22 @@ export function DesktopNameDialog({ state, language, folder, opener, onClose, on
   }, [onModalChange, opener]);
   return createPortal(<dialog ref={dialog} className="desktop-dialog" aria-labelledby={id} onCancel={event => { event.preventDefault(); onClose(); }} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); } }}><h2 id={id}>{text(folder ? 'newFolder' : 'newProject', language)}</h2><ProjectNameForm state={state} language={language} folder={folder} onSuccess={onSuccess} /><button className="desktop-action" type="button" onClick={onClose}>{text('cancel', language)}</button></dialog>, document.body);
 }
-export function CaptureProjectPicker({ state, language, opener, screenshots, onClose, onChoose, portalHost, anchor }: { state: BrowserState; language: Language; opener: RefObject<HTMLElement | null>; screenshots: boolean; onClose: () => void; onChoose: (project: ProjectSummary | null) => Promise<void>; portalHost?: RefObject<HTMLElement | null>; anchor?: RefObject<HTMLElement | null> }) {
-  const [creating, setCreating] = useState(false), id = useId();
-  const sorted = [...state.projects].sort((a, b) => Number(b.id === state.projectInUse) - Number(a.id === state.projectInUse) || b.usedAt - a.usedAt);
-  return creating ? <DesktopNameDialog state={state} language={language} opener={opener} onClose={onClose} onSuccess={onChoose} /> : <PopupAnchor opener={opener} portalHost={portalHost} anchor={anchor}><Menu id={id} className="desktop-choice-menu capture-project-menu" label={text('saveTo', language)} keyboard opener={opener} onDismiss={reason => { onClose(); if (reason !== 'outside') opener.current?.focus(); }}>
-    <button type="button" role="menuitem" tabIndex={-1} disabled={!screenshots} onClick={() => { void onChoose(null); }}><Scan aria-hidden="true" /><span>{text('captures', language)}</span>{!screenshots && <small>{text('screenshotsOnly', language)}</small>}</button>
-    {sorted.map(project => <button type="button" role="menuitem" tabIndex={-1} key={project.id} onClick={() => { void onChoose(project); }}><Folder aria-hidden="true" /><span>{project.name}</span></button>)}
-    <hr role="separator" /><button type="button" role="menuitem" tabIndex={-1} onClick={() => setCreating(true)}><Plus aria-hidden="true" /><span>{text('newProject', language)}</span></button>
-  </Menu></PopupAnchor>;
+export function CaptureProjectPicker({ state, language, opener, onClose, onChoose, anchor, widthAnchor, busy = false }: { state: BrowserState; language: Language; opener: RefObject<HTMLElement | null>; onClose: () => void; onChoose: (project: ProjectSummary) => Promise<void>; anchor?: RefObject<HTMLElement | null>; widthAnchor?: RefObject<HTMLElement | null>; busy?: boolean }) {
+  const [creating, setCreating] = useState(false), [search, setSearch] = useState(''), id = useId();
+  const selector = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!creating) return;
+    const outside = (event: PointerEvent) => { if (!selector.current?.contains(event.target as Node) && !opener.current?.contains(event.target as Node)) { onClose(); opener.current?.focus(); } };
+    document.addEventListener('pointerdown', outside); return () => document.removeEventListener('pointerdown', outside);
+  }, [creating, onClose, opener]);
+  const sorted = captureProjects(state.projects, state.projectInUse, search);
+  return <PopupAnchor opener={opener} anchor={anchor} widthAnchor={widthAnchor} gap={8}><div className="capture-selector" ref={selector} data-capture-popover role="dialog" aria-label={text('saveTo', language)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); opener.current?.focus(); } }}>
+    {creating ? <><h2>{text('newProject', language)}</h2><ProjectNameForm state={state} language={language} onSuccess={project => { setCreating(false); return onChoose(project); }} /><button className="desktop-action" type="button" disabled={busy} onClick={() => setCreating(false)}>{text('cancel', language)}</button></> : <Menu id={id} className="capture-selector-menu" label={text('saveTo', language)} keyboard initialFocus="input" opener={anchor ?? opener} onDismiss={() => { onClose(); opener.current?.focus(); }}>
+      <h2>{text('saveTo', language)}</h2><label className="visually-hidden" htmlFor={`${id}-search`}>{text('searchProjects', language)}</label><div className="search-field capture-project-search"><Search aria-hidden="true" /><input id={`${id}-search`} value={search} placeholder={text('searchProjects', language)} autoComplete="off" onChange={event => setSearch(event.target.value)} /></div>
+      {sorted.map(project => <button type="button" role="menuitemradio" aria-checked={project.id === state.projectInUse} tabIndex={-1} disabled={busy} key={project.id} onClick={() => { void onChoose(project); }}>{project.id === state.projectInUse ? <Check className="accent" aria-hidden="true" /> : <Folder aria-hidden="true" />}<span>{project.name}</span></button>)}
+      {!sorted.length && <p role="status">{text('noProjectResults', language)}</p>}<hr role="separator" /><button type="button" role="menuitem" disabled={busy} tabIndex={-1} onClick={() => setCreating(true)}><Plus aria-hidden="true" /><span>{text('newProject', language)}</span></button>
+    </Menu>}
+  </div></PopupAnchor>;
 }
 
 export function DesktopResume({ state, language, onOpen, onNew }: { state: BrowserState; language: Language; onOpen: (id: string, item?: string) => void; onNew: (button: HTMLButtonElement) => void }) {
@@ -136,9 +145,23 @@ export function DesktopResume({ state, language, onOpen, onNew }: { state: Brows
   return <section aria-label={t('resumeProject').replace('{name}', project.name)}><button className="desktop-resume" type="button" onClick={() => onOpen(project.id)}><LayoutDashboard className="accent" aria-hidden="true" /><strong>{project.name}</strong><small>{itemCount(projectSize(project), language)}, {relativeDesktopDate(project.updatedAt, language, now)}</small></button><ul className="notes">{project.latest.map(item => <li key={item.id}><button className="desktop-home-row" type="button" onClick={() => onOpen(project.id, item.id)}><span className="desktop-mark" aria-hidden="true">{item.kind === 'area' || item.kind === 'page' ? <Camera /> : <FileText />}</span><span>{item.title || t('newNote')}</span><small>{desktopItemLabel(item, language)}</small></button></li>)}</ul></section>;
 }
 
-export type DesktopNotice = { message: string; action?: string; onAction?: () => void; failure?: boolean; undo?: boolean; pending?: boolean };
+export type DesktopNotice = { message: string; action?: string; onAction?: () => void; failure?: boolean; undo?: boolean; pending?: boolean; capture?: boolean };
 export function DesktopStatus({ notice, language, onClose }: { notice: DesktopNotice | null; language: Language; onClose: () => void }) {
   const [hovered, setHovered] = useState(false), [focused, setFocused] = useState(false), remaining = useRef(8000), action = useRef<HTMLButtonElement>(null);
+  const region = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = region.current;
+    if (!notice?.capture) { element?.style.removeProperty('left'); element?.style.removeProperty('max-width'); return; }
+    const page = document.getElementById('content');
+    const position = () => {
+      const bounds = page?.getBoundingClientRect();
+      if (!bounds || !element) return;
+      element.style.setProperty('left', `${bounds.left + bounds.width / 2}px`);
+      element.style.setProperty('max-width', `${Math.max(0, bounds.width - 24)}px`);
+    };
+    position(); const observer = new ResizeObserver(position); if (page) observer.observe(page);
+    window.addEventListener('resize', position); return () => { observer.disconnect(); window.removeEventListener('resize', position); };
+  }, [notice?.capture]);
   const paused = hovered || focused;
   useEffect(() => { if (notice?.undo) action.current?.focus(); }, [notice]);
   useEffect(() => { remaining.current = 8000; if (!notice) { setHovered(false); setFocused(false); } }, [notice]);
@@ -147,5 +170,5 @@ export function DesktopStatus({ notice, language, onClose }: { notice: DesktopNo
     const start = Date.now(), timer = window.setTimeout(onClose, remaining.current);
     return () => { window.clearTimeout(timer); remaining.current = Math.max(0, remaining.current - (Date.now() - start)); };
   }, [notice, paused, onClose]);
-  return <div className="desktop-status-region" role="status" aria-live="polite" aria-atomic="true">{notice && <div className={`desktop-toast${notice.failure ? ' has-error' : ''}`} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onFocus={() => setFocused(true)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}><span>{notice.message}</span>{notice.onAction && <button className="desktop-small-link" type="button" ref={action} onClick={notice.onAction}>{notice.action}</button>}{!notice.pending && <button className="icon-button" type="button" aria-label={text('close', language)} onClick={onClose}><X aria-hidden="true" /></button>}</div>}</div>;
+  return <div ref={region} className="desktop-status-region" role="status" aria-live="polite" aria-atomic="true">{notice && <div className={`desktop-toast${notice.failure ? ' has-error' : ''}${notice.capture ? ' capture-saved' : ''}`} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onFocus={() => setFocused(true)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}><span>{notice.message}</span>{notice.onAction && <button className="desktop-small-link" type="button" ref={action} onClick={notice.onAction}>{notice.action}</button>}{!notice.pending && !notice.capture && <button className="icon-button" type="button" aria-label={text('close', language)} onClick={onClose}><X aria-hidden="true" /></button>}</div>}</div>;
 }

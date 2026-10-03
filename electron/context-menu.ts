@@ -5,7 +5,7 @@ import { isWebURL } from './browsing';
 
 export type PageMenuParams = Pick<ContextMenuParams, 'x' | 'y' | 'linkURL' | 'srcURL' | 'mediaType' | 'selectionText' | 'isEditable' | 'dictionarySuggestions' | 'editFlags' | 'menuSourceType'>;
 interface Navigation { back: boolean; forward: boolean; reload: boolean }
-const itemIds = new Set(['open-link', 'copy-link', 'open-image', 'save-image', 'copy-image', 'copy-image-address', 'copy', 'search-selection', 'undo', 'redo', 'cut', 'paste', 'select-all', 'back', 'forward', 'reload']);
+const itemIds = new Set(['add-to-desktop', 'open-link', 'copy-link', 'open-image', 'save-image', 'copy-image', 'copy-image-address', 'copy', 'search-selection', 'undo', 'redo', 'cut', 'paste', 'select-all', 'back', 'forward', 'reload']);
 
 export function isContextMenuItemId(value: unknown): value is ContextMenuItemId {
   return typeof value === 'string' && (itemIds.has(value) || value.startsWith('spell:') && value.length > 6 && value.length <= 262 && !/[\u0000-\u001f\u007f]/.test(value));
@@ -25,6 +25,7 @@ export function contextMenuGroups(params: PageMenuParams, navigation: Navigation
   if (!params.linkURL && params.mediaType !== 'image' && !params.isEditable && !params.selectionText.trim()) {
     groups.push([row('back', navigation.back), row('forward', navigation.forward), row('reload', navigation.reload)]);
   }
+  if (params.selectionText.trim()) groups.push([row('add-to-desktop')]);
   return groups;
 }
 

@@ -5,6 +5,7 @@ import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
 import { folderName, projectName, desktopInputText, desktopTitle } from './desktop';
+import { validCaptureRect } from '../src/shared/capture';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid browser argument');
@@ -16,7 +17,7 @@ function string(value: unknown, maximum: number, empty = false): value is string
 function keys(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected browser argument');
 }
-const desktopCommands = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'open-desktop', 'open-desktop-panel', 'close-desktop-panel', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'delete-capture', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'save-capture']);
+const desktopCommands = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'open-desktop', 'open-desktop-panel', 'close-desktop-panel', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'delete-capture', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'take-capture', 'capture-full-page', 'capture-screen', 'edit-capture', 'copy-capture']);
 export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = []): BrowserCommand {
   try { return validatedCommand(value, profileIds, projects, captures); }
   catch (error) {
@@ -28,7 +29,7 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
 function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = []): BrowserCommand {
   const command = object(value);
   const type = command.type;
-  const settingsCommands = ['open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'register-default-browser'];
+  const settingsCommands = ['set-show-capture', 'open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'register-default-browser'];
   if (settingsCommands.includes(type as string)) {
     let allowed: string[] = ['type'];
     let valid = false;
@@ -36,7 +37,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
       case 'open-settings': allowed.push('section'); valid = ['general', 'appearance', 'privacy', 'privacy/sites', 'profiles'].includes(command.section as string); break;
       case 'set-search-engine': allowed.push('value'); valid = isSearchEngine(command.value); break;
       case 'set-language': allowed.push('value'); valid = isLanguageSetting(command.value); break;
-      case 'set-ask-where-to-save': case 'set-block-ads': case 'set-block-third-party-cookies': case 'set-clear-history-on-close': case 'set-clear-cache-on-close': allowed.push('value'); valid = typeof command.value === 'boolean'; break;
+      case 'set-show-capture': case 'set-ask-where-to-save': case 'set-block-ads': case 'set-block-third-party-cookies': case 'set-clear-history-on-close': case 'set-clear-cache-on-close': allowed.push('value'); valid = typeof command.value === 'boolean'; break;
       case 'reset-site': allowed.push('host'); valid = validHost(command.host); break;
       case 'clear-browsing-data': allowed = ['type', 'history', 'cookies', 'cache']; valid = ['history', 'cookies', 'cache'].every(key => typeof command[key] === 'boolean') && (command.history === true || command.cookies === true || command.cache === true); break;
       default: valid = true;
@@ -100,15 +101,12 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
         && (!Object.hasOwn(command, 'note') || desktopInputText(command.note, 20000)); break;
     case 'delete-item':
       keys(command, ['type', 'project', 'id']); valid = Object.keys(command).length === 3 && project(command.project) && item(command.project, command.id); break;
-    case 'save-capture': {
-      valid = exact(command.kind === 'area' ? ['project', 'kind', 'rect'] : ['project', 'kind'], ['folder'])
-        && (project(command.project) || command.project === null && command.kind !== 'text') && optionalFolder()
-        && (command.kind === 'text' || command.kind === 'page' || command.kind === 'area');
-      if (command.kind === 'area') {
-        const rect = object(command.rect); keys(rect, ['x', 'y', 'width', 'height']);
-        valid &&= Object.keys(rect).length === 4 && ['x', 'y', 'width', 'height'].every(key => typeof rect[key] === 'number' && Number.isFinite(rect[key]) && Math.abs(rect[key] as number) <= 100000)
-          && (rect.width as number) > 0 && (rect.height as number) > 0;
-      }
+    case 'take-capture': valid = exact([]); break;
+    case 'capture-full-page': case 'capture-screen': valid = exact(['id']) && item(null, command.id) && !!captures.find(entry => entry.id === command.id)?.image; break;
+    case 'edit-capture': case 'copy-capture': {
+      const image = captures.find(entry => entry.id === command.id)?.image;
+      valid = exact(['id'], ['rect']) && item(null, command.id) && !!image
+        && (!Object.hasOwn(command, 'rect') || validCaptureRect(command.rect, image));
       break;
     }
     case 'set-blocking': case 'set-site-dark': keys(command, ['type', 'enabled']); valid = Object.keys(command).length === 2 && typeof command.enabled === 'boolean'; break;

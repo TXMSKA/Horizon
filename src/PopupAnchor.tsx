@@ -3,7 +3,7 @@ import type { ReactNode, RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { popupPosition } from './shared/popup-position';
 
-export function PopupAnchor({ opener, children, portalHost, anchor }: { opener: RefObject<HTMLElement | null>; children: ReactNode; portalHost?: RefObject<HTMLElement | null>; anchor?: RefObject<HTMLElement | null> }) {
+export function PopupAnchor({ opener, children, portalHost, anchor, widthAnchor, gap: requestedGap }: { opener: RefObject<HTMLElement | null>; children: ReactNode; portalHost?: RefObject<HTMLElement | null>; anchor?: RefObject<HTMLElement | null>; gap?: number; widthAnchor?: RefObject<HTMLElement | null> }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const popup = ref.current;
@@ -11,8 +11,8 @@ export function PopupAnchor({ opener, children, portalHost, anchor }: { opener: 
     const position = () => {
       const trigger = (anchor?.current ?? opener.current)?.getBoundingClientRect();
       if (!trigger) return;
-      const gap = Number.parseFloat(getComputedStyle(popup).getPropertyValue('--toolbar-popup-gap'));
-      if (anchor?.current) popup.style.setProperty('width', `${trigger.width}px`);
+      const gap = requestedGap ?? Number.parseFloat(getComputedStyle(popup).getPropertyValue('--toolbar-popup-gap'));
+      if (anchor?.current) popup.style.setProperty('width', `${(widthAnchor?.current?.getBoundingClientRect() ?? trigger).width}px`);
       // Measure without the previous limit so a clipped menu can choose the roomier side.
       popup.style.setProperty('--popup-available-height', 'none');
       popup.style.setProperty('max-height', 'none');
@@ -28,9 +28,9 @@ export function PopupAnchor({ opener, children, portalHost, anchor }: { opener: 
       popup.style.setProperty('max-height', `${availableHeight}px`);
     };
     const observer = new ResizeObserver(position);
-    observer.observe(popup); if (opener.current) observer.observe(opener.current); if (anchor?.current) observer.observe(anchor.current);
+    observer.observe(popup); if (opener.current) observer.observe(opener.current); if (anchor?.current) observer.observe(anchor.current); if (widthAnchor?.current) observer.observe(widthAnchor.current);
     window.addEventListener('resize', position); window.addEventListener('scroll', position, true); position();
     return () => { observer.disconnect(); window.removeEventListener('resize', position); window.removeEventListener('scroll', position, true); };
-  }, [opener, anchor]);
+  }, [opener, anchor, widthAnchor, requestedGap]);
   return createPortal(<div className="popup-anchor" ref={ref}>{children}</div>, portalHost?.current ?? document.body);
 }

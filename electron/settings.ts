@@ -7,7 +7,8 @@ import type { Contrast, DarkPagesMode, DarkStrength, DarkTone, HubApp, Language,
 interface LegacySettings { version: 1; theme: Theme; contrast?: Contrast }
 interface SettingsV2 { version: 2; theme: Theme; contrast: Contrast; darkPages: DarkPagesMode; darkStrength: DarkStrength; darkTone: DarkTone }
 interface SettingsV3 extends Omit<SettingsV2, 'version'> { version: 3; searchEngine: SearchEngine; language: LanguageSetting; downloadsFolder: string | null; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean }
-export interface Settings extends Omit<SettingsV3, 'version'> { version: 4; quickAccess: HubApp[] }
+interface SettingsV4 extends Omit<SettingsV3, 'version'> { version: 4; quickAccess: HubApp[] }
+export interface Settings extends Omit<SettingsV4, 'version'> { version: 5; showCapture: boolean }
 export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
   readonly migrationAllowed: boolean;
   readonly downloadsFolderUnavailable: boolean;
@@ -15,6 +16,7 @@ export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
   setSearchEngine(value: SearchEngine): void; setLanguage(value: LanguageSetting): void; setDownloadsFolder(value: string | null): void;
   setAskWhereToSave(value: boolean): void; setBlockAds(value: boolean): void; setBlockThirdPartyCookies(value: boolean): void;
   setAppPinned(id: HubApp, pinned: boolean): void;
+  setShowCapture(value: boolean): void;
 }
 export function isHubApp(value: unknown): value is HubApp { return typeof value === 'string' && HUB_APPS.includes(value as HubApp); }
 export function isQuickAccess(value: unknown): value is HubApp[] {
@@ -54,10 +56,15 @@ function v3Settings(value: unknown): value is SettingsV3 {
     && isSearchEngine(value.searchEngine) && isLanguageSetting(value.language) && (value.downloadsFolder === null || folderSyntax(value.downloadsFolder))
     && ['askWhereToSave', 'blockAds', 'blockThirdPartyCookies'].every(key => typeof value[key] === 'boolean');
 }
-function settingsShape(value: unknown): value is Settings {
+function v4Settings(value: unknown): value is SettingsV4 {
   if (!shape(value, [...V2_KEYS, 'searchEngine', 'language', 'downloadsFolder', 'askWhereToSave', 'blockAds', 'blockThirdPartyCookies', 'quickAccess']) || value.version !== 4 || !isQuickAccess(value.quickAccess)) return false;
   const previous = { ...value }; delete previous.quickAccess;
   return v3Settings({ ...previous, version: 3 });
+}
+function settingsShape(value: unknown): value is Settings {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const fields = value as Record<string, unknown>, previous = { ...fields }; delete previous.showCapture;
+  return Object.hasOwn(fields, 'version') && fields.version === 5 && Object.hasOwn(fields, 'showCapture') && typeof fields.showCapture === 'boolean' && v4Settings({ ...previous, version: 4 });
 }
 export function validateSettings(value: unknown): value is Settings { return settingsShape(value) && (value.downloadsFolder === null || isDownloadsFolder(value.downloadsFolder)); }
 export function writeSettings(path: string, settings: Settings): void {
@@ -68,14 +75,14 @@ export function writeSettings(path: string, settings: Settings): void {
   finally { if (existsSync(temporary)) try { unlinkSync(temporary); } catch { /* Preserve the save failure. */ } }
 }
 export function readSettings(path: string, highContrast = false, status = { downloadsFolderUnavailable: false }): Settings {
-  const empty: Settings = { version: 4, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] };
+  const empty: Settings = { version: 5, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true };
   try {
     if (!existsSync(path)) { empty.contrast = highContrast ? 'high' : 'standard'; writeSettings(path, empty); return empty; }
     let settings: Settings, migrated = false;
     try {
       if (statSync(path).size > 4096) throw new Error('Settings exceed size limit');
       const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
-      if (legacySettings(value) || v2Settings(value) || v3Settings(value)) { settings = { ...empty, ...value, version: 4 }; migrated = true; }
+      if (legacySettings(value) || v2Settings(value) || v3Settings(value) || v4Settings(value)) { settings = { ...empty, ...value, version: 5 }; migrated = true; }
       else if (settingsShape(value)) settings = value;
       else throw new Error('Invalid settings');
     } catch { renameSync(path, `${path}.corrupt-${randomUUID()}`); writeSettings(path, empty); return empty; }
@@ -103,6 +110,8 @@ export function createSettings(path: string, changed: (theme: Theme) => void, hi
     get searchEngine() { return settings.searchEngine; }, get language() { return settings.language; }, get downloadsFolder() { return settings.downloadsFolder; }, get askWhereToSave() { return settings.askWhereToSave; }, get blockAds() { return settings.blockAds; }, get blockThirdPartyCookies() { return settings.blockThirdPartyCookies; }, get migrationAllowed() { return migrationAllowed; },
     get downloadsFolderUnavailable() { return readStatus.downloadsFolderUnavailable || settings.downloadsFolder !== null && !isDownloadsFolder(settings.downloadsFolder); },
     get quickAccess() { return [...settings.quickAccess]; },
+    get showCapture() { return settings.showCapture; },
+    setShowCapture(value) { if (typeof value !== 'boolean') throw new Error('SETTINGS_COMMAND_INVALID'); save({ ...settings, showCapture: value }); },
     setAppPinned(id, pinned) {
       if (!isHubApp(id) || typeof pinned !== 'boolean') throw new Error('QUICK_ACCESS_INVALID');
       if (settings.quickAccess.includes(id) === pinned) return;

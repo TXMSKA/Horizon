@@ -334,6 +334,16 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
     },
     captures: (): DesktopItemContent[] => structuredClone(store.captures.map(contentItem)),
     image: (project: string | null, id: string) => readCaptureFile(directory, store.key, item(project, id)),
+    replaceCapture: (id: string, bytes: Buffer, image: Omit<CaptureImage, 'filename' | 'bytes'>, kind: 'area' | 'page') => {
+      assertUnlocked(); const entry = item(null, id), previous = entry.image, previousKind = entry.kind, updatedAt = entry.updatedAt;
+      const filename = writeCaptureFile(directory, store.key, id, bytes);
+      entry.image = { ...image, filename, bytes: bytes.length }; entry.kind = kind; entry.updatedAt = Date.now();
+      try { writeDesktopStore(path, store, cipher); }
+      catch { entry.image = previous; entry.kind = previousKind; entry.updatedAt = updatedAt; const file = regularCapture(directory, filename); if (file) unlinkSync(file); throw new Error('DESKTOP_STORAGE_FAILED'); }
+      // The old file is released only after the store references the replacement durably.
+      if (previous) { const file = regularCapture(directory, previous.filename); if (file) try { unlinkSync(file); } catch { storageError = true; } }
+      persist(); changed();
+    },
     create: (value: string) => {
       assertUnlocked();
       const name = uniqueAddress(uniqueName(value));
@@ -368,7 +378,11 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
     },
     addCaptureToProject: (id: string, project: string, destination: string | null) => {
       assertUnlocked(); const entry = item(null, id); checkFolder(project, destination); capacity(project);
-      store.captures.splice(store.captures.indexOf(entry), 1); entry.folder = destination; collection(project).push(entry); touch(project); use(project);
+      const index = store.captures.indexOf(entry), previous = entry.folder;
+      store.captures.splice(index, 1); entry.folder = destination; collection(project).push(entry);
+      try { writeDesktopStore(path, store, cipher); }
+      catch { collection(project).splice(collection(project).indexOf(entry), 1); entry.folder = previous; store.captures.splice(index, 0, entry); throw new Error('DESKTOP_STORAGE_FAILED'); }
+      touch(project); use(project);
     },
     addLink: (project: string, destination: string | null, address: string, title: string) => {
       assertUnlocked();
@@ -378,7 +392,7 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
     addText: (project: string, destination: string | null, text: string, source: DesktopItem['source']) => {
       assertUnlocked();
       if (!desktopInputText(text, 100000) || source !== null && (!object(source, ['url', 'title']) || !isWebURL(source.url) || !desktopTitle(source.title))) throw new Error('TEXT_INVALID');
-      const now = Date.now(); add(project, { id: randomUUID(), folder: destination, kind: 'text', title: source?.title ?? '', text, note: '', source, image: null, createdAt: now, updatedAt: now });
+      const now = Date.now(); add(project, { id: randomUUID(), folder: destination, kind: 'text', title: source?.title.slice(0, 200) ?? '', text, note: '', source, image: null, createdAt: now, updatedAt: now });
     },
     addNote: (id: string, title: string, text: string, destination: string | null = null) => {
       assertUnlocked();
@@ -393,6 +407,8 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
       try {
         if (bytes && image) { entry.image = { ...image, bytes: bytes.length, filename: writeCaptureFile(directory, store.key, entry.id, bytes) }; written = true; }
         add(id, entry);
+        try { writeDesktopStore(path, store, cipher); }
+        catch { collection(id).splice(collection(id).indexOf(entry), 1); throw new Error('DESKTOP_STORAGE_FAILED'); }
       } catch (error: unknown) {
         if (written && entry.image) try { removeFiles([entry]); } catch { storageError = true; }
         if (error instanceof Error && ['CAPTURE_TOO_LARGE', 'DESKTOP_STORAGE_FULL', 'PROJECT_ITEM_LIMIT', 'CAPTURE_LIMIT', 'DESKTOP_ITEM_INVALID'].includes(error.message)) throw error;

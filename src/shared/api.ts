@@ -43,13 +43,14 @@ export interface PermissionPrompt { id: string; origin: string; permissions: Sit
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 4; history: HistoryEntry[]; bookmarks: Bookmark[]; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { id: string; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
-export type ContextMenuItemId = 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
+export interface BrowserState { showCapture: boolean; version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
 export type BrowserShortcut = 'capture' | 'focus-address' | 'new-tab' | 'close-tab' | 'next-tab' | 'previous-tab' | 'back' | 'forward' | 'reload' | 'stop' | 'history' | 'downloads' | 'favorites' | 'fullscreen' | 'bookmark' | 'find' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | `tab-${number}`;
 export type DesktopItemKind = 'note' | 'text' | 'area' | 'page' | 'link';
 export interface CaptureRect { x: number; y: number; width: number; height: number }
+export interface CaptureShot { id: string; bytes: Uint8Array; width: number; height: number; cut: boolean }
 export interface CaptureImage { filename: string; width: number; height: number; bytes: number; cut: boolean }
 export interface DesktopItem { id: string; folder: string | null; kind: DesktopItemKind; title: string; text: string; note: string; source: { url: string; title: string } | null; image: CaptureImage | null; createdAt: number; updatedAt: number }
 export interface ProjectFolder { id: string; name: string; createdAt: number }
@@ -60,7 +61,7 @@ export type ProjectContent = Omit<Project, 'items'> & { items: DesktopItemConten
 export type CaptureSummary = Pick<DesktopItem, 'id' | 'title' | 'source' | 'createdAt'>;
 export type DesktopPanelPage = { kind: 'home' | 'captures' | 'new-project' } | { kind: 'project'; project: string; folder?: string | null } | { kind: 'item'; project: string | null; id: string };
 export interface DesktopPanelState { open: boolean; page: DesktopPanelPage }
-export type DesktopError = 'DESKTOP_COMMAND_INVALID' | 'DESKTOP_LOCKED' | 'FOLDER_NAME_INVALID' | 'FOLDER_NAME_EMPTY' | 'FOLDER_NAME_LONG' | 'FOLDER_NAME_DUPLICATE' | 'FOLDER_LIMIT' | 'FOLDER_NOT_FOUND' | 'CAPTURE_LIMIT' | 'LINK_INVALID' | 'TEXT_INVALID' | 'DESKTOP_NOT_FOUND' | 'PROJECT_NAME_INVALID' | 'PROJECT_NAME_EMPTY' | 'PROJECT_NAME_LONG' | 'PROJECT_NAME_DUPLICATE' | 'PROJECT_ADDRESS_CONFLICT' | 'PROJECT_LIMIT' | 'PROJECT_ITEM_LIMIT' | 'PROJECT_NOT_FOUND' | 'DESKTOP_ITEM_NOT_FOUND' | 'DESKTOP_ITEM_INVALID' | 'DESKTOP_STORAGE_FAILED' | 'DESKTOP_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'NOTHING_SELECTED';
+export type DesktopError = 'DESKTOP_COMMAND_INVALID' | 'DESKTOP_LOCKED' | 'FOLDER_NAME_INVALID' | 'FOLDER_NAME_EMPTY' | 'FOLDER_NAME_LONG' | 'FOLDER_NAME_DUPLICATE' | 'FOLDER_LIMIT' | 'FOLDER_NOT_FOUND' | 'CAPTURE_LIMIT' | 'LINK_INVALID' | 'TEXT_INVALID' | 'DESKTOP_NOT_FOUND' | 'PROJECT_NAME_INVALID' | 'PROJECT_NAME_EMPTY' | 'PROJECT_NAME_LONG' | 'PROJECT_NAME_DUPLICATE' | 'PROJECT_ADDRESS_CONFLICT' | 'PROJECT_LIMIT' | 'PROJECT_ITEM_LIMIT' | 'PROJECT_NOT_FOUND' | 'DESKTOP_ITEM_NOT_FOUND' | 'DESKTOP_ITEM_INVALID' | 'DESKTOP_STORAGE_FAILED' | 'DESKTOP_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'CAPTURE_LOADING' | 'CAPTURE_CRASHED' | 'CAPTURE_DESKTOP' | 'CAPTURE_SETTINGS';
 export type BrowserCommand =
   | { type: 'pin-app' | 'unpin-app'; id: HubApp }
   | { type: 'open-settings'; section: SettingsSection }
@@ -89,9 +90,10 @@ export type BrowserCommand =
   | { type: 'add-note'; project: string; title: string; text: string; folder?: string | null }
   | { type: 'update-item'; project: string | null; id: string; title?: string; text?: string; note?: string }
   | { type: 'delete-item'; project: string; id: string }
-  | { type: 'save-capture'; project: string; folder?: string | null; kind: 'text' }
-  | { type: 'save-capture'; project: string | null; folder?: string | null; kind: 'page' }
-  | { type: 'save-capture'; project: string | null; folder?: string | null; kind: 'area'; rect: CaptureRect }
+  | { type: 'take-capture' }
+  | { type: 'capture-full-page' | 'capture-screen'; id: string }
+  | { type: 'edit-capture' | 'copy-capture'; id: string; rect?: CaptureRect }
+  | { type: 'set-show-capture'; value: boolean }
   | { type: 'set-blocking'; enabled: boolean }
   | { type: 'set-site-dark'; enabled: boolean }
   | { type: 'set-site-permission'; permission: SitePermission; decision: PermissionDecision }
@@ -135,6 +137,7 @@ export interface HorizonAPI {
   getCaptureImage(project: string | null, item: string): Promise<Uint8Array | null>;
   getFavicon(id: string, hash: string): Promise<Uint8Array | null>;
   command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
+  command(command: Extract<BrowserCommand, { type: 'take-capture' | 'capture-full-page' | 'capture-screen' | 'edit-capture' | 'copy-capture' }>): Promise<CaptureShot>;
   command(command: BrowserCommand): Promise<void>;
   setContentArea(area: ContentArea): Promise<void>;
   onState(callback: (state: BrowserState) => void): () => void;

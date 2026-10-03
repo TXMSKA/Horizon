@@ -100,7 +100,7 @@ function SettingsSegmented<T extends string>({ id, value, choices, disabled, onC
 }
 
 function SettingsToggle({ title, hint, value, command, language }: {
-  title: CopyKey; hint?: string; value: boolean; command: 'set-ask-where-to-save' | 'set-block-ads' | 'set-block-third-party-cookies' | 'set-clear-history-on-close' | 'set-clear-cache-on-close' | 'contrast'; language: Language;
+  title: CopyKey; hint?: string; value: boolean; command: 'set-ask-where-to-save' | 'set-block-ads' | 'set-block-third-party-cookies' | 'set-clear-history-on-close' | 'set-clear-cache-on-close' | 'contrast' | 'set-show-capture'; language: Language;
 }) {
   return <SettingRow title={title} hint={hint} language={language}>{(id, apply, pending) => <Switch checked={value} labelledBy={`${id}-title`} describedBy={hint ? `${id}-hint` : undefined} disabled={pending} onChange={value => {
     void apply(command === 'contrast' ? { type: command, value: value ? 'high' : 'standard' } : { type: command, value }, text('settingSaved', language).replace('{setting}', text(title, language)).replace('{value}', text(value ? 'on' : 'off', language)));
@@ -132,6 +132,7 @@ function AppearanceSettings({ state, language }: { state: BrowserState; language
     <SettingsGroup title="product" language={language}>
       <SettingRow title="theme" hint={t('themeHint')} language={language}>{(id, apply, pending) => <SettingsSegmented id={id} value={state.theme} choices={[{ value: 'system', label: 'system' }, { value: 'amber', label: 'amber' }, { value: 'daylight', label: 'daylight' }]} disabled={pending} language={language} onChange={value => { void apply({ type: 'theme', value }, saved('theme', value)); }} />}</SettingRow>
       <SettingsToggle title="highContrast" hint={t('contrastHint')} value={state.contrast === 'high'} command="contrast" language={language} />
+      <SettingsToggle title="showCapture" hint={t('showCaptureHint')} value={state.showCapture} command="set-show-capture" language={language} />
     </SettingsGroup>
     <SettingsGroup title="webPages" language={language}>
       <SettingRow title="darkPages" hint={t('darkPagesHint')} language={language}>{(id, apply, pending) => <SettingsSegmented id={id} value={state.darkPages.mode} choices={[{ value: 'off', label: 'off' }, { value: 'on', label: 'on' }, { value: 'system', label: 'system' }]} disabled={pending} language={language} onChange={value => { void apply({ type: 'dark-pages', value }, saved('darkPages', value)); }} />}</SettingRow>

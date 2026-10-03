@@ -220,18 +220,18 @@ test('changing the drop folder during draft flush cancels the save without leavi
 test('quick access migrates settings versions 1 through 3 without losing their saved choices', t => {
   const directory = temporaryDirectory(t, 'quick-access-migration'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
-  assert.equal(defaults.version, 4); assert.deepEqual(defaults.quickAccess, []);
-  const third = { ...defaults, version: 3, searchEngine: 'brave', language: 'es', askWhereToSave: true, blockAds: false, blockThirdPartyCookies: false }; delete third.quickAccess;
+  assert.equal(defaults.version, 5); assert.deepEqual(defaults.quickAccess, []);
+  const third = { ...defaults, version: 3, searchEngine: 'brave', language: 'es', askWhereToSave: true, blockAds: false, blockThirdPartyCookies: false }; delete third.quickAccess; delete third.showCapture;
   const versions = [{ version: 1, theme: 'amber', contrast: 'high' }, { version: 2, theme: 'daylight', contrast: 'standard', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' }, third];
   for (const previous of versions) {
     writeFileSync(path, JSON.stringify(previous));
-    const expected = { ...defaults, ...previous, version: 4, quickAccess: [] };
+    const expected = { ...defaults, ...previous, version: 5, quickAccess: [], showCapture: true };
     assert.deepEqual(readSettings(path), expected); assert.deepEqual(JSON.parse(readFileSync(path)), expected);
   }
   const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   writeFileSync(path, JSON.stringify(third));
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...localRequire(name), writeFileSync() { throw new Error('Read-only settings'); } } : localRequire(name));
-  assert.deepEqual(exported.readSettings(path), { ...defaults, ...third, version: 4, quickAccess: [] });
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...third, version: 5, quickAccess: [], showCapture: true });
   assert.deepEqual(JSON.parse(readFileSync(path)), third);
 });
 
@@ -321,7 +321,7 @@ test('Hub tiles, dock and menus support keyboard opening, pending saves, retry a
   const { Hub } = interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: (_reason, language) => copy.text('SETTINGS_SAVE_FAILED', language) } }, {
     document, window: { horizon: { command: command => { sent.push(command); return new Promise((resolve, fail) => { complete = resolve; reject = fail; }); } } },
   });
-  const state = { quickAccess: [] }, opener = { current: { contains: () => false } }, focus = { focus: () => focused++ };
+  const state = { quickAccess: [], showCapture: true }, opener = { current: { contains: () => false } }, focus = { focus: () => focused++ };
   const render = () => hooks.render(() => Hub({ state, language: 'en', page, opener, onPage: value => { page = value; }, onAnnounce: value => announced.push(value), onDismiss: value => dismissed.push(value) }));
   const nodes = (tree, role) => notebookNodes(tree, node => node.props.role === role);
   const tile = tree => notebookNodes(tree, node => node.props.className === 'hub-tile').find(node => node.props.children[1].props.children === 'Themes');
@@ -367,7 +367,7 @@ test('installed theme radios save explicit choices, follow system changes and se
   const react = Object.fromEntries(Object.keys(hubHooks.react).map(key => [key, (...args) => hooks.react[key](...args)]));
   let complete, changed;
   const system = { matches: true, addEventListener(_name, callback) { changed = callback; }, removeEventListener() {} };
-  const state = { theme: 'system', contrast: 'standard', quickAccess: [] };
+  const state = { theme: 'system', contrast: 'standard', quickAccess: [], showCapture: true };
   const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check' }, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: () => 'Failed' } }, {
     matchMedia: () => system, window: { horizon: { command: command => { commands.push(command); return new Promise(resolve => { complete = () => { state[command.type] = command.value; resolve(); }; }); } } },
   });
@@ -404,9 +404,9 @@ test('page menus contain only applicable groups and preserve enabled edit and na
   const rows = (ids, enabled = true) => ids.map(id => ({ id, enabled }));
   assert.deepEqual(contextMenuGroups(menuParams({ linkURL: 'https://example.com/' }), menuNavigation), [rows(['open-link', 'copy-link'])]);
   assert.deepEqual(contextMenuGroups(menuParams({ mediaType: 'image', srcURL: 'http://example.com/image.png' }), menuNavigation), [rows(['open-image', 'save-image', 'copy-image', 'copy-image-address'])]);
-  assert.deepEqual(contextMenuGroups(menuParams({ selectionText: 'Selected text' }), menuNavigation), [rows(['copy', 'search-selection'])]);
+  assert.deepEqual(contextMenuGroups(menuParams({ selectionText: 'Selected text' }), menuNavigation), [rows(['copy', 'search-selection']), rows(['add-to-desktop'])]);
   assert.deepEqual(contextMenuGroups(menuParams({ isEditable: true, selectionText: 'In a field', dictionarySuggestions: ['word', 'ward', 'word'] }), menuNavigation), [
-    rows(['spell:word', 'spell:ward']), [...rows(['undo', 'redo', 'cut'], false), ...rows(['copy', 'paste', 'select-all'])],
+    rows(['spell:word', 'spell:ward']), [...rows(['undo', 'redo', 'cut'], false), ...rows(['copy', 'paste', 'select-all'])], rows(['add-to-desktop']),
   ]);
   const flags = { canUndo: true, canRedo: false, canCut: true, canCopy: false, canPaste: false, canSelectAll: false };
   assert.deepEqual(contextMenuGroups(menuParams({ isEditable: true, editFlags: flags }), menuNavigation), [[
@@ -415,14 +415,34 @@ test('page menus contain only applicable groups and preserve enabled edit and na
   ]]);
   assert.deepEqual(contextMenuGroups(menuParams(), menuNavigation), [[{ id: 'back', enabled: true }, { id: 'forward', enabled: false }, { id: 'reload', enabled: true }]]);
   const combined = menuParams({ linkURL: 'https://example.com/', mediaType: 'image', srcURL: 'https://example.com/photo', selectionText: 'caption' });
-  assert.deepEqual(contextMenuGroups(combined, menuNavigation), [rows(['open-link', 'copy-link']), rows(['open-image', 'save-image', 'copy-image', 'copy-image-address']), rows(['copy', 'search-selection'])]);
+  assert.deepEqual(contextMenuGroups(combined, menuNavigation), [rows(['open-link', 'copy-link']), rows(['open-image', 'save-image', 'copy-image', 'copy-image-address']), rows(['copy', 'search-selection']), rows(['add-to-desktop'])]);
+});
+
+
+test('capture saving moves the kept id and leaves a newly opened preview alone', async () => {
+  const { compileFunction } = require('node:vm'), ts = require('typescript'), copy = interfaceModule('src/copy.ts');
+  const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let initializer; const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'saveDesktopCapture') initializer = node.initializer; ts.forEachChild(node, visit); }; visit(source);
+  const compiled = ts.transpileModule(`export const save = ${initializer.getText(source)};`, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  for (const reopened of [false, true]) {
+    const overlay = {}, live = { current: overlay }, commands = [], notices = [], pages = [], exported = {}; let closed = 0;
+    const globals = { captureShot: { id: 'kept' }, desktopOverlay: overlay, desktopScope: 'scope', liveDesktopOverlay: live, liveDesktopScope: { current: 'scope' },
+      edits: { flush: async () => {} }, window: { horizon: { async command(command) { commands.push(command); if (reopened) live.current = {}; } } },
+      closeCapture: () => { closed++; }, setDesktopNotice: notice => notices.push(notice), text: copy.text, language: 'en', openDesktopPanel: async page => pages.push(page),
+    };
+    compileFunction(compiled, ['exports', ...Object.keys(globals)])(exported, ...Object.values(globals));
+    await exported.save({ id: 'project', name: 'Research' });
+    assert.deepEqual(commands, [{ type: 'add-capture-to-project', id: 'kept', project: 'project', folder: null }]);
+    assert.equal(closed, reopened ? 0 : 1); assert.equal(notices[0].message, 'Saved to Research'); assert.equal(notices[0].capture, true);
+    notices[0].onAction(); assert.deepEqual(pages, [{ kind: 'project', project: 'project' }]);
+  }
 });
 
 test('page menus drop every URL action for unsafe links and images', () => {
   for (const url of ['javascript:alert(1)', 'file:///private', 'horizon://app/', 'data:image/png,bytes', 'blob:https://example.com/image', 'about:blank', 'https://user@example.com/', ' https://example.com/', 'https://example.com/' + 'a'.repeat(8192)]) {
     assert.deepEqual(contextMenuGroups(menuParams({ linkURL: url }), menuNavigation), [], url);
     assert.deepEqual(contextMenuGroups(menuParams({ mediaType: 'image', srcURL: url }), menuNavigation), [], url);
-    assert.deepEqual(contextMenuGroups(menuParams({ linkURL: url, selectionText: 'Keep this selection' }), menuNavigation).flat().map(row => row.id), ['copy', 'search-selection']);
+    assert.deepEqual(contextMenuGroups(menuParams({ linkURL: url, selectionText: 'Keep this selection' }), menuNavigation).flat().map(row => row.id), ['copy', 'search-selection', 'add-to-desktop']);
   }
 });
 
@@ -2083,14 +2103,14 @@ test('settings validate themes, write atomically and preserve corrupt or oversiz
   assert.equal(settings.theme, 'system');
   assert.equal(createSettings(path, () => {}).migrationAllowed, false);
   assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
-  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 4, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] }), true);
+  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 5, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true }), true);
   for (const value of [null, [], {}, { version: 2, theme: 'system' }, { version: 1, theme: 'dark' }, { version: 1, theme: 'amber', extra: true }, { version: 1, theme: 'amber' }, { version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', contrast: null }, { version: 1, theme: 'amber', contrast: 'high', extra: true }]) {
     assert.equal(validateSettings(value), false);
     assert.throws(() => writeSettings(path, value));
   }
   for (const corrupt of ['{broken', JSON.stringify({ version: 2, theme: 'amber' }), ' '.repeat(4097)]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readSettings(path), { version: 4, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
+    assert.deepEqual(readSettings(path), { version: 5, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
     assert.ok(readdirSync(directory).filter(name => name.startsWith('settings.json.corrupt-')).some(name => readFileSync(join(directory, name), 'utf8') === corrupt));
   }
   const existing = createSettings(path, () => {});
@@ -2251,7 +2271,7 @@ test('dark page flips replace views in every profile without closing tabs and si
 
 test('dark page settings validate exact values, migrate version 1 and retain valid data when migration cannot be saved', t => {
   const directory = temporaryDirectory(t, 'dark-settings'), path = join(directory, 'settings.json');
-  const defaults = { version: 4, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] };
+  const defaults = { version: 5, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true };
   assert.deepEqual(readSettings(path), defaults);
   for (const darkPages of ['off', 'on', 'system']) for (const darkStrength of ['soft', 'standard', 'deep']) for (const darkTone of ['neutral', 'warm']) {
     const valid = { ...defaults, darkPages, darkStrength, darkTone };
@@ -2426,25 +2446,25 @@ test('contrast defaults follow the OS only on first run and legacy settings migr
   const directory = temporaryDirectory(t, 'contrast');
   const first = join(directory, 'first.json');
   const settings = createSettings(first, () => {}, true);
-  assert.deepEqual(readSettings(first), { version: 4, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
+  assert.deepEqual(readSettings(first), { version: 5, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   settings.setTheme('amber', true);
   assert.equal(settings.contrast, 'high');
   settings.setContrast('standard');
   assert.equal(settings.theme, 'amber');
-  assert.deepEqual(readSettings(first, true), { version: 4, theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
+  assert.deepEqual(readSettings(first, true), { version: 5, theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   assert.throws(() => settings.setContrast('invalid'));
   assert.equal(settings.contrast, 'standard');
   for (const theme of ['system', 'amber', 'daylight']) {
     const legacy = join(directory, theme + '.json');
     writeFileSync(legacy, JSON.stringify({ version: 1, theme }));
-    assert.deepEqual(readSettings(legacy, true), { version: 4, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
-    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 4, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
+    assert.deepEqual(readSettings(legacy, true), { version: 5, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 5, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
     assert.equal(createSettings(legacy, () => {}, true).migrationAllowed, false);
   }
   assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
   const blocked = join(directory, 'blocked');
   writeFileSync(blocked, 'file');
-  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 4, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
+  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 5, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   const unavailable = createSettings(join(blocked, 'settings.json'), () => {}, true);
   assert.throws(() => unavailable.setContrast('standard'));
   assert.equal(unavailable.contrast, 'high');
@@ -3089,7 +3109,7 @@ test('cosmetic sanitization keeps only fixed hiding declarations and refuses loa
   assert.deepEqual(safeCosmeticCSS(styles), { css: '.ad { display: none !important; }', rules: 1 });
 });
 const { validateDesktopStore, readDesktopStore, writeDesktopStore, writeCaptureFile, readCaptureFile, cleanupCaptureFiles, CAPTURE_LIMIT, CAPTURE_STORAGE_LIMIT } = require('../dist/electron/desktop.js');
-const { captureRectangle, captureSelection, captureWholePage, SELECTION_CODE, SELECTION_WORLD, CAPTURE_DEADLINE } = require('../dist/electron/captures.js');
+const { captureWholePage, CAPTURE_DEADLINE } = require('../dist/electron/captures.js');
 const plainCipher = { isEncryptionAvailable: () => false };
 function sampleDesktopItem(kind = 'note') {
   return { id: randomUUID(), folder: null, kind, title: 'Item', text: kind === 'note' || kind === 'text' ? 'Private text' : '', note: '',
@@ -3235,7 +3255,6 @@ test('every new Desktop command checks exact keys and the current profile projec
     { type: 'move-item-project', project, id, toProject: other.id, folder: null }, { type: 'add-capture-to-project', project, id: capture.id, folder },
     { type: 'add-link', project, folder, address: 'https://example.com/', title: 'Page' }, { type: 'add-text', project, folder: null, text: 'Text', source: null },
     { type: 'add-note', project, folder, title: 'Note', text: 'Body' }, { type: 'delete-capture', id: capture.id }, { type: 'update-item', project: null, id: capture.id, note: 'Note' },
-    { type: 'save-capture', project: null, kind: 'page' }, { type: 'save-capture', project: null, folder: null, kind: 'area', rect: { x: 0, y: 0, width: 10, height: 10 } },
     { type: 'open-desktop', id: 'captures', item: capture.id }, ...[{ kind: 'home' }, { kind: 'captures' }, { kind: 'new-project' }, { kind: 'project', project, folder }, { kind: 'item', project, id }, { kind: 'item', project: null, id: capture.id }].map(page => ({ type: 'open-desktop-panel', page })),
     { type: 'close-desktop-panel' },
   ];
@@ -3274,7 +3293,7 @@ test('Desktop addresses activate existing profile tabs and the panel persists ac
   assert.equal(views[0].getBounds().width, 300); assert.equal(views[0].getBounds().y, 125); assert.equal(views[0].getVisible(), true);
   command({ type: 'activate-tab', id: tab }); command({ type: 'activate-tab', id: webTab }); assert.deepEqual(state().desktopPanel, { open: true, page: { kind: 'project', project, folder } });
   command({ type: 'close-desktop-panel' }); assert.equal(views[0].getBounds().width, 800); assert.equal(state().desktopPanel.open, false);
-  await command({ type: 'save-capture', project: null, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } });
+  await command({ type: 'take-capture' });
   const captures = () => handlers.get('horizon:captures')(event), capture = captures()[0];
   assert.deepEqual(browser.image(null, capture.id), faviconPNG); assert.equal(state().captures[0].id, capture.id);
   for (const page of [{ kind: 'home' }, { kind: 'captures' }, { kind: 'new-project' }, { kind: 'item', project: null, id: capture.id }]) { command({ type: 'open-desktop-panel', page }); assert.deepEqual(state().desktopPanel.page, page); }
@@ -3428,7 +3447,6 @@ test('all notebook commands validate exact arguments and refuse another profile 
     ...['delete-project', 'set-project'].map(type => ({ type, id })), { type: 'open-desktop', id }, { type: 'open-desktop', id, item },
     { type: 'add-note', project: id, title: '', text: '' }, { type: 'update-item', project: id, id: item, title: '', text: 'Body' },
     { type: 'update-item', project: id, id: item, note: '' }, { type: 'delete-item', project: id, id: item },
-    ...['text', 'page'].map(kind => ({ type: 'save-capture', project: id, kind })), { type: 'save-capture', project: id, kind: 'area', rect: { x: -10, y: 10, width: 30, height: 40 } },
     { type: 'restore', kind: 'desktop' } ];
   for (const command of commands) {
     assert.deepEqual(validateCommand(command, new Set(), notebooks), command);
@@ -3448,18 +3466,17 @@ test('all notebook commands validate exact arguments and refuse another profile 
   invalid.forEach(command => assert.throws(() => validateCommand(command, new Set(), notebooks)));
 });
 
-test('area conversion multiplies chrome zoom, clamps inside the view and refuses small regions', () => {
-  assert.deepEqual(captureRectangle({ x: 10, y: 20, width: 30, height: 40 }, 1.5, { width: 100, height: 100 }), { x: 15, y: 30, width: 45, height: 60 });
-  assert.deepEqual(captureRectangle({ x: -10, y: -20, width: 100, height: 100 }, 2, { width: 100, height: 80 }), { x: 0, y: 0, width: 100, height: 80 });
-  assert.throws(() => captureRectangle({ x: 95, y: 0, width: 40, height: 40 }, 1, { width: 100, height: 100 }), /CAPTURE_AREA_SMALL/);
-  assert.throws(() => captureRectangle({ x: 0, y: 0, width: 8, height: 8 }, 0.5, { width: 100, height: 100 }), /CAPTURE_AREA_SMALL/);
+test('capture rectangles require exact integer bounds inside the stored image', () => {
+  const { validCaptureRect } = require('../dist/src/shared/capture.js'), image = { width: 100, height: 80 };
+  assert.equal(validCaptureRect({ x: 92, y: 72, width: 8, height: 8 }, image), true);
+  for (const rect of [null, [], {}, { x: -1, y: 0, width: 8, height: 8 }, { x: 0.5, y: 0, width: 8, height: 8 }, { x: 93, y: 0, width: 8, height: 8 }, { x: 0, y: 73, width: 8, height: 8 }, { x: 0, y: 0, width: 7, height: 8 }, { x: 0, y: 0, width: 8, height: Infinity }, { x: 0, y: 0, width: 8, height: 8, extra: 1 }, Object.create({ x: 0, y: 0, width: 8, height: 8 })])
+    assert.equal(validCaptureRect(rect, image), false);
 });
 
-test('selection capture uses one fixed isolated world and fixed code, trims, caps and reports no selection', async () => {
-  const calls = [], contents = { executeJavaScriptInIsolatedWorld: async (...args) => { calls.push(args); return '  Selected  '; } };
-  assert.equal(await captureSelection(contents), 'Selected'); assert.deepEqual(calls, [[SELECTION_WORLD, [{ code: 'String(getSelection())' }]]]); assert.equal(SELECTION_CODE, 'String(getSelection())');
-  contents.executeJavaScriptInIsolatedWorld = async () => ' '; await assert.rejects(captureSelection(contents), /NOTHING_SELECTED/);
-  contents.executeJavaScriptInIsolatedWorld = async () => 'a'.repeat(100001); assert.equal((await captureSelection(contents)).length, 100000);
+test('pages contain no script execution or isolated-world selection read', () => {
+  for (const file of ['electron/captures.ts', 'electron/browser.ts', 'electron/preload.ts'])
+    assert.doesNotMatch(readFileSync(file, 'utf8'), /executeJavaScript|SELECTION_WORLD|SELECTION_CODE|captureSelection/);
+  assert.match(readFileSync('docs/security/electron-checklist.md', 'utf8'), /No script runs in web pages/);
 });
 
 test('page protocol refuses hidden views, caps device height, uses only two commands and always detaches', async () => {
@@ -3484,6 +3501,8 @@ test('either page protocol call exceeding its deadline detaches without acceptin
     finish({ data: faviconPNG.toString('base64') }); await Promise.resolve(); await Promise.resolve(); assert.equal(detached, 1); assert.equal(timers.size, 0);
   }
 });
+function capturePNG(width, height) { const bytes = Buffer.from(faviconPNG); bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20); return bytes; }
+
 function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
   let close = () => {}; t.after(() => close());
@@ -3512,8 +3531,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
     insertCSS() { return Promise.resolve('style'); }
     removeInsertedCSS() { return Promise.resolve(); }
     close() { if (!this.destroyed) { this.destroyed = true; this.emit('destroyed'); } }
-    capturePage(...args) { this.captureArgs = args; return Promise.resolve({ toPNG: () => faviconPNG }); }
-    executeJavaScriptInIsolatedWorld(...args) { this.selectionArgs = args; return Promise.resolve(this.selection ?? ' Selected text '); }
+    capturePage(...args) { this.captureArgs = args; return Promise.resolve({ toPNG: pngOptions => { options.pngOptions = pngOptions; return options.captureBytes ?? faviconPNG; } }); }
     downloadURL(url) { if (options.downloadError) throw new Error('Download failed'); this.downloaded = url; }
   }
   class View {
@@ -3526,6 +3544,8 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const app = Object.assign(new EventEmitter(), { getLocale: () => 'en', getVersion: () => '0.1.0-test', getPath: () => directory, commandLine: { appendSwitch() {}, removeSwitch() {} } });
   app.quit = () => { app.quits = (app.quits || 0) + 1; };
   const electron = { app, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), safeStorage: cipher, WebContentsView: View,
+    ClipboardItem: class { constructor(data) { this.data = data; } }, clipboard: { async write(items) { if (options.clipboardError) throw new Error('Synthetic clipboard refusal'); options.copiedItems = items; } },
+    nativeImage: { createFromBuffer: () => ({ crop(rect) { options.cropRect = rect; return { toPNG: () => capturePNG(rect.width, rect.height) }; } }) },
     screen: { getDisplayMatching: () => ({ scaleFactor: 2 }) },
     ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
     session: { fromPartition(partition) {
@@ -3558,7 +3578,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const state = () => handlers.get('horizon:state')(event), command = value => handlers.get('horizon:command')(event, value);
   const notebook = (...args) => handlers.get('horizon:project')(event, ...args), image = (...args) => handlers.get('horizon:capture-image')(event, ...args);
   const area = hidden => handlers.get('horizon:content-area')(event, { top: 100, hidden });
-  const navigate = (url = 'https://example.com/') => { command({ type: 'navigate', input: url }); views.at(-1).webContents.emit('did-navigate', {}, url); };
+  const navigate = (url = 'https://example.com/') => { command({ type: 'navigate', input: url }); views.at(-1).webContents.emit('did-navigate', {}, url); views.at(-1).webContents.emit('did-stop-loading'); };
   return { directory, handlers, views, timers, sessions, window, app, close, event, state, command, notebook, image, area, navigate, settings, openLaunch: browser.openLaunch, isLaunchNavigation: exported.isLaunchNavigation };
 }
 
@@ -3576,7 +3596,7 @@ test('notebook tabs are chrome pages, remain consistent across editing and never
   command({ type: 'open-desktop', id }); assert.equal(state().activeId, tab); assert.equal(state().tabs.length, 1);
   command({ type: 'rename-project', id, name: 'Renamed Name' }); assert.equal(state().tabs.find(entry => entry.id === tab).url, 'horizon://desktop/renamed-name');
   assert.equal(state().tabs.find(entry => entry.id === tab).title, 'Renamed Name'); assert.ok(state().desktopVersion > version);
-  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'text' }), /CAPTURE_UNAVAILABLE/);
+  await assert.rejects(command({ type: 'take-capture' }), /CAPTURE_UNAVAILABLE/);
   command({ type: 'update-item', project: id, id: item, title: 'Edited title', text: 'Secret edit' });
   const wire = JSON.stringify(state()); assert.equal(wire.includes('Secret edit'), false); assert.equal(wire.includes('Secret note'), false);
   command({ type: 'open-desktop', id, item }); command({ type: 'delete-item', project: id, id: item });
@@ -3594,44 +3614,97 @@ test('notebook tabs are chrome pages, remain consistent across editing and never
   browser.close(); assert.equal(browser.handlers.size, 0); assert.equal(browser.timers.size, 0);
 });
 
-test('capture commands save all three kinds to the current profile and image IPC exposes bytes without paths', async t => {
-  const browser = notebookBrowser(t), { state, command, notebook, image, handlers, event, window } = browser;
-  command({ type: 'create-project', name: 'Screenshots' }); const id = state().projectInUse;
-  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } }), /CAPTURE_UNAVAILABLE/);
-  browser.navigate(); const view = browser.views[0]; window.webContents.zoom = 1.5; browser.area(true);
-  await command({ type: 'save-capture', project: id, kind: 'text' });
-  const text = notebook(id).items[0]; assert.equal(text.text, 'Selected text'); assert.equal(text.title, 'A web page');
-  assert.deepEqual(text.source, { url: 'https://example.com/', title: 'A web page' });
-  assert.deepEqual(view.webContents.selectionArgs, [1006, [{ code: 'String(getSelection())' }]]);
-  await command({ type: 'save-capture', project: id, kind: 'area', rect: { x: -10, y: -10, width: 1000, height: 1000 } });
-  assert.deepEqual(view.webContents.captureArgs, [{ x: 0, y: 0, width: 800, height: 450 }, { stayHidden: true }]);
-  const area = notebook(id).items[1]; assert.deepEqual(image(id, area.id), faviconPNG); assert.equal(image(id, text.id), null);
-  assert.deepEqual(area.image, { width: 1, height: 1, bytes: faviconPNG.length, cut: false }); assert.equal(JSON.stringify(notebook(id)).includes('.bin'), false);
-  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/); assert.equal(view.webContents.protocol.length, 0);
+
+test('failed capture replacement and project movement preserve the kept encrypted file and permit Retry', t => {
+  const fs = require('node:fs'), path = join(temporaryDirectory(t, 'capture-rollback'), 'notebooks.json');
+  const timers = new Map(), { createDesktop } = timedModule('desktop', timers), desktop = createDesktop(path, plainCipher, () => {});
+  const project = desktop.create('Research'), entry = sampleDesktopItem('area'); entry.image = null;
+  desktop.addCapture(null, entry, capturePNG(100, 80), { width: 100, height: 80, cut: false }); desktop.flush();
+  const before = readDesktopStore(path), files = fs.readdirSync(join(require('node:path').dirname(path), 'captures')), rename = fs.renameSync; let denied = true;
+  t.mock.method(fs, 'renameSync', (...args) => { if (denied && args[1] === path) throw Object.assign(new Error('Synthetic disk refusal'), { code: 'EACCES' }); return rename(...args); });
+  assert.throws(() => desktop.replaceCapture(entry.id, capturePNG(20, 18), { width: 20, height: 18, cut: false }, 'page'), /DESKTOP_STORAGE_FAILED/);
+  assert.deepEqual(desktop.captures()[0].image, { width: 100, height: 80, cut: false, bytes: faviconPNG.length });
+  assert.equal(desktop.captures()[0].kind, 'area'); assert.equal(desktop.captures()[0].updatedAt, before.captures[0].updatedAt);
+  assert.throws(() => desktop.addCaptureToProject(entry.id, project.id, null), /DESKTOP_STORAGE_FAILED/);
+  assert.equal(desktop.captures().length, 1); assert.equal(desktop.get(project.id).items.length, 0);
+  assert.deepEqual(readDesktopStore(path), before); assert.deepEqual(fs.readdirSync(join(require('node:path').dirname(path), 'captures')), files);
+  denied = false; desktop.addCaptureToProject(entry.id, project.id, null);
+  assert.equal(readDesktopStore(path).captures.length, 0); assert.equal(readDesktopStore(path).projects[0].items[0].id, entry.id); desktop.dispose();
+});
+
+test('a failed cropped clipboard write keeps the original image and retries the same crop once', async t => {
+  const options = { captureBytes: capturePNG(100, 80), clipboardError: true }, browser = notebookBrowser(t, plainCipher, options);
+  browser.navigate(); const shot = await browser.command({ type: 'take-capture' }), rect = { x: 20, y: 10, width: 50, height: 40 };
+  await assert.rejects(browser.command({ type: 'copy-capture', id: shot.id, rect }), /CAPTURE_FAILED/);
+  assert.deepEqual(browser.image(null, shot.id), options.captureBytes); assert.equal(browser.state().captures.length, 1);
+  options.clipboardError = false; const result = await browser.command({ type: 'copy-capture', id: shot.id, rect });
+  assert.equal(result.width, 50); assert.equal(result.height, 40); assert.deepEqual(browser.image(null, shot.id), capturePNG(50, 40));
+  browser.close();
+});
+
+test('a full-page request refuses a changed source and loading or crashed pages have named capture failures', async t => {
+  const browser = notebookBrowser(t); browser.navigate(); const shot = await browser.command({ type: 'take-capture' });
+  browser.navigate('https://other.example/'); await assert.rejects(browser.command({ type: 'capture-full-page', id: shot.id }), /CAPTURE_CHANGED/);
+  browser.command({ type: 'navigate', input: 'https://loading.example/' });
+  await assert.rejects(browser.command({ type: 'take-capture' }), /CAPTURE_LOADING/);
+  browser.views.at(-1).webContents.emit('render-process-gone', {}, { reason: 'crashed' });
+  await assert.rejects(browser.command({ type: 'take-capture' }), /CAPTURE_CRASHED/); browser.close();
+});
+
+test('context-menu selection falls back to the most recently used remaining project', t => {
+  let now = 1000; t.mock.method(Date, 'now', () => ++now);
+  const browser = notebookBrowser(t), { command, state } = browser; browser.navigate();
+  command({ type: 'create-project', name: 'First' }); const first = state().projectInUse;
+  command({ type: 'create-project', name: 'Second' }); command({ type: 'set-project', id: first });
+  command({ type: 'create-project', name: 'Temporary' }); command({ type: 'delete-project', id: state().projectInUse });
+  assert.equal(state().projectInUse, null);
+  browser.views[0].webContents.emit('context-menu', {}, menuParams({ selectionText: 'Selected words' }));
+  const menu = browser.window.webContents.sent.at(-1)[1]; command({ type: 'context-menu', id: menu.id, item: 'add-to-desktop' });
+  assert.equal(state().projectInUse, first); assert.equal(browser.notebook(first).items.at(-1).text, 'Selected words'); browser.close();
+});
+
+test('capture keeps device-scale bytes immediately, replaces and copies safely, then moves the same encrypted item', async t => {
+  const options = { captureBytes: capturePNG(100, 80) }, browser = notebookBrowser(t, plainCipher, options);
+  const { state, command, notebook, image, handlers, event } = browser;
+  command({ type: 'create-project', name: 'Screenshots' }); const project = state().projectInUse;
+  await assert.rejects(command({ type: 'take-capture' }), /CAPTURE_UNAVAILABLE/);
+  browser.navigate(); browser.area(false); const view = browser.views[0];
+  const shot = await command({ type: 'take-capture' });
+  assert.deepEqual(view.webContents.captureArgs, []); assert.deepEqual(options.pngOptions, { scaleFactor: 2 });
+  assert.deepEqual(image(null, shot.id), options.captureBytes); assert.equal(state().captures.length, 1); assert.equal(notebook(project).items.length, 0);
+  const path = join(browser.directory, 'profiles', state().activeProfileId, 'notebooks.json'), saved = readDesktopStore(path);
+  assert.equal(saved.captures[0].id, shot.id); const originalFile = saved.captures[0].image.filename;
+  assert.equal(JSON.stringify(state()).includes('.bin'), false);
+  browser.area(true); await assert.rejects(command({ type: 'capture-full-page', id: shot.id }), /CAPTURE_PAGE_HIDDEN/);
   browser.area(false); view.setVisible(false);
-  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/);
-  view.setVisible(true); const originalBounds = view.getBounds(); view.setBounds({ ...originalBounds, x: 800 });
-  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/);
-  view.setBounds(originalBounds); await command({ type: 'save-capture', project: id, kind: 'page' });
-  assert.equal(view.webContents.attached, false); assert.equal(view.webContents.detached, 1); assert.equal(notebook(id).items.length, 3);
-  assert.equal(state().projects[0].captures, 3); assert.equal(state().projects[0].latest.length, 3);
-  assert.equal(JSON.stringify(state()).includes('Selected text'), false); assert.equal(JSON.stringify(state()).includes('image'), false);
-  view.webContents.selection = ''; await assert.rejects(command({ type: 'save-capture', project: id, kind: 'text' }), /NOTHING_SELECTED/);
-  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'area', rect: { x: 0, y: 0, width: 1, height: 1 } }), /CAPTURE_AREA_SMALL/);
-  view.webContents.executeJavaScriptInIsolatedWorld = async () => { throw new Error('Native detail'); };
-  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'text' }), /CAPTURE_FAILED/);
+  await assert.rejects(command({ type: 'capture-full-page', id: shot.id }), /CAPTURE_PAGE_HIDDEN/);
+  view.setVisible(true); const bounds = view.getBounds(); view.setBounds({ ...bounds, x: 800 });
+  await assert.rejects(command({ type: 'capture-full-page', id: shot.id }), /CAPTURE_PAGE_HIDDEN/);
+  view.setBounds(bounds); await command({ type: 'capture-full-page', id: shot.id });
+  assert.equal(view.webContents.detached, 1); assert.equal(state().captures.length, 1);
+  assert.notEqual(readDesktopStore(path).captures[0].image.filename, originalFile);
+  await command({ type: 'capture-screen', id: shot.id });
+  const rect = { x: 10, y: 12, width: 20, height: 18 };
+  const cropped = await command({ type: 'copy-capture', id: shot.id, rect });
+  assert.deepEqual(options.cropRect, rect); assert.equal(cropped.width, 20); assert.equal(cropped.height, 18);
+  assert.equal(options.copiedItems.length, 1); assert.ok(options.copiedItems[0].data['image/png'] instanceof Blob);
+  const filename = readDesktopStore(path).captures[0].image.filename;
+  command({ type: 'add-capture-to-project', id: shot.id, project, folder: null });
+  assert.equal(state().captures.length, 0); assert.equal(notebook(project).items[0].id, shot.id);
+  assert.equal(readDesktopStore(path).projects[0].items[0].image.filename, filename);
+  assert.deepEqual(image(project, shot.id), capturePNG(20, 18));
   for (const channel of ['horizon:project', 'horizon:capture-image']) {
-    const args = channel === 'horizon:project' ? [id] : [id, area.id];
+    const args = channel === 'horizon:project' ? [project] : [project, shot.id];
     assert.throws(() => handlers.get(channel)({ ...event, sender: {} }, ...args));
     assert.throws(() => handlers.get(channel)({ ...event, senderFrame: { url: 'horizon://app/' } }, ...args));
     assert.throws(() => handlers.get(channel)(event, ...args, 'extra'));
     assert.throws(() => handlers.get(channel)(event, '../escape', ...args.slice(1)));
     assert.throws(() => handlers.get(channel)(event));
   }
-  assert.throws(() => image(id, randomUUID()), /DESKTOP_ITEM_NOT_FOUND/); assert.throws(() => notebook(randomUUID()), /PROJECT_NOT_FOUND/);
-  const work = state().profiles.find(profile => profile.id !== state().activeProfileId); command({ type: 'switch-profile', id: work.id });
-  assert.deepEqual(state().projects, []); assert.throws(() => notebook(id), /PROJECT_NOT_FOUND/); assert.throws(() => image(id, area.id), /PROJECT_NOT_FOUND/);
-  for (const value of [{ type: 'open-desktop', id }, { type: 'save-capture', project: id, kind: 'text' }, { type: 'delete-item', project: id, id: area.id }]) assert.throws(() => command(value));
+  const other = state().profiles.find(profile => profile.id !== state().activeProfileId);
+  command({ type: 'switch-profile', id: other.id });
+  for (const value of [{ type: 'copy-capture', id: shot.id }, { type: 'edit-capture', id: shot.id, rect }, { type: 'capture-full-page', id: shot.id }]) assert.throws(() => command(value));
+  assert.throws(() => image(project, shot.id), /PROJECT_NOT_FOUND/);
   browser.close(); assert.equal(handlers.size, 0); assert.equal(browser.timers.size, 0);
 });
 
@@ -3649,14 +3722,14 @@ test('captures abandon changed tabs, pages, errors and profiles even when the or
   for (const change of changes) {
     browser.navigate(); let finish;
     view.webContents.capturePage = () => new Promise(done => { finish = done; });
-    const work = command({ type: 'save-capture', project: id, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } });
+    const work = command({ type: 'take-capture' });
     const rejected = assert.rejects(work, /CAPTURE_CHANGED/); change(); finish({ toPNG: () => faviconPNG }); await rejected;
     assert.equal(notebook(id).items.length, 0);
   }
   browser.navigate(); let finish;
-  view.webContents.executeJavaScriptInIsolatedWorld = () => new Promise(done => { finish = done; });
-  const pending = command({ type: 'save-capture', project: id, kind: 'text' }), rejected = assert.rejects(pending, /CAPTURE_CHANGED/);
-  command({ type: 'close-tab', id: tab }); finish('Selection'); await rejected; assert.equal(notebook(id).items.length, 0);
+  view.webContents.capturePage = () => new Promise(done => { finish = done; });
+  const pending = command({ type: 'take-capture' }), rejected = assert.rejects(pending, /CAPTURE_CHANGED/);
+  command({ type: 'close-tab', id: tab }); finish({ toPNG: () => faviconPNG }); await rejected; assert.equal(notebook(id).items.length, 0);
   browser.close(); assert.equal(browser.timers.size, 0);
 });
 
@@ -3667,14 +3740,15 @@ test('profile deletion stops notebook writes and undo timers and capture deadlin
   const id = state().projectInUse; command({ type: 'add-note', project: id, title: '', text: 'Unsaved' });
   command({ type: 'delete-item', project: id, id: notebook(id).items[0].id });
   browser.navigate(); browser.area(false); const deletedView = browser.views.at(-1);
+  const deletedShot = await command({ type: 'take-capture' });
   deletedView.webContents.debugger.sendCommand = () => new Promise(() => {});
-  const deletedCapture = command({ type: 'save-capture', project: id, kind: 'page' }), abandoned = assert.rejects(deletedCapture, /CAPTURE_CHANGED/);
+  const deletedCapture = command({ type: 'capture-full-page', id: deletedShot.id }), abandoned = assert.rejects(deletedCapture, /CAPTURE_CHANGED/);
   await command({ type: 'delete-profile', id: other.id }); fireTimers(browser.timers, 500); fireTimers(browser.timers, 8000);
   await abandoned; assert.equal(deletedView.webContents.detached, 1);
   assert.equal(existsSync(join(browser.directory, 'profiles', other.id)), false); assert.equal(browser.timers.size, 0);
   command({ type: 'create-project', name: 'Current profile' }); const current = state().projectInUse; browser.navigate(); browser.area(false);
-  const view = browser.views.at(-1); view.webContents.debugger.sendCommand = () => new Promise(() => {});
-  const pending = command({ type: 'save-capture', project: current, kind: 'page' }), rejected = assert.rejects(pending, /CAPTURE_TIMEOUT/);
+  const view = browser.views.at(-1), shot = await command({ type: 'take-capture' }); view.webContents.debugger.sendCommand = () => new Promise(() => {});
+  const pending = command({ type: 'capture-full-page', id: shot.id }), rejected = assert.rejects(pending, /CAPTURE_TIMEOUT/);
   fireTimers(browser.timers, CAPTURE_DEADLINE); await rejected; assert.equal(view.webContents.attached, false); assert.equal(view.webContents.detached, 1);
   assert.equal(notebook(current).items.length, 0); browser.close(); assert.equal(browser.timers.size, 0);
 });
@@ -3775,11 +3849,11 @@ function notebookNodes(node, predicate) {
   if (!node || typeof node !== 'object' || !node.props) return [];
   return [...(predicate(node) ? [node] : []), ...interfaceChildren(node).flatMap(child => notebookNodes(child, predicate))];
 }
-const notebookTestIcons = Object.fromEntries(['AppWindow', 'NotebookPen', 'SquareDashed', 'Type', 'Camera', 'Check', 'FileText', 'LoaderCircle', 'Pencil', 'Plus', 'TriangleAlert', 'X', 'Ellipsis', 'Trash2', 'ChevronDown', 'Folder', 'LayoutDashboard', 'Scan', 'FolderInput', 'FolderPlus', 'Link', 'ExternalLink'].map(name => [name, name]));
+const notebookTestIcons = Object.fromEntries(['Search', 'Crop', 'Copy', 'AppWindow', 'NotebookPen', 'SquareDashed', 'Type', 'Camera', 'Check', 'FileText', 'LoaderCircle', 'Pencil', 'Plus', 'TriangleAlert', 'X', 'Ellipsis', 'Trash2', 'ChevronDown', 'Folder', 'LayoutDashboard', 'Scan', 'FolderInput', 'FolderPlus', 'Link', 'ExternalLink'].map(name => [name, name]));
 
 
 function desktopInterface(react = {}, globals = {}) {
-  return interfaceModule('src/Desktop.tsx', { react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' } }, globals);
+  return interfaceModule('src/Desktop.tsx', { react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' }, './shared/capture': require('../dist/src/shared/capture.js') }, globals);
 }
 function desktopViewInterface(react, desktop, globals = {}) {
   return interfaceModule('src/DesktopView.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': desktop, './DesktopDrop': { DesktopDrop: 'drop' } }, globals);
@@ -3944,42 +4018,44 @@ test('About uses the app version, a labelled modal and Close focus with Escape r
   hooks.dispose(); assert.deepEqual(modal, ['open', 'close']); assert.deepEqual(focus, ['close', 'menu']);
 });
 
-test('capture controls start on Area, expose radio semantics and move selection by arrows, dragging and two clicks', () => {
-  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), focused = [], document = { body: {}, activeElement: null };
-  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': { CaptureProjectPicker: 'picker', desktopError: reason => reason.message } }, { document });
-  const render = () => hooks.render(() => CaptureOverlay({ state: { projects: [] }, language: 'en', header: { current: null }, onClose() {}, onSave() {} }));
-  let tree = render(), radios = notebookNodes(tree, node => node.props.role === 'radio');
-  assert.equal(tree.props.role, 'dialog'); assert.equal(tree.props['aria-modal'], 'true'); assert.equal(tree.props['aria-label'], copy.text('capturePurpose', 'en'));
-  assert.equal(notebookNodes(tree, node => node.props.role === 'radiogroup').length, 1);
-  assert.deepEqual(radios.map(node => [node.props.children[1], node.props['aria-checked'], node.props.tabIndex]), [['Text', false, -1], ['Area', true, 0], ['Full page', false, -1]]);
-  const group = notebookNodes(tree, node => node.props.role === 'radiogroup')[0]; group.props.ref.current = { querySelectorAll: () => [0, 1, 2].map(index => ({ focus: () => focused.push(index) })) };
-  const key = (key, shiftKey = false) => ({ key, shiftKey, preventDefault() {}, stopPropagation() {} });
-  radios[1].props.onKeyDown(key('ArrowRight')); tree = render(); radios = notebookNodes(tree, node => node.props.role === 'radio');
-  assert.equal(radios[2].props['aria-checked'], true); assert.deepEqual(focused, [2]);
-  radios[2].props.onKeyDown(key('ArrowLeft')); tree = render();
-  tree.props.ref.current = { getBoundingClientRect: () => ({ left: 0, top: 96, width: 1440, height: 804 }) };
-  let selection = notebookNodes(tree, node => node.props.className === 'capture-selection')[0]; selection.props.ref.current = { focus() {} };
-  selection.props.onKeyDown(key('ArrowRight')); selection.props.onKeyDown(key('ArrowDown', true)); tree = render();
-  assert.equal(notebookNodes(tree, node => node.type === 'rect')[0].props.height, 308);
-  const event = (x, y) => ({ clientX: x, clientY: y + 96, button: 0, pointerId: 1, target: { closest: () => null }, currentTarget: { setPointerCapture() {}, releasePointerCapture() {} }, preventDefault() {} });
-  tree.props.onPointerDown(event(100, 100)); tree.props.onPointerMove(event(500, 300)); tree.props.onPointerUp(event(500, 300)); tree = render();
-  let rectangle = notebookNodes(tree, node => node.type === 'rect')[0]; assert.equal(rectangle.props.width, 398); assert.equal(rectangle.props.height, 198); assert.equal(rectangle.props.strokeDasharray, '6 4');
-  tree.props.onPointerDown(event(20, 30)); tree.props.onPointerUp(event(20, 30)); tree = render();
-  tree.props.onPointerDown(event(120, 90)); tree.props.onPointerUp(event(120, 90)); tree = render();
-  rectangle = notebookNodes(tree, node => node.type === 'rect')[0]; assert.equal(rectangle.props.width, 98); assert.equal(rectangle.props.height, 58);
-  hooks.dispose();
+test('preview starts with the kept screenshot and crop handles use one or ten pixels within image bounds', () => {
+  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts');
+  const { CapturePreview } = interfaceModule('src/Capture.tsx', {
+    react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy,
+    './Desktop': { CaptureProjectPicker: 'picker', desktopError: error => error.message }, './shared/popup-position': require('../dist/src/shared/popup-position.js'),
+  }, { document: { body: {} } });
+  const render = () => hooks.render(() => CapturePreview({ state: { projects: [] }, language: 'en', shot: { id: 'shot', bytes: faviconPNG, width: 1440, height: 770 }, header: { current: null }, opener: { current: null }, onClose() {}, onSave() {}, onShot() {}, onVisible() {} }));
+  let tree = render();
+  const card = notebookNodes(tree, node => node.props.className === 'capture-preview')[0];
+  assert.equal(card.props['aria-modal'], 'false'); assert.equal(notebookNodes(tree, node => node.props.role === 'radiogroup').length, 0);
+  const actions = notebookNodes(tree, node => node.props.className === 'capture-actions')[0];
+  assert.deepEqual(notebookNodes(actions, node => node.type === 'button').map(node => node.props['aria-label']), ['Crop', 'Full page', 'Copy']);
+  notebookNodes(actions, node => node.type === 'button')[0].props.onClick(); tree = render();
+  assert.deepEqual(notebookNodes(tree, node => node.props.role === 'radio').map(node => [node.props.children, node.props['aria-checked']]), [['Screen', true], ['Full page', false]]);
+  const corners = notebookNodes(tree, node => node.props.className?.startsWith('capture-corner'));
+  assert.equal(corners.length, 4); assert.ok(corners.every(node => node.type === 'button' && node.props['aria-label']));
+  const press = (key, shiftKey = false, corner) => {
+    notebookNodes(tree, node => node.props.className === 'capture-rectangle')[0].props.onKeyDown({ key, shiftKey, target: { dataset: corner === undefined ? {} : { corner: String(corner) } }, preventDefault() {}, stopPropagation() {} });
+    tree = render();
+  };
+  const box = () => { const d = notebookNodes(tree, node => node.type === 'path')[0].props.d; const m = /Z M(\d+) (\d+)h(\d+)v(\d+)/.exec(d); return m.slice(1).map(Number); };
+  assert.deepEqual(box(), [310, 239, 820, 329]);
+  press('ArrowRight'); press('ArrowDown', true); assert.deepEqual(box(), [311, 249, 820, 329]);
+  press('ArrowRight', false, 0); assert.deepEqual(box(), [312, 249, 819, 329]);
+  press('ArrowDown', true, 3); assert.deepEqual(box(), [312, 249, 819, 339]);
+  for (let index = 0; index < 200; index++) press('ArrowRight', true, 3);
+  assert.equal(box()[0] + box()[2], 1440);
+  for (const language of ['en', 'es']) { assert.match(copy.text('captureInstructions', language), /10/); assert.match(copy.text('captureInstructions', language), /1 /); }
 });
 
-test('Desktop and capture controls keep coarse-pointer targets and contrasting selected edges', () => {
+test('Desktop and capture controls keep coarse-pointer targets and the board rectangle uses accent tokens', () => {
   const css = readFileSync('src/styles.css', 'utf8');
   const coarse = [...css.matchAll(/@media \(pointer: coarse\)\s*\{([\s\S]*?)\n\}/g)].map(match => match[1]).join('\n');
-  for (const selector of ['.capture-bar .profile-action', '.capture-segmented button', '.desktop-panel button', '.desktop-tab button', '.desktop-dialog button', '.desktop-choice-menu > button']) {
+  for (const selector of ['.capture-actions button', '.capture-split button', '.capture-editor-bar button', '.desktop-panel button', '.desktop-tab button', '.desktop-dialog button', '.desktop-choice-menu > button']) {
     assert.ok(coarse.includes(selector)); assert.match(coarse.slice(coarse.indexOf(selector)), /min-height:\s*var\(--target-touch\)/);
   }
-  assert.match(css, /\.capture-segmented \[aria-checked=true\]\s*\{[^}]*border-color:\s*var\(--border-control\);[^}]*background:\s*var\(--surface-pressed\)/);
-  assert.match(css, /\.capture-overlay \.capture-bar\s*\{[^}]*height:\s*auto/);
-  const tokens = readFileSync('src/tokens.css', 'utf8');
-  for (const palette of ['amber', 'daylight', 'contrast-dark', 'contrast-light']) assert.match(tokens, new RegExp('--palette-' + palette + '-capture-veil:'));
+  assert.match(css, /\.capture-rectangle\s*\{[^}]*border:\s*var\(--border-strong\) solid var\(--accent\)/);
+  assert.doesNotMatch(css, /\.capture-bar|\.capture-overlay|\.capture-segmented/);
 });
 
 test('capture image bytes stay in IPC and blob URLs are revoked on retry, errors, stale responses and unmount', async () => {
@@ -4039,20 +4115,22 @@ test('Desktop counts and calendar-relative dates use actual project metadata', (
   assert.equal(helpers.relativeDesktopDate(now, 'es', now), 'hoy');
 });
 
-test('capture project chooser puts Captures first then current and recently used projects', () => {
-  for (const screenshots of [true, false]) {
-    const hooks = notebookTestHooks(), module = desktopInterface(hooks.react), chosen = [];
-    const state = { projectInUse: 'current', projects: [{ id: 'older', name: 'Older', usedAt: 1 }, { id: 'latest', name: 'Latest', usedAt: 3 }, { id: 'current', name: 'Current', usedAt: 2 }] };
-    const render = () => hooks.render(() => module.CaptureProjectPicker({ state, screenshots, language: 'en', opener: { current: null }, onClose() {}, onChoose: async project => chosen.push(project?.id ?? null) }));
-    let tree = render(), rows = notebookNodes(tree, node => node.props.role === 'menuitem');
-    assert.deepEqual(rows.map(row => row.props.children[1].props.children), ['Captures', 'Current', 'Latest', 'Older', 'New project']);
-    assert.equal(rows[0].props.disabled, !screenshots); rows[1].props.onClick(); assert.deepEqual(chosen, ['current']);
-    rows.at(-1).props.onClick(); tree = render(); assert.equal(tree.type, module.DesktopNameDialog);
-  }
-  const hooks = notebookTestHooks(), module = desktopInterface(hooks.react);
-  const form = hooks.render(() => module.ProjectNameForm({ state: { activeProfileId: 'first' }, language: 'en', onSuccess() {} }));
-  const label = notebookNodes(form, node => node.type === 'label')[0], input = notebookNodes(form, node => node.type === 'input')[0];
-  assert.equal(label.props.htmlFor, input.props.id); assert.equal(label.props.children, 'Project name');
+test('capture selector filters as typed, checks the project in use first and offers inline creation after no results', () => {
+  const hooks = notebookTestHooks(), module = desktopInterface(hooks.react), chosen = [];
+  const state = { projectInUse: 'current', projects: [{ id: 'older', name: 'Older', usedAt: 1 }, { id: 'latest', name: 'Latest', usedAt: 3 }, { id: 'current', name: 'Current', usedAt: 2 }] };
+  const render = () => hooks.render(() => module.CaptureProjectPicker({ state, language: 'en', opener: { current: null }, onClose() {}, onChoose: async project => chosen.push(project.id) }));
+  let tree = render(), rows = notebookNodes(tree, node => node.props.role === 'menuitemradio');
+  assert.deepEqual(rows.map(row => row.props.children[1].props.children), ['Current', 'Latest', 'Older']);
+  assert.deepEqual(rows.map(row => row.props['aria-checked']), [true, false, false]);
+  rows[0].props.onClick(); assert.deepEqual(chosen, ['current']);
+  const input = notebookNodes(tree, node => node.type === 'input')[0], label = notebookNodes(tree, node => node.type === 'label')[0];
+  assert.equal(label.props.htmlFor, input.props.id); assert.equal(label.props.children, 'Search projects');
+  input.props.onChange({ target: { value: 'no such project' } }); tree = render();
+  assert.equal(notebookNodes(tree, node => node.props.role === 'menuitemradio').length, 0);
+  assert.equal(notebookNodes(tree, node => node.props.role === 'status').length, 1);
+  notebookNodes(tree, node => node.props.role === 'menuitem')[0].props.onClick(); tree = render();
+  assert.equal(notebookNodes(tree, node => node.type === module.ProjectNameForm).length, 1);
+  assert.equal(notebookNodes(tree, node => node.type === module.DesktopNameDialog).length, 0);
 });
 
 test('saved status exists before the first save and pauses its remaining duration on hover and focus', () => {
@@ -4072,28 +4150,23 @@ test('saved status exists before the first save and pauses its remaining duratio
   assert.equal([...timers.values()][0].delay, 5000); [...timers.values()][0].callback(); assert.equal(closed, 1); hooks.dispose();
 });
 
-test('full-page capture waits for visible content; save results respect closed and newly opened bars', async () => {
-  const { compileFunction } = require('node:vm'), ts = require('typescript'), copy = interfaceModule('src/copy.ts');
+test('full-page work waits for the visible view, restores the preview and abandons a changed scope', async () => {
+  const { compileFunction } = require('node:vm'), ts = require('typescript');
   const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let initializer; const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'saveDesktopCapture') initializer = node.initializer; ts.forEachChild(node, visit); }; visit(source); assert.ok(initializer);
-  const compiled = ts.transpileModule(`export const save = ${initializer.getText(source)};`, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
-  for (const kind of ['page', 'text', 'area']) for (const failure of [false, true]) for (const reopened of [false, true]) {
-    const events = [], notices = [], exported = {}; let visible;
-    const overlay = { scope: 'scope', mode: 'capture' }, liveOverlay = { current: overlay }, nextOverlay = { scope: 'scope', mode: 'capture' };
-    const globals = {
-      state: { desktopLocked: false }, desktopScope: 'scope', liveDesktopScope: { current: 'scope' }, desktopOverlay: overlay, liveDesktopOverlay: liveOverlay, edits: { flush: async () => events.push('flush') },
-      setPageCapturePending: value => events.push('pending:' + value), setDesktopOverlay: value => { assert.equal(value, null); liveOverlay.current = value; events.push('closed'); },
-      setMenuOpen() {}, setProfileOpen() {}, setHubPage() {}, setLyraOpen() {}, setShieldScope() {}, setSuggestionsOpen() {}, setPanel() {},
-      requestAnimationFrame: callback => queueMicrotask(callback), reportArea: hidden => { assert.equal(hidden, false); events.push('visible'); return new Promise(resolve => { visible = resolve; }); },
-      window: { horizon: { async command(command) { events.push('capture'); assert.equal(command.kind, kind); if (kind === 'area') assert.deepEqual(command.rect, { x: 1, y: 2, width: 300, height: 200 }); if (reopened) liveOverlay.current = nextOverlay; if (failure) throw new Error('CAPTURE_FAILED'); }, async getProject() { return { items: [{ id: 'saved-item' }] }; } } },
-      desktopButtonRef: { current: { focus: () => events.push('focus') } }, setDesktopNotice: value => notices.push(value), language: 'en', text: copy.text, openDesktopPanel() {}, desktopError: reason => reason.message,
+  let initializer; const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'captureVisible') initializer = node.initializer; ts.forEachChild(node, visit); }; visit(source); assert.ok(initializer);
+  const compiled = ts.transpileModule(`export const capture = ${initializer.getText(source)};`, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  for (const changed of [false, true]) for (const failure of [false, true]) {
+    const events = [], exported = {}; let visible;
+    const scope = { current: 'original' }, globals = {
+      desktopScope: 'original', liveDesktopScope: scope, setPageCapturePending: value => events.push('pending:' + value),
+      reportArea: hidden => { events.push('hidden:' + hidden); return hidden ? Promise.resolve() : new Promise(resolve => { visible = resolve; }); },
+      requestAnimationFrame: callback => queueMicrotask(callback),
     };
     compileFunction(compiled, ['exports', ...Object.keys(globals)])(exported, ...Object.values(globals));
-    const work = exported.save({ id: 'book', name: 'Research' }, kind, { x: 1, y: 2, width: 300, height: 200 });
-    if (kind === 'page') { for (let tick = 0; tick < 10 && !visible; tick++) await Promise.resolve(); assert.ok(visible); assert.equal(notices[0].message, 'Capturing the page'); assert.equal(notices[0].pending, true); assert.ok(events.indexOf('closed') < events.indexOf('visible')); assert.equal(events.includes('capture'), false); visible(); }
-    if (failure && kind !== 'page' && !reopened) { await assert.rejects(work, /CAPTURE_FAILED/); assert.equal(events.includes('closed'), false); assert.deepEqual(notices, []); }
-    else { await work; assert.equal(events.filter(event => event === 'capture').length, 1); assert.equal(notices.at(-1).message, failure ? 'CAPTURE_FAILED' : 'Saved to Research'); if (failure) assert.equal(notices.at(-1).action, 'Try again'); }
-    if (reopened) { assert.equal(liveOverlay.current, nextOverlay); assert.equal(events.includes('focus'), false); }
+    const work = exported.capture(async () => { events.push('capture'); if (failure) throw new Error('CAPTURE_FAILED'); return 'shot'; });
+    assert.equal(events.includes('capture'), false); if (changed) scope.current = 'next'; visible();
+    if (changed || failure) await assert.rejects(work, changed ? /CAPTURE_CHANGED/ : /CAPTURE_FAILED/); else assert.equal(await work, 'shot');
+    assert.equal(events.includes('capture'), !changed); assert.equal(events.at(-1), changed ? 'pending:false' : 'hidden:true');
   }
 });
 
@@ -4108,29 +4181,13 @@ test('notebook storage Retry writes existing contents without another capture an
   const saved = readDesktopStore(join(blocked, 'notebooks.json')); assert.equal(saved.projects[0].items.length, 1); assert.equal(saved.projects[0].items[0].text, 'Keep this text'); runtime.dispose();
   const browser = notebookBrowser(t); browser.command({ type: 'create-project', name: 'Screenshots' }); browser.navigate();
   const id = browser.state().projectInUse;
-  return browser.command({ type: 'save-capture', project: id, kind: 'text' }).then(() => {
+  return browser.command({ type: 'take-capture' }).then(shot => {
+    browser.command({ type: 'add-capture-to-project', id: shot.id, project: id, folder: null });
     const before = browser.notebook(id); browser.command({ type: 'retry-desktop-storage' }); assert.deepEqual(browser.notebook(id).items, before.items); browser.close();
   });
 });
 
-test('capture guidance stays accessible and hidden while the error and retry remain visible', () => {
-  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts');
-  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': {} }, { document: { body: {} } });
-  const render = () => hooks.render(() => CaptureOverlay({ state: { desktopStorageError: true }, language: 'en', header: { current: null }, onClose() {}, onSave() {}, onRetryStorage() {} }));
-  let tree = render();
-  const selection = notebookNodes(tree, node => node.props.className === 'capture-selection')[0];
-  assert.equal(selection.props['aria-describedby'], 'capture-instructions capture-size');
-  for (const id of ['capture-instructions', 'capture-size']) assert.equal(notebookNodes(tree, node => node.props.id === id)[0].props.className, 'visually-hidden');
-  assert.equal(notebookNodes(tree, node => node.props.id === 'capture-size')[0].props.role, 'status');
-  notebookNodes(tree, node => node.props.role === 'radio')[0].props.onClick(); tree = render();
-  const hint = notebookNodes(tree, node => node.props.id === 'capture-size')[0];
-  assert.equal(hint.props.className, 'visually-hidden'); assert.equal(hint.props.role, 'status'); assert.equal(hint.props.children, copy.text('captureTextHint', 'en'));
-  const error = notebookNodes(tree, node => node.props.role === 'alert')[0];
-  assert.equal(error.props.className, 'capture-error'); assert.equal(notebookNodes(error, node => node.type === 'button')[0].props.children, 'Try again');
-  const css = readFileSync('src/styles.css', 'utf8');
-  assert.doesNotMatch(css.match(/\.capture-guidance\s*\{([^}]+)\}/)[1], /background:|padding:|border:|margin-top:/);
-  assert.match(css, /\.capture-error\s*\{[^}]*margin-top:[^}]*background:/);
-});
+
 
 test('note text grows and shrinks with content and column width without losing its label', () => {
   const hooks = notebookTestHooks(); let resized, disconnected = 0;
@@ -4153,30 +4210,7 @@ test('capture previews keep the board proportions and full images stay within th
   assert.match(tokens, /--aspect-desktop-preview: 1440 \/ 770/);
 });
 
-test('area arrows move and Shift resizes by ten, Alt uses one, and all edges stay bounded', async () => {
-  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), saved = [];
-  const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': { CaptureProjectPicker: 'picker' } }, { document: { body: {} } });
-  const render = () => hooks.render(() => CaptureOverlay({ state: {}, language: 'en', header: { current: null }, onClose() {}, onSave: async (_book, _kind, rect) => saved.push(rect) }));
-  let tree = render(); tree.props.ref.current = { getBoundingClientRect: () => ({ width: 1440, height: 804 }) };
-  const press = async (key, shiftKey = false, altKey = false, count = 1) => {
-    for (let i = 0; i < count; i++) notebookNodes(tree, node => node.props.className === 'capture-selection')[0].props.onKeyDown({ key, shiftKey, altKey, preventDefault() {}, stopPropagation() {} });
-    tree = render(); notebookNodes(tree, node => node.props.className?.includes('capture-save'))[0].props.onClick(); tree = render();
-    await notebookNodes(tree, node => node.type === 'picker')[0].props.onChoose({ id: 'book' }); tree = render(); return saved.at(-1);
-  };
-  assert.deepEqual(await press('ArrowRight'), { x: 320, y: 262, width: 820, height: 300 });
-  assert.deepEqual(await press('ArrowDown', true), { x: 320, y: 262, width: 820, height: 310 });
-  assert.equal((await press('ArrowLeft', false, true)).x, 319);
-  assert.equal((await press('ArrowUp', true, true)).height, 309);
-  assert.equal((await press('ArrowLeft', false, false, 100)).x, 0);
-  assert.equal((await press('ArrowUp', false, false, 100)).y, 0);
-  assert.equal((await press('ArrowRight', true, false, 200)).width, 1440);
-  assert.equal((await press('ArrowDown', true, false, 100)).height, 804);
-  assert.equal((await press('ArrowLeft', true, false, 200)).width, 1);
-  assert.equal((await press('ArrowUp', true, false, 100)).height, 1);
-  assert.equal((await press('ArrowRight', false, false, 200)).x, 1439);
-  assert.equal((await press('ArrowDown', false, false, 100)).y, 803);
-  for (const language of ['en', 'es']) { const instructions = copy.text('captureInstructions', language); assert.match(instructions, /10/); assert.match(instructions, /1 /); assert.match(instructions, /Alt/); }
-});
+
 
 test('run D: locked notebooks refuse every creation, preserve originals and reopen after encryption returns', t => {
   const root = temporaryDirectory(t, 'notebook-locked-d'), path = join(root, 'notebooks.json'), timers = new Map();
@@ -4243,19 +4277,16 @@ test('Desktop item labels distinguish saved pages, text, area, whole page and no
   }
 });
 
-test('run D: saving keeps its label with a spinner and page progress persists until replaced', async () => {
-  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'); let complete;
-  const module = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': { CaptureProjectPicker: 'picker', desktopError: reason => reason.message } }, { document: { body: {} } });
-  const render = () => hooks.render(() => module.CaptureOverlay({ state: { projects: [] }, language: 'en', header: { current: null }, onSave: () => new Promise(resolve => { complete = resolve; }), onClose() {} }));
-  let tree = render(); notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0].props.onClick(); tree = render();
-  const saving = notebookNodes(tree, node => node.type === 'picker')[0].props.onChoose({ id: 'book', name: 'Book' }); tree = render();
-  const button = notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0];
-  assert.equal(button.props.children[1].props.children, 'Save to'); assert.equal(button.props.children[0].type, 'LoaderCircle'); assert.equal(button.props.disabled, true); complete(); await saving;
-  const statusHooks = notebookTestHooks(), timers = [];
-  const notebooks = desktopInterface(statusHooks.react, { window: { setTimeout: fn => timers.push(fn), clearTimeout() {} } });
-  const status = statusHooks.render(() => notebooks.DesktopStatus({ notice: { message: copy.text('capturingPage', 'en'), pending: true }, language: 'en', onClose() {} })); statusHooks.flush();
-  assert.equal(status.props.role, 'status'); assert.equal(timers.length, 0); assert.equal(notebookNodes(status, node => node.type === 'button').length, 0);
-  assert.match(readFileSync('src/App.tsx', 'utf8'), /setDesktopNotice\(\{ message: text\('capturingPage', language\), pending: true \}\)/);
+test('capture save stays labelled and blocks repeated actions while pending', async () => {
+  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'); let complete, saves = 0;
+  const module = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy,
+    './shared/popup-position': require('../dist/src/shared/popup-position.js'), './Desktop': { CaptureProjectPicker: 'picker', desktopError: reason => reason.message } }, { document: { body: {} } });
+  const render = () => hooks.render(() => module.CapturePreview({ state: { projectInUse: 'book', projects: [{ id: 'book', name: 'Book' }] }, language: 'en', shot: { id: 'shot', bytes: faviconPNG, width: 100, height: 80 }, header: { current: null }, opener: { current: null }, onSave: () => { saves++; return new Promise(resolve => { complete = resolve; }); }, onClose() {}, onVisible() {}, onShot() {} }));
+  let tree = render(), button = notebookNodes(tree, node => node.props.className === 'capture-save-main')[0];
+  button.props.onClick(); button.props.onClick(); await Promise.resolve(); tree = render();
+  button = notebookNodes(tree, node => node.props.className === 'capture-save-main')[0];
+  assert.equal(button.props.children, 'Save to Book'); assert.equal(button.props.disabled, true); assert.equal(saves, 1);
+  complete(); await new Promise(setImmediate); assert.equal(notebookNodes(render(), node => node.props.className === 'capture-save-main')[0].props.disabled, false);
 });
 
 test('run D: shared notebook and profile name inputs use sixteen pixels with unchanged dimensions', () => {
@@ -4271,30 +4302,24 @@ test('locked project creation and capture explain refusal in place before sendin
   const render = () => hooks.render(() => desktop.ProjectNameForm({ language: 'es', state: { activeProfileId: 'locked', desktopLocked: true }, onSuccess() {} }));
   let tree = render(); notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Research' } }); tree = render(); tree.props.onSubmit({ preventDefault() {} });
   assert.equal(commands, 0); assert.equal(notebookNodes(render(), node => node.props.role === 'alert')[0].props.children, copy.text('DESKTOP_LOCKED', 'es'));
-  const captureHooks = notebookTestHooks();
-  const capture = interfaceModule('src/Capture.tsx', { react: captureHooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Desktop': { CaptureProjectPicker: 'picker' } }, { document: { body: {} } });
-  const captureRender = () => captureHooks.render(() => capture.CaptureOverlay({ state: { desktopLocked: true }, language: 'en', header: { current: null }, onSave() { commands++; }, onClose() {} }));
-  tree = captureRender(); notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0].props.onClick(); tree = captureRender();
-  assert.equal(commands, 0); assert.equal(notebookNodes(tree, node => node.type === 'picker').length, 0);
-  assert.equal(notebookNodes(tree, node => node.props.role === 'alert')[0].props.children[0].props.children, copy.text('DESKTOP_LOCKED', 'en'));
 });
 
-test('settings v4 validates every new field and migrates v2 without losing appearance', t => {
+test('settings v5 validates every new field and migrates v2 without losing appearance', t => {
   const directory = temporaryDirectory(t, 'settings-v3'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
-  assert.equal(defaults.version, 4);
-  for (const [key, bad] of [['searchEngine', 'unknown'], ['language', 'fr'], ['downloadsFolder', 'relative'], ['askWhereToSave', 1], ['blockAds', null], ['blockThirdPartyCookies', 'false']]) {
+  assert.equal(defaults.version, 5);
+  for (const [key, bad] of [['searchEngine', 'unknown'], ['language', 'fr'], ['downloadsFolder', 'relative'], ['askWhereToSave', 1], ['showCapture', 'false'], ['blockAds', null], ['blockThirdPartyCookies', 'false']]) {
     assert.equal(validateSettings({ ...defaults, [key]: bad }), false);
     const missing = { ...defaults }; delete missing[key]; assert.equal(validateSettings(missing), false);
   }
   const legacy = { version: 2, theme: 'daylight', contrast: 'high', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' };
   writeFileSync(path, JSON.stringify(legacy));
-  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 4 });
-  assert.equal(JSON.parse(readFileSync(path)).version, 4);
+  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 5 });
+  assert.equal(JSON.parse(readFileSync(path)).version, 5);
   const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   writeFileSync(path, JSON.stringify(legacy));
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...require(name), renameSync() { throw new Error('Read-only'); } } : localRequire(name));
-  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 4 });
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 5 });
   assert.equal(JSON.parse(readFileSync(path)).version, 2);
 });
 
@@ -4329,7 +4354,7 @@ test('settings commands have exact shapes, named failures and all engine prefixe
     ...['general', 'appearance', 'privacy', 'privacy/sites', 'profiles'].map(section => ({ type: 'open-settings', section })),
     ...Object.keys(SEARCH_ENGINES).map(value => ({ type: 'set-search-engine', value })),
     ...['system', 'en', 'es'].map(value => ({ type: 'set-language', value })),
-    ...['set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].flatMap(type => [true, false].map(value => ({ type, value }))),
+    ...['set-show-capture', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].flatMap(type => [true, false].map(value => ({ type, value }))),
     ...['choose-downloads-folder', 'reset-downloads-folder', 'register-default-browser'].map(type => ({ type })),
     { type: 'reset-site', host: 'example.com' }, { type: 'clear-browsing-data', history: true, cookies: false, cache: false },
   ];
@@ -4788,16 +4813,85 @@ test('link and action chooser openers keep menus without field decorations', () 
   }
 });
 
-test('capture chooser follows the whole bar width and opens six pixels below it', () => {
+test('capture chooser follows the card width and opens eight pixels below it', () => {
   const hooks = notebookTestHooks(), positioned = new Map(); let resize, bounds = { left: 507, right: 948, top: 138, bottom: 170, width: 441 };
   const anchor = { current: { getBoundingClientRect: () => bounds } }, opener = { current: { closest: () => null } };
   const { PopupAnchor } = interfaceModule('src/PopupAnchor.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, './shared/popup-position': require('../dist/src/shared/popup-position.js') }, {
     document: { body: {} }, innerWidth: 1455, innerHeight: 900, getComputedStyle: () => ({ getPropertyValue: () => '6px' }),
     window: { addEventListener() {}, removeEventListener() {} }, ResizeObserver: class { constructor(callback) { resize = callback; } observe() {} disconnect() {} },
   });
-  const tree = hooks.render(() => PopupAnchor({ opener, anchor, children: 'chooser' }));
+  const tree = hooks.render(() => PopupAnchor({ opener, anchor, gap: 8, children: 'chooser' }));
   tree.props.ref.current = { style: { setProperty: (key, value) => positioned.set(key, value) }, getBoundingClientRect: () => ({ width: Number.parseFloat(positioned.get('width')), height: 200 }) };
-  hooks.flush(); assert.equal(positioned.get('width'), '441px'); assert.equal(positioned.get('left'), '507px'); assert.equal(positioned.get('top'), '176px');
+  hooks.flush(); assert.equal(positioned.get('width'), '441px'); assert.equal(positioned.get('left'), '507px'); assert.equal(positioned.get('top'), '178px');
   bounds = { left: 480, right: 980, top: 148, bottom: 180, width: 500 }; resize();
-  assert.equal(positioned.get('width'), '500px'); assert.equal(positioned.get('left'), '480px'); assert.equal(positioned.get('top'), '186px'); hooks.dispose();
+  assert.equal(positioned.get('width'), '500px'); assert.equal(positioned.get('left'), '480px'); assert.equal(positioned.get('top'), '188px'); hooks.dispose();
+});
+
+test('capture commands accept exact keys, current-profile kept ids and rectangles inside the stored image', () => {
+  const entry = { ...sampleDesktopItem('area'), image: { filename: randomUUID() + '.bin', width: 100, height: 80, bytes: 100, cut: false } };
+  const rect = { x: 1, y: 2, width: 98, height: 78 }, captures = [entry];
+  const commands = [{ type: 'take-capture' }, ...['capture-full-page', 'capture-screen', 'edit-capture', 'copy-capture'].map(type => ({ type, id: entry.id })),
+    ...['edit-capture', 'copy-capture'].map(type => ({ type, id: entry.id, rect }))];
+  for (const command of commands) {
+    assert.deepEqual(validateCommand(command, new Set(), [], captures), command);
+    assert.throws(() => validateCommand({ ...command, extra: 1 }, new Set(), [], captures));
+    for (const key of Object.keys(command)) { if (key === 'rect') continue; const missing = { ...command }; delete missing[key]; assert.throws(() => validateCommand(missing, new Set(), [], captures)); }
+    if (command.id) { assert.throws(() => validateCommand(command, new Set(), [], [])); assert.throws(() => validateCommand({ ...command, id: randomUUID() }, new Set(), [], captures)); }
+  }
+  for (const value of [undefined, null, {}, { ...rect, x: -1 }, { ...rect, width: 100 }, { ...rect, height: 80 }, { ...rect, y: 2.5 }, { ...rect, extra: true }])
+    assert.throws(() => validateCommand({ type: 'copy-capture', id: entry.id, rect: value }, new Set(), [], captures));
+  assert.throws(() => validateCommand({ type: 'save-capture', project: null, kind: 'text' }));
+});
+
+test('context-menu text saves Chromium selection as plain text with source and rejects controls and excessive length', t => {
+  const browser = notebookBrowser(t), { command, state, notebook } = browser; browser.navigate();
+  const contents = browser.views[0].webContents;
+  const choose = value => {
+    contents.emit('context-menu', {}, menuParams({ selectionText: value }));
+    const menu = browser.window.webContents.sent.at(-1)[1];
+    assert.ok(menu.groups.flat().some(row => row.id === 'add-to-desktop'));
+    command({ type: 'context-menu', id: menu.id, item: 'add-to-desktop' });
+  };
+  choose('First selection'); assert.deepEqual(state().desktopPanel, { open: true, page: { kind: 'new-project' } });
+  command({ type: 'create-project', name: 'Research' }); const project = state().projectInUse;
+  for (const value of ['<script>alert(1)</script>', 'First line\nSecond\tline', 'x'.repeat(100000)]) {
+    choose(value); const saved = notebook(project).items.at(-1);
+    assert.equal(saved.kind, 'text'); assert.equal(saved.text, value); assert.equal(saved.image, null);
+    assert.deepEqual(saved.source, { url: 'https://example.com/', title: 'A web page' });
+  }
+  const count = notebook(project).items.length;
+  for (const value of ['x'.repeat(100001), ' x'.repeat(50001), 'text\u0001', '\u000bselected', 'text\u0085'])
+    assert.throws(() => choose(value), /TEXT_INVALID/);
+  assert.equal(notebook(project).items.length, count);
+  assert.doesNotMatch(readFileSync('src/DesktopView.tsx', 'utf8'), /dangerouslySetInnerHTML|innerHTML/);
+  browser.close();
+});
+
+test('Capture toolbar preference defaults on, migrates version four and persists while the shortcut stays available', t => {
+  const directory = temporaryDirectory(t, 'capture-setting'), path = join(directory, 'settings.json'), defaults = readSettings(path);
+  assert.equal(defaults.showCapture, true); const legacy = { ...defaults, version: 4 }; delete legacy.showCapture;
+  writeFileSync(path, JSON.stringify(legacy)); assert.equal(readSettings(path).showCapture, true);
+  const settings = createSettings(path, () => {}); settings.setShowCapture(false);
+  assert.equal(readSettings(path).showCapture, false);
+  assert.throws(() => settings.setShowCapture('false'), /SETTINGS_COMMAND_INVALID/); assert.equal(readSettings(path).showCapture, false);
+  const browser = notebookBrowser(t); assert.equal(browser.state().showCapture, true); browser.command({ type: 'set-show-capture', value: false }); assert.equal(browser.state().showCapture, false);
+  assert.match(readFileSync('src/App.tsx', 'utf8'), /state\?\.showCapture !== false/);
+  assert.equal(browserShortcut({ key: 's', control: true, shift: true, alt: false, meta: false }), 'capture'); browser.close();
+});
+
+test('capture project search is pure, case insensitive and ordered by current project then last use', () => {
+  const { captureProjects } = require('../dist/src/shared/capture.js');
+  const projects = [{ id: 'old', name: 'North', usedAt: 1 }, { id: 'new', name: 'South', usedAt: 9 }, { id: 'current', name: 'Northern', usedAt: 2 }];
+  const before = structuredClone(projects);
+  assert.deepEqual(captureProjects(projects, 'current').map(project => project.id), ['current', 'new', 'old']);
+  assert.deepEqual(captureProjects(projects, 'current', '  NORTH ').map(project => project.id), ['current', 'old']);
+  assert.deepEqual(captureProjects(projects, null).map(project => project.id), ['new', 'current', 'old']);
+  assert.deepEqual(captureProjects(projects, 'current', 'missing'), []); assert.deepEqual(projects, before);
+});
+
+test('capture board and every capture refusal have English and Spanish copy', () => {
+  const { text } = interfaceModule('src/copy.ts');
+  for (const language of ['en', 'es']) for (const key of ['capturePreview', 'captureEditor', 'captureScreen', 'captureCrop', 'capturePage', 'captureCorner', 'captureInstructions', 'keptInCaptures', 'saveTo', 'saveToAProject', 'saveToProject', 'searchProjects', 'noProjectResults', 'showCapture', 'showCaptureHint', 'copied', 'addToDesktop', 'CAPTURE_UNAVAILABLE', 'CAPTURE_LOADING', 'CAPTURE_CRASHED', 'CAPTURE_DESKTOP', 'CAPTURE_SETTINGS', 'CAPTURE_FAILED'])
+    assert.equal(typeof text(key, language), 'string', language + ':' + key);
+  const copy = readFileSync('src/copy.ts', 'utf8'); assert.doesNotMatch(copy, /captureText:|captureArea:|captureTextHint:|NOTHING_SELECTED:/);
 });

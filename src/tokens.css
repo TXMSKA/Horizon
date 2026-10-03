@@ -239,8 +239,12 @@
   --surface-page: light-dark(var(--palette-daylight-page), var(--palette-amber-page));
   /* Scene translucency is not an opaque control/text contrast surface. */
   --surface-capture-veil: var(--palette-daylight-capture-veil);
-  --surface-capture-selection: color-mix(in srgb, var(--accent) 8%, var(--color-transparent));
-  --height-capture-bar: 3rem;
+  --width-capture-preview: 356px;
+  --width-capture-action: 78px;
+  --width-capture-editor: 1100px;
+  --height-capture-editor: 48px;
+  --width-capture-selector: 328px;
+  --opacity-capture-divider: 0.3;
   --width-desktop-panel: 400px;
   --width-desktop-rail: 17.5rem;
   --width-desktop-card: 21.875rem;
