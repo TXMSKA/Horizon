@@ -1,6 +1,6 @@
 import type { BrowserCommand, ContentArea, Notebook } from '../src/shared/api';
 import { isWebURL } from './browsing';
-import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine } from './settings';
+import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
@@ -39,6 +39,7 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
   const notebook = (id: unknown) => isProfileId(id) && notebooks.some(notebook => notebook.id === id);
   const item = (id: unknown, item: unknown) => notebook(id) && isProfileId(item) && notebooks.some(notebook => notebook.id === id && notebook.items.some(entry => entry.id === item));
   switch (type) {
+    case 'pin-app': case 'unpin-app': keys(command, ['type', 'id']); valid = Object.keys(command).length === 2 && isHubApp(command.id); break;
     case 'retry-notebook-storage': keys(command, ['type']); valid = Object.keys(command).length === 1 && Object.hasOwn(command, 'type'); break;
     case 'create-notebook': case 'rename-notebook':
       keys(command, type === 'create-notebook' ? ['type', 'name'] : ['type', 'id', 'name']); notebookName(command.name);

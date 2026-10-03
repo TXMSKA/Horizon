@@ -55,6 +55,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     ...current().state(), activeProfileId: registry.activeId,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
+    quickAccess: settings.quickAccess,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
     searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
     ...resolvedDownloadsFolder(settings, downloads), askWhereToSave: settings.askWhereToSave,
@@ -101,6 +102,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   nativeTheme.on('updated', systemDarkPages);
   const run = (command: BrowserCommand) => {
     switch (command.type) {
+      case 'pin-app': case 'unpin-app': settings.setAppPinned(command.id, command.type === 'pin-app'); publish(); return;
       case 'register-default-browser': return defaultBrowser.register().then(publish);
       case 'set-search-engine': settings.setSearchEngine(command.value); publish(); return;
       case 'set-language': settings.setLanguage(command.value); publish(); return;

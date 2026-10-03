@@ -11,6 +11,10 @@ an optional high-contrast palette. Language follows the system locale
 (Spanish or English, with English for other locales) unless one is chosen
 in Settings.
 
+The Hub, next to the profile avatar, holds Horizon's apps; Themes is the
+first, and any app can be pinned to the toolbar as quick access. The avatar
+opens the profiles.
+
 Settings opens in a tab from the menu: the default browser, the search
 engine (DuckDuckGo unless another is chosen), the downloads folder, the
 language, the theme and dark pages, blocking and third-party cookies, the

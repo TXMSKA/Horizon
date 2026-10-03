@@ -206,6 +206,7 @@
   --radius-6: 0.375rem;
   --radius-10: 0.625rem;
   --radius-14: 0.875rem;
+  --radius-20: 1.25rem;
   --radius-round: 999px;
   --font-system: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
@@ -213,6 +214,7 @@
   --font-12: 0.75rem;
   --font-14: 0.875rem;
   --font-16: 1rem;
+  --font-18: 1.125rem;
   --weight-500: 500;
   --weight-600: 600;
   --weight-650: 650;
@@ -295,6 +297,20 @@
   --profile-purple: light-dark(var(--palette-daylight-purple), var(--palette-amber-purple));
   --profile-cyan: light-dark(var(--palette-daylight-cyan), var(--palette-amber-cyan));
   --width-profile-name: 10rem;
+  --toolbar-popup-gap: 6px;
+  --toolbar-popup-edge: 12px;
+  --toolbar-popup-inset: 16px;
+  --width-account-popover: 21.25rem;
+  --width-hub: 22.5rem;
+  --height-hub: 40rem;
+  --hub-ground-top: 28.75rem;
+  --height-hub-dock: 3.625rem;
+  --size-hub-tile: 4.5rem;
+  --gap-hub-columns: 3.5rem;
+  --gap-hub-rows: 1.9375rem;
+  --width-hub-theme: 9.875rem;
+  --height-hub-theme: 4.25rem;
+  --width-hub-tile-menu: 14.5rem;
   --width-profiles-menu: 17.5rem;
   --width-profile-form: 19.75rem;
   /* The board puts the popover 5px under the drawn 30px control; its 32px hit area already reaches 1px lower. */
@@ -375,6 +391,7 @@
   --radius-small: var(--radius-6);
   --radius-control: var(--radius-10);
   --radius-panel: var(--radius-14);
+  --radius-sheet: var(--radius-20);
   --radius-pill: var(--radius-round);
   --font-interface: var(--font-system);
   --font-brand: var(--font-display);
@@ -382,11 +399,13 @@
   --type-caption: var(--font-12);
   --type-label: var(--font-14);
   --type-body: var(--font-16);
+  --type-heading: var(--font-18);
   --type-name-field: var(--font-16);
   --type-display: var(--size-30);
   --weight-label: var(--weight-500);
   --line-caption: 1.0625rem;
   --line-label: 1.25rem;
+  --line-heading: 1.625rem;
   --weight-emphasis: var(--weight-600);
   --weight-heading: var(--weight-650);
   --tracking-heading: -0.02em;
@@ -470,3 +489,40 @@
 }
 
 :root[data-contrast="high"][data-theme="amber"] { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }
+
+[data-preview-theme=amber] {
+  --preview-sky: var(--palette-amber-sky);
+  --preview-chrome: var(--palette-amber-chrome);
+  --preview-accent: var(--palette-amber-primary);
+  --preview-tab: var(--palette-amber-surface-3);
+  --preview-toolbar: var(--palette-amber-surface-2);
+  --preview-ground: var(--palette-amber-ground);
+  --preview-horizon: var(--palette-amber-horizon);
+  --preview-sun: var(--palette-amber-sun);
+  --preview-field: var(--palette-amber-field);
+  --preview-field-line: var(--palette-amber-field-line);
+}
+[data-preview-theme=daylight] {
+  --preview-sky: var(--palette-daylight-sky);
+  --preview-chrome: var(--palette-daylight-chrome);
+  --preview-accent: var(--palette-daylight-primary);
+  --preview-tab: var(--palette-daylight-surface-3);
+  --preview-toolbar: var(--palette-daylight-surface-2);
+  --preview-ground: var(--palette-daylight-ground);
+  --preview-horizon: var(--palette-daylight-horizon);
+  --preview-sun: var(--palette-daylight-sun);
+  --preview-field: var(--palette-daylight-field);
+  --preview-field-line: var(--palette-daylight-field-line);
+}
+[data-preview-theme=highContrast] {
+  --preview-sky: var(--palette-contrast-dark-sky);
+  --preview-chrome: var(--palette-contrast-dark-chrome);
+  --preview-accent: var(--palette-contrast-dark-primary);
+  --preview-tab: var(--palette-contrast-dark-surface-3);
+  --preview-toolbar: var(--palette-contrast-dark-surface-2);
+  --preview-ground: var(--palette-contrast-dark-ground);
+  --preview-horizon: var(--palette-contrast-dark-horizon);
+  --preview-sun: var(--palette-contrast-dark-sun);
+  --preview-field: var(--palette-contrast-dark-field);
+  --preview-field-line: var(--palette-contrast-dark-field-line);
+}

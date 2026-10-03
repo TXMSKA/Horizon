@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { Check, ChevronDown, LoaderCircle, Plus, Settings2, Trash2, TriangleAlert } from 'lucide-react';
+import { Check, LoaderCircle, Plus, Trash2, TriangleAlert, Users } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS } from './shared/api';
 import type { BrowserCommand, BrowserState, Language, ProfileColor, ProfileState } from './shared/api';
 import { Menu } from './Menu';
+import { ToolbarPopover } from './ToolbarPopover';
 
 const colourLabels: Record<ProfileColor, CopyKey> = { amber: 'colourAmber', blue: 'colourBlue', green: 'colourGreen', red: 'colourRed', yellow: 'colourYellow', grey: 'colourGrey', purple: 'colourPurple', cyan: 'colourCyan' };
 const errorLabels: Record<string, CopyKey> = { PROFILE_NAME_EMPTY: 'profileNameEmpty', PROFILE_NAME_LONG: 'profileNameLong', PROFILE_NAME_INVALID: 'profileNameInvalid', PROFILE_NAME_DUPLICATE: 'profileNameDuplicate', PROFILE_LIMIT: 'profileLimit' };
@@ -81,7 +82,7 @@ export function ProfileControl({ profile, language, open, opener, onClick }: {
   profile?: ProfileState; language: Language; open: 'menu' | 'new' | null; opener: RefObject<HTMLButtonElement | null>; onClick: (keyboard: boolean) => void;
 }) {
   const name = profile?.name ?? text('personal', language);
-  return <button className="profile" type="button" ref={opener} aria-haspopup="menu" aria-expanded={Boolean(open)} aria-controls={open === 'new' ? 'new-profile-popover' : 'profiles-menu'} aria-label={text('profile', language).replace('{name}', name)} title={name} onClick={event => onClick(event.detail === 0)}><span className="profile-dot" data-profile-color={profile?.color ?? 'amber'} aria-hidden="true" /><span className="profile-name">{name}</span><ChevronDown aria-hidden="true" /></button>;
+  return <button className="icon-button profile-avatar" type="button" ref={opener} aria-haspopup="menu" aria-expanded={Boolean(open)} aria-controls={open === 'new' ? 'new-profile-popover' : 'profiles-menu'} aria-label={text('profile', language).replace('{name}', name)} title={name} onClick={event => onClick(event.detail === 0)}><span className="avatar-circle" aria-hidden="true">{Array.from(name)[0]?.toLocaleUpperCase(language)}</span></button>;
 }
 
 export function ProfilesMenu({ state, language, keyboard, opener, onDismiss, onSwitch, onNew, onManage }: {
@@ -89,12 +90,12 @@ export function ProfilesMenu({ state, language, keyboard, opener, onDismiss, onS
   onDismiss: (reason: 'escape' | 'tab' | 'outside') => void; onSwitch: (profile: ProfileState) => void; onNew: () => void; onManage: () => void;
 }) {
   const t = (key: CopyKey) => text(key, language);
-  return <Menu id="profiles-menu" className="profiles-menu" label={t('profiles')} keyboard={keyboard} initialFocus="[aria-checked=true]" opener={opener} onDismiss={onDismiss}>
-    {state.profiles.map(profile => <button className="profile-menu-row" type="button" role="menuitemradio" tabIndex={-1} key={profile.id} aria-checked={profile.id === state.activeProfileId} onClick={() => onSwitch(profile)}><span className="profile-dot" data-profile-color={profile.color} aria-hidden="true" /><span className="profile-row-body"><strong>{profile.name}</strong><small>{profileTabCount(profile.tabCount, language)}</small></span>{profile.id === state.activeProfileId && <Check className="profile-check" aria-hidden="true" />}</button>)}
-    <hr role="separator" />
+  return <ToolbarPopover opener={opener}><Menu id="profiles-menu" className="profiles-menu" label={t('profiles')} keyboard={keyboard} initialFocus="[aria-checked=true]" opener={opener} onDismiss={onDismiss}>
+    <div className="profiles-label">{t('profiles')}</div>
+    {state.profiles.map(profile => <button className="profile-menu-row" type="button" role="menuitemradio" tabIndex={-1} key={profile.id} aria-checked={profile.id === state.activeProfileId} onClick={() => onSwitch(profile)}><span className="profile-icon-slot" aria-hidden="true"><span className="profile-dot" data-profile-color={profile.color} /></span><span className="profile-row-body"><strong>{profile.name}</strong></span>{profile.id === state.activeProfileId && <Check className="profile-check" aria-hidden="true" />}</button>)}
     <button type="button" role="menuitem" tabIndex={-1} onClick={onNew}><Plus aria-hidden="true" /><span>{t('newProfile')}</span></button>
-    <button type="button" role="menuitem" tabIndex={-1} onClick={onManage}><Settings2 aria-hidden="true" /><span>{t('manageProfiles')}</span></button>
-  </Menu>;
+    <button type="button" role="menuitem" tabIndex={-1} onClick={onManage}><Users aria-hidden="true" /><span>{t('manageProfiles')}</span></button>
+  </Menu></ToolbarPopover>;
 }
 
 export function NewProfilePopover({ state, language, opener, onCancel, onSuccess }: {
@@ -111,7 +112,7 @@ export function NewProfilePopover({ state, language, opener, onCancel, onSuccess
     document.addEventListener('keydown', escape, true);
     return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape, true); };
   }, [opener]);
-  return <div className="new-profile-popover" id="new-profile-popover" ref={ref} role="dialog" aria-label={text('newProfile', language)}><ProfileForm language={language} profiles={state.profiles} onCancel={onCancel} onSuccess={onSuccess} onStateChange={(name, pending) => { formState.current = { name, pending }; }} /></div>;
+  return <ToolbarPopover opener={opener}><div className="new-profile-popover" id="new-profile-popover" ref={ref} role="dialog" aria-label={text('newProfile', language)}><ProfileForm language={language} profiles={state.profiles} onCancel={onCancel} onSuccess={onSuccess} onStateChange={(name, pending) => { formState.current = { name, pending }; }} /></div></ToolbarPopover>;
 }
 
 function ProfileRow({ profile, state, language, announce }: {

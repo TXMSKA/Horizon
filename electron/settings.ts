@@ -1,18 +1,24 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { SEARCH_ENGINES } from '../src/shared/api';
-import type { Contrast, DarkPagesMode, DarkStrength, DarkTone, Language, LanguageSetting, SearchEngine, Theme } from '../src/shared/api';
+import { HUB_APPS, QUICK_ACCESS_LIMIT, SEARCH_ENGINES } from '../src/shared/api';
+import type { Contrast, DarkPagesMode, DarkStrength, DarkTone, HubApp, Language, LanguageSetting, SearchEngine, Theme } from '../src/shared/api';
 
 interface LegacySettings { version: 1; theme: Theme; contrast?: Contrast }
 interface SettingsV2 { version: 2; theme: Theme; contrast: Contrast; darkPages: DarkPagesMode; darkStrength: DarkStrength; darkTone: DarkTone }
-export interface Settings extends Omit<SettingsV2, 'version'> { version: 3; searchEngine: SearchEngine; language: LanguageSetting; downloadsFolder: string | null; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean }
+interface SettingsV3 extends Omit<SettingsV2, 'version'> { version: 3; searchEngine: SearchEngine; language: LanguageSetting; downloadsFolder: string | null; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean }
+export interface Settings extends Omit<SettingsV3, 'version'> { version: 4; quickAccess: HubApp[] }
 export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
   readonly migrationAllowed: boolean;
   readonly downloadsFolderUnavailable: boolean;
   setTheme(value: Theme, migrate: boolean): void; setContrast(value: Contrast): void; setDarkPages(value: DarkPagesMode): void; setDarkStrength(value: DarkStrength): void; setDarkTone(value: DarkTone): void;
   setSearchEngine(value: SearchEngine): void; setLanguage(value: LanguageSetting): void; setDownloadsFolder(value: string | null): void;
   setAskWhereToSave(value: boolean): void; setBlockAds(value: boolean): void; setBlockThirdPartyCookies(value: boolean): void;
+  setAppPinned(id: HubApp, pinned: boolean): void;
+}
+export function isHubApp(value: unknown): value is HubApp { return typeof value === 'string' && HUB_APPS.includes(value as HubApp); }
+export function isQuickAccess(value: unknown): value is HubApp[] {
+  return Array.isArray(value) && value.length <= QUICK_ACCESS_LIMIT && [...value].every(isHubApp) && new Set(value).size === value.length;
 }
 export function isTheme(value: unknown): value is Theme { return value === 'system' || value === 'amber' || value === 'daylight'; }
 export function isContrast(value: unknown): value is Contrast { return value === 'standard' || value === 'high'; }
@@ -43,10 +49,15 @@ function legacySettings(value: unknown): value is LegacySettings {
 const V2_KEYS = ['version', 'theme', 'contrast', 'darkPages', 'darkStrength', 'darkTone'];
 function themeFields(value: Record<string, unknown>): boolean { return isTheme(value.theme) && isContrast(value.contrast) && isDarkPagesMode(value.darkPages) && isDarkStrength(value.darkStrength) && isDarkTone(value.darkTone); }
 function v2Settings(value: unknown): value is SettingsV2 { return shape(value, V2_KEYS) && value.version === 2 && themeFields(value); }
-function settingsShape(value: unknown): value is Settings {
+function v3Settings(value: unknown): value is SettingsV3 {
   return shape(value, [...V2_KEYS, 'searchEngine', 'language', 'downloadsFolder', 'askWhereToSave', 'blockAds', 'blockThirdPartyCookies']) && value.version === 3 && themeFields(value)
     && isSearchEngine(value.searchEngine) && isLanguageSetting(value.language) && (value.downloadsFolder === null || folderSyntax(value.downloadsFolder))
     && ['askWhereToSave', 'blockAds', 'blockThirdPartyCookies'].every(key => typeof value[key] === 'boolean');
+}
+function settingsShape(value: unknown): value is Settings {
+  if (!shape(value, [...V2_KEYS, 'searchEngine', 'language', 'downloadsFolder', 'askWhereToSave', 'blockAds', 'blockThirdPartyCookies', 'quickAccess']) || value.version !== 4 || !isQuickAccess(value.quickAccess)) return false;
+  const previous = { ...value }; delete previous.quickAccess;
+  return v3Settings({ ...previous, version: 3 });
 }
 export function validateSettings(value: unknown): value is Settings { return settingsShape(value) && (value.downloadsFolder === null || isDownloadsFolder(value.downloadsFolder)); }
 export function writeSettings(path: string, settings: Settings): void {
@@ -57,14 +68,14 @@ export function writeSettings(path: string, settings: Settings): void {
   finally { if (existsSync(temporary)) try { unlinkSync(temporary); } catch { /* Preserve the save failure. */ } }
 }
 export function readSettings(path: string, highContrast = false, status = { downloadsFolderUnavailable: false }): Settings {
-  const empty: Settings = { version: 3, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true };
+  const empty: Settings = { version: 4, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] };
   try {
     if (!existsSync(path)) { empty.contrast = highContrast ? 'high' : 'standard'; writeSettings(path, empty); return empty; }
     let settings: Settings, migrated = false;
     try {
       if (statSync(path).size > 4096) throw new Error('Settings exceed size limit');
       const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
-      if (legacySettings(value) || v2Settings(value)) { settings = { ...empty, ...value, version: 3 }; migrated = true; }
+      if (legacySettings(value) || v2Settings(value) || v3Settings(value)) { settings = { ...empty, ...value, version: 4 }; migrated = true; }
       else if (settingsShape(value)) settings = value;
       else throw new Error('Invalid settings');
     } catch { renameSync(path, `${path}.corrupt-${randomUUID()}`); writeSettings(path, empty); return empty; }
@@ -91,6 +102,14 @@ export function createSettings(path: string, changed: (theme: Theme) => void, hi
     get theme() { return settings.theme; }, get contrast() { return settings.contrast; }, get darkPages() { return settings.darkPages; }, get darkStrength() { return settings.darkStrength; }, get darkTone() { return settings.darkTone; },
     get searchEngine() { return settings.searchEngine; }, get language() { return settings.language; }, get downloadsFolder() { return settings.downloadsFolder; }, get askWhereToSave() { return settings.askWhereToSave; }, get blockAds() { return settings.blockAds; }, get blockThirdPartyCookies() { return settings.blockThirdPartyCookies; }, get migrationAllowed() { return migrationAllowed; },
     get downloadsFolderUnavailable() { return readStatus.downloadsFolderUnavailable || settings.downloadsFolder !== null && !isDownloadsFolder(settings.downloadsFolder); },
+    get quickAccess() { return [...settings.quickAccess]; },
+    setAppPinned(id, pinned) {
+      if (!isHubApp(id) || typeof pinned !== 'boolean') throw new Error('QUICK_ACCESS_INVALID');
+      if (settings.quickAccess.includes(id) === pinned) return;
+      const quickAccess = pinned ? [...settings.quickAccess, id] : settings.quickAccess.filter(app => app !== id);
+      if (!isQuickAccess(quickAccess)) throw new Error('QUICK_ACCESS_LIMIT');
+      save({ ...settings, quickAccess });
+    },
     setTheme(value, migrate) { if (!isTheme(value)) throw new Error('Invalid theme'); if (!migrate || migrationAllowed) save({ ...settings, theme: value }); },
     setContrast(value) { if (!isContrast(value)) throw new Error('Invalid contrast'); save({ ...settings, contrast: value }); },
     setDarkPages(value) { if (!isDarkPagesMode(value)) throw new Error('Invalid dark pages mode'); save({ ...settings, darkPages: value }); },

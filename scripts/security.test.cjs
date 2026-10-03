@@ -17,6 +17,179 @@ const { contextMenuGroups, PageMenuSession } = require('../dist/electron/context
 const { PermissionQueue, defaultPermissions, requestedPermissions, setPermission, setBlocking, setSiteDark, siteSettings, stripCookieHeaders, cookieSite, secureOrigin, SITE_SETTINGS_LIMIT } = require('../dist/electron/site-settings.js');
 const testTemporaryRoot = resolve(process.env.HORIZON_TEST_TEMP ?? '.runtime');
 
+test('quick access migrates settings versions 1 through 3 without losing their saved choices', t => {
+  const directory = temporaryDirectory(t, 'quick-access-migration'), path = join(directory, 'settings.json');
+  const defaults = readSettings(path);
+  assert.equal(defaults.version, 4); assert.deepEqual(defaults.quickAccess, []);
+  const third = { ...defaults, version: 3, searchEngine: 'brave', language: 'es', askWhereToSave: true, blockAds: false, blockThirdPartyCookies: false }; delete third.quickAccess;
+  const versions = [{ version: 1, theme: 'amber', contrast: 'high' }, { version: 2, theme: 'daylight', contrast: 'standard', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' }, third];
+  for (const previous of versions) {
+    writeFileSync(path, JSON.stringify(previous));
+    const expected = { ...defaults, ...previous, version: 4, quickAccess: [] };
+    assert.deepEqual(readSettings(path), expected); assert.deepEqual(JSON.parse(readFileSync(path)), expected);
+  }
+  const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
+  writeFileSync(path, JSON.stringify(third));
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...localRequire(name), writeFileSync() { throw new Error('Read-only settings'); } } : localRequire(name));
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...third, version: 4, quickAccess: [] });
+  assert.deepEqual(JSON.parse(readFileSync(path)), third);
+});
+
+test('quick access rejects unknown ids, duplicates, sparse arrays and more than six entries', t => {
+  const { isQuickAccess } = require('../dist/electron/settings.js'), { HUB_APPS, QUICK_ACCESS_LIMIT } = require('../dist/src/shared/api.js');
+  assert.equal(QUICK_ACCESS_LIMIT, 6);
+  const directory = temporaryDirectory(t, 'quick-access-validation'), path = join(directory, 'settings.json'), defaults = readSettings(path);
+  assert.equal(isQuickAccess([]), true);
+  for (const id of HUB_APPS) assert.equal(validateSettings({ ...defaults, quickAccess: [id] }), true);
+  for (const quickAccess of [null, {}, 'themes', [null], ['unknown'], ['__proto__'], ['themes', 'themes'], new Array(1), Array(7).fill('themes')]) {
+    assert.equal(isQuickAccess(quickAccess), false); assert.equal(validateSettings({ ...defaults, quickAccess }), false);
+    assert.throws(() => writeSettings(path, { ...defaults, quickAccess }));
+  }
+  const missing = { ...defaults }; delete missing.quickAccess; assert.equal(validateSettings(missing), false);
+  const corrupt = { ...defaults, quickAccess: ['unknown'] }; writeFileSync(path, JSON.stringify(corrupt));
+  assert.deepEqual(readSettings(path), defaults);
+  assert.ok(readdirSync(directory).some(name => name.startsWith('settings.json.corrupt-') && readFileSync(join(directory, name), 'utf8') === JSON.stringify(corrupt)));
+});
+
+test('pin and unpin have exact command shapes and save idempotently without exposing mutable settings', t => {
+  const directory = temporaryDirectory(t, 'quick-access-settings'), path = join(directory, 'settings.json'), changes = [];
+  const settings = createSettings(path, theme => changes.push(theme));
+  for (const type of ['pin-app', 'unpin-app']) {
+    const command = { type, id: 'themes' }; assert.deepEqual(validateCommand(command), command);
+    for (const invalid of [{ type }, { ...command, id: null }, { ...command, id: 'unknown' }, { ...command, id: '__proto__' }, { ...command, extra: true }]) assert.throws(() => validateCommand(invalid));
+  }
+  settings.setAppPinned('themes', true); settings.setAppPinned('themes', true);
+  assert.deepEqual(settings.quickAccess, ['themes']); assert.deepEqual(readSettings(path).quickAccess, ['themes']); assert.equal(changes.length, 1);
+  const exposed = settings.quickAccess; exposed.length = 0; assert.deepEqual(settings.quickAccess, ['themes']);
+  assert.deepEqual(createSettings(path, () => {}).quickAccess, ['themes']);
+  for (const [id, pinned] of [['unknown', true], ['themes', 'yes'], [null, false]]) assert.throws(() => settings.setAppPinned(id, pinned), /QUICK_ACCESS_INVALID/);
+  settings.setAppPinned('themes', false); settings.setAppPinned('themes', false);
+  assert.deepEqual(settings.quickAccess, []); assert.deepEqual(readSettings(path).quickAccess, []); assert.equal(changes.length, 2);
+  rmSync(path); mkdirSync(path);
+  assert.throws(() => settings.setAppPinned('themes', true), /SETTINGS_SAVE_FAILED/); assert.deepEqual(settings.quickAccess, []); assert.equal(changes.length, 2);
+});
+
+test('quick-access IPC publishes pinning immediately and retains it across local profiles', t => {
+  const browser = notebookBrowser(t), { command, state } = browser;
+  assert.deepEqual(state().quickAccess, []);
+  command({ type: 'pin-app', id: 'themes' }); assert.deepEqual(state().quickAccess, ['themes']);
+  const first = state().activeProfileId;
+  command({ type: 'create-profile', name: 'Hub profile', color: 'blue' }); assert.notEqual(state().activeProfileId, first); assert.deepEqual(state().quickAccess, ['themes']);
+  command({ type: 'unpin-app', id: 'themes' }); assert.deepEqual(state().quickAccess, []);
+  command({ type: 'switch-profile', id: first }); assert.deepEqual(state().quickAccess, []);
+  assert.throws(() => command({ type: 'pin-app', id: 'unknown' })); assert.deepEqual(state().quickAccess, []);
+  const path = join(browser.directory, 'settings.json'); rmSync(path); mkdirSync(path);
+  assert.throws(() => command({ type: 'pin-app', id: 'themes' }), /SETTINGS_SAVE_FAILED/); assert.deepEqual(state().quickAccess, []);
+});
+
+test('toolbar, Hub and profiles copy is present in English and Spanish', () => {
+  const { copy, text } = interfaceModule('src/copy.ts');
+  for (const key of ['toolbar', 'hub', 'hubHome', 'themes', 'installed', 'quickAccess', 'appActions', 'openApp', 'addQuickAccess', 'removeQuickAccess', 'savingQuickAccess', 'addedQuickAccess', 'removedQuickAccess', 'QUICK_ACCESS_INVALID', 'QUICK_ACCESS_LIMIT', 'SETTINGS_SAVE_FAILED', 'profile', 'profiles', 'newProfile', 'manageProfiles', 'amber', 'daylight', 'highContrast', 'lyra', 'askLyra', 'unavailable']) {
+    for (const language of ['en', 'es']) assert.ok(typeof copy[key][language] === 'string' && text(key, language).trim(), `${key}: ${language}`);
+  }
+  for (const [language, saving, added, removed] of [['en', 'Saving quick access?', 'Added Themes to quick access', 'Removed Themes from quick access'], ['es', 'Guardando acceso r?pido?', 'Se agreg? Temas a acceso r?pido', 'Se quit? Temas de acceso r?pido']]) {
+    assert.equal(text('savingQuickAccess', language), saving);
+    assert.equal(text('addedQuickAccess', language).replace('{name}', text('themes', language)), added);
+    assert.equal(text('removedQuickAccess', language).replace('{name}', text('themes', language)), removed);
+  }
+  assert.equal(text('hub', 'en'), 'Hub'); assert.equal(text('themes', 'en'), 'Themes'); assert.equal(text('installed', 'en'), 'Installed');
+  assert.equal(text('addQuickAccess', 'en'), 'Add to quick access'); assert.equal(text('removeQuickAccess', 'en'), 'Remove from quick access');
+});
+
+test('toolbar popovers mount on the body and track the opener six pixels below and right-aligned', () => {
+  const hooks = notebookTestHooks(), body = {}, events = new Map(), positioned = new Map(); let resize;
+  const { ToolbarPopover } = interfaceModule('src/ToolbarPopover.tsx', { react: hooks.react, 'react-dom': { createPortal(node, host) { assert.equal(host, body); return node; } } }, {
+    document: { body }, innerWidth: 1440, innerHeight: 900,
+    getComputedStyle: () => ({ getPropertyValue: name => name === '--toolbar-popup-gap' ? '6px' : '12px' }),
+    ResizeObserver: class { constructor(callback) { resize = callback; } observe() {} disconnect() {} },
+    window: { addEventListener: (name, callback) => events.set(name, callback), removeEventListener: name => events.delete(name) },
+  });
+  const trigger = { right: 1100, bottom: 86 }, opener = { current: { getBoundingClientRect: () => trigger } };
+  const tree = hooks.render(() => ToolbarPopover({ opener, children: 'Hub' }));
+  tree.props.ref.current = { getBoundingClientRect: () => ({ width: 360 }), style: { setProperty: (name, value) => positioned.set(name, value) } };
+  hooks.flush(); assert.equal(tree.props.style, undefined);
+  assert.deepEqual([...positioned], [['left', '740px'], ['top', '92px'], ['--popup-available-height', '796px']]);
+  trigger.right = 200; trigger.bottom = 120; resize();
+  assert.equal(positioned.get('left'), '12px'); assert.equal(positioned.get('top'), '126px');
+  hooks.dispose(); assert.equal(events.size, 0);
+});
+
+test('Hub tiles, dock and menus support keyboard opening, pending saves, retry and Escape focus', async () => {
+  const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), sent = [], dismissed = [], announced = [], events = new Map();
+  let page = 'home', complete, reject, focused = 0;
+  const document = { addEventListener: (name, callback) => events.set(name, callback), removeEventListener: name => events.delete(name), activeElement: null };
+  const { Hub } = interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: (_reason, language) => copy.text('SETTINGS_SAVE_FAILED', language) } }, {
+    document, window: { horizon: { command: command => { sent.push(command); return new Promise((resolve, fail) => { complete = resolve; reject = fail; }); } } },
+  });
+  const state = { quickAccess: [] }, opener = { current: { contains: () => false } }, focus = { focus: () => focused++ };
+  const render = () => hooks.render(() => Hub({ state, language: 'en', page, opener, onPage: value => { page = value; }, onAnnounce: value => announced.push(value), onDismiss: value => dismissed.push(value) }));
+  const nodes = (tree, role) => notebookNodes(tree, node => node.props.role === role);
+  const tile = tree => notebookNodes(tree, node => node.props.className === 'hub-tile')[0];
+  const key = (key, shiftKey = false) => ({ key, shiftKey, preventDefault() {}, stopPropagation() {} });
+  let tree = render(), dialog = nodes(tree, 'dialog')[0];
+  dialog.props.ref.current = { contains: () => false, querySelector: () => focus, querySelectorAll: () => [] };
+  tile(tree).props.ref.current = focus; hooks.flush();
+  assert.equal(dialog.props['aria-label'], 'Hub'); assert.equal(tile(tree).props.children[1].props.children, 'Themes');
+  const currentTarget = { parentElement: { children: [focus] } }; tile(tree).props.onKeyDown({ ...key('ArrowRight'), currentTarget }); assert.equal(focused, 2);
+  tile(tree).props.onKeyDown(key('ContextMenu')); tree = render(); hooks.flush();
+  assert.equal(tile(tree).props['aria-expanded'], true); assert.deepEqual(nodes(tree, 'menuitem').map(node => node.props.children[1].props.children), ['Open', 'Add to quick access']);
+  nodes(tree, 'menuitem')[1].props.onClick(); nodes(tree, 'menuitem')[1].props.onClick(); tree = render(); hooks.flush();
+  assert.deepEqual(sent, [{ type: 'pin-app', id: 'themes' }]); assert.equal(nodes(tree, 'dialog')[0].props['aria-busy'], true);
+  notebookNodes(tree, node => node.type === 'menu')[0].props.onDismiss('escape'); tree = render(); hooks.flush();
+  complete(); for (let i = 0; i < 4; i++) await Promise.resolve(); assert.deepEqual(dismissed, []);
+  state.quickAccess = ['themes']; tile(tree).props.onKeyDown(key('F10', true)); tree = render(); hooks.flush();
+  assert.equal(nodes(tree, 'menuitem')[1].props.children[1].props.children, 'Remove from quick access'); nodes(tree, 'menuitem')[1].props.onClick();
+  reject(new Error('SETTINGS_SAVE_FAILED')); for (let i = 0; i < 4; i++) await Promise.resolve(); tree = render();
+  assert.equal(nodes(tree, 'menuitem').length, 0);
+  const beforeRetryFocus = focused; nodes(tree, 'alert')[0].props.children[1].props.ref.current = focus; hooks.flush();
+  assert.equal(focused, beforeRetryFocus + 1);
+  assert.equal(announced.at(-1), copy.text('SETTINGS_SAVE_FAILED', 'en'));
+  assert.equal(nodes(tree, 'alert')[0].props.children[0].props.children, copy.text('SETTINGS_SAVE_FAILED', 'en'));
+  nodes(tree, 'alert')[0].props.children[1].props.onClick(); complete(); for (let i = 0; i < 4; i++) await Promise.resolve();
+  assert.deepEqual(sent.slice(1), [{ type: 'unpin-app', id: 'themes' }, { type: 'unpin-app', id: 'themes' }]); assert.deepEqual(dismissed, [true]);
+  nodes(tree, 'dialog')[0].props.onKeyDown(key('Escape')); tree = render(); hooks.flush();
+  nodes(tree, 'dialog')[0].props.onKeyDown(key('Escape')); assert.deepEqual(dismissed, [true, true, true]);
+  const stops = [{ focus() {} }, focus]; dialog = nodes(tree, 'dialog')[0];
+  dialog.props.ref.current.querySelectorAll = () => stops;
+  let prevented = false; document.activeElement = stops[1];
+  dialog.props.onKeyDown({ ...key('Tab'), preventDefault() { prevented = true; } });
+  document.activeElement = stops[0]; dialog.props.onKeyDown(key('Tab', true));
+  assert.equal(prevented, false); assert.deepEqual(dismissed.slice(-2), [true, true]);
+  assert.deepEqual(announced, [copy.text('savingQuickAccess', 'en'), 'Added Themes to quick access', copy.text('savingQuickAccess', 'en'), copy.text('SETTINGS_SAVE_FAILED', 'en'), copy.text('savingQuickAccess', 'en'), 'Removed Themes from quick access']);
+  tile(tree).props.onClick(); assert.equal(page, 'themes'); tree = render(); hooks.flush();
+  notebookNodes(tree, node => node.props['aria-label'] === 'Hub Home')[0].props.onClick(); assert.equal(page, 'home');
+  hooks.dispose(); assert.equal(events.size, 0);
+});
+
+test('installed theme radios save explicit choices, follow system changes and serialize theme and contrast', async () => {
+  const hubHooks = notebookTestHooks(), themeHooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), commands = [];
+  let hooks = hubHooks;
+  const react = Object.fromEntries(Object.keys(hubHooks.react).map(key => [key, (...args) => hooks.react[key](...args)]));
+  let complete, changed;
+  const system = { matches: true, addEventListener(_name, callback) { changed = callback; }, removeEventListener() {} };
+  const state = { theme: 'system', contrast: 'standard', quickAccess: [] };
+  const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check' }, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: () => 'Failed' } }, {
+    matchMedia: () => system, window: { horizon: { command: command => { commands.push(command); return new Promise(resolve => { complete = () => { state[command.type] = command.value; resolve(); }; }); } } },
+  });
+  // A Hub page supplies the radio component's props without needing a browser window.
+  const tree = hubHooks.render(() => Hub({ state, language: 'en', page: 'themes', opener: { current: null }, onPage() {}, onDismiss() {}, onAnnounce() {} }));
+  const installed = notebookNodes(tree, node => typeof node.type === 'function' && node.props.state === state)[0];
+  hooks = themeHooks;
+  const render = () => themeHooks.render(() => installed.type(installed.props));
+  const radios = tree => notebookNodes(tree, node => node.props.role === 'radio');
+  let panel = render(); themeHooks.flush(); assert.equal(radios(panel)[0].props['aria-checked'], true);
+  system.matches = false; changed(); panel = render(); assert.equal(radios(panel)[1].props['aria-checked'], true);
+  radios(panel)[1].props.onClick(); assert.deepEqual(commands, [{ type: 'theme', value: 'daylight' }]); complete(); for (let i = 0; i < 4; i++) await Promise.resolve();
+  panel = render(); const currentTarget = { parentElement: { children: [{ focus() {} }, { focus() {} }, { focus() {} }] } };
+  radios(panel)[1].props.onKeyDown({ key: 'ArrowRight', currentTarget, preventDefault() {} }); radios(panel)[2].props.onClick();
+  assert.deepEqual(commands.at(-1), { type: 'theme', value: 'amber' }); complete(); for (let i = 0; i < 4; i++) await Promise.resolve();
+  assert.deepEqual(commands.at(-1), { type: 'contrast', value: 'high' }); complete(); for (let i = 0; i < 4; i++) await Promise.resolve();
+  panel = render(); assert.equal(commands.length, 3); assert.equal(radios(panel)[2].props['aria-checked'], true);
+  assert.equal(radios(panel)[2].props.tabIndex, 0); assert.ok(radios(panel).slice(0, 2).every(node => node.props.tabIndex === -1));
+  assert.equal(notebookNodes(panel, node => node.type === 'Check').length, 1);
+  themeHooks.dispose();
+});
+
 function menuParams(overrides = {}) {
   return {
     x: 25, y: 50, linkURL: '', srcURL: '', mediaType: 'none', selectionText: '', isEditable: false,
@@ -283,7 +456,7 @@ test('profile drafts survive editor remounts, lock during save and clear on Canc
   let hooks = notebookTestHooks(), finish, cancelled = 0;
   const react = Object.fromEntries(Object.keys(hooks.react).map(key => [key, (...args) => hooks.react[key](...args)]));
   const sent = [], profile = { id: 'draft-profile', name: 'Work', color: 'blue' };
-  const module = interfaceModule('src/Profiles.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './Menu': {} },
+  const module = interfaceModule('src/Profiles.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': {} },
     { window: { horizon: { command: command => { sent.push(command); return new Promise(resolve => { finish = resolve; }); } } } });
   const render = () => hooks.render(() => module.ProfileForm({ language: 'en', profiles: [profile], profile, onCancel: () => { cancelled++; }, onSuccess() {} }));
   const input = tree => notebookNodes(tree, node => node.type === 'input')[0];
@@ -1693,14 +1866,14 @@ test('settings validate themes, write atomically and preserve corrupt or oversiz
   assert.equal(settings.theme, 'system');
   assert.equal(createSettings(path, () => {}).migrationAllowed, false);
   assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
-  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 3, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true }), true);
+  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 4, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] }), true);
   for (const value of [null, [], {}, { version: 2, theme: 'system' }, { version: 1, theme: 'dark' }, { version: 1, theme: 'amber', extra: true }, { version: 1, theme: 'amber' }, { version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', contrast: null }, { version: 1, theme: 'amber', contrast: 'high', extra: true }]) {
     assert.equal(validateSettings(value), false);
     assert.throws(() => writeSettings(path, value));
   }
   for (const corrupt of ['{broken', JSON.stringify({ version: 2, theme: 'amber' }), ' '.repeat(4097)]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readSettings(path), { version: 3, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
+    assert.deepEqual(readSettings(path), { version: 4, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
     assert.ok(readdirSync(directory).filter(name => name.startsWith('settings.json.corrupt-')).some(name => readFileSync(join(directory, name), 'utf8') === corrupt));
   }
   const existing = createSettings(path, () => {});
@@ -1861,7 +2034,7 @@ test('dark page flips replace views in every profile without closing tabs and si
 
 test('dark page settings validate exact values, migrate version 1 and retain valid data when migration cannot be saved', t => {
   const directory = temporaryDirectory(t, 'dark-settings'), path = join(directory, 'settings.json');
-  const defaults = { version: 3, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true };
+  const defaults = { version: 4, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] };
   assert.deepEqual(readSettings(path), defaults);
   for (const darkPages of ['off', 'on', 'system']) for (const darkStrength of ['soft', 'standard', 'deep']) for (const darkTone of ['neutral', 'warm']) {
     const valid = { ...defaults, darkPages, darkStrength, darkTone };
@@ -2036,25 +2209,25 @@ test('contrast defaults follow the OS only on first run and legacy settings migr
   const directory = temporaryDirectory(t, 'contrast');
   const first = join(directory, 'first.json');
   const settings = createSettings(first, () => {}, true);
-  assert.deepEqual(readSettings(first), { version: 3, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
+  assert.deepEqual(readSettings(first), { version: 4, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
   settings.setTheme('amber', true);
   assert.equal(settings.contrast, 'high');
   settings.setContrast('standard');
   assert.equal(settings.theme, 'amber');
-  assert.deepEqual(readSettings(first, true), { version: 3, theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
+  assert.deepEqual(readSettings(first, true), { version: 4, theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
   assert.throws(() => settings.setContrast('invalid'));
   assert.equal(settings.contrast, 'standard');
   for (const theme of ['system', 'amber', 'daylight']) {
     const legacy = join(directory, theme + '.json');
     writeFileSync(legacy, JSON.stringify({ version: 1, theme }));
-    assert.deepEqual(readSettings(legacy, true), { version: 3, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
-    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 3, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
+    assert.deepEqual(readSettings(legacy, true), { version: 4, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
+    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 4, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
     assert.equal(createSettings(legacy, () => {}, true).migrationAllowed, false);
   }
   assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
   const blocked = join(directory, 'blocked');
   writeFileSync(blocked, 'file');
-  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 3, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
+  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 4, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [] });
   const unavailable = createSettings(join(blocked, 'settings.json'), () => {}, true);
   assert.throws(() => unavailable.setContrast('standard'));
   assert.equal(unavailable.contrast, 'high');
@@ -3343,7 +3516,7 @@ test('full-page capture waits for visible content; save results respect closed a
     const globals = {
       state: { notebookLocked: false }, notebookScope: 'scope', liveNotebookScope: { current: 'scope' }, notebookOverlay: overlay, liveNotebookOverlay: liveOverlay, edits: { flush: async () => events.push('flush') },
       setPageCapturePending: value => events.push('pending:' + value), setNotebookOverlay: value => { assert.equal(value, null); liveOverlay.current = value; events.push('closed'); },
-      setMenuOpen() {}, setProfileOpen() {}, setShieldScope() {}, setSuggestionsOpen() {}, setPanel() {},
+      setMenuOpen() {}, setProfileOpen() {}, setHubPage() {}, setLyraOpen() {}, setShieldScope() {}, setSuggestionsOpen() {}, setPanel() {},
       requestAnimationFrame: callback => queueMicrotask(callback), reportArea: hidden => { assert.equal(hidden, false); events.push('visible'); return new Promise(resolve => { visible = resolve; }); },
       window: { horizon: { async command(command) { events.push('capture'); assert.equal(command.kind, kind); if (kind === 'area') assert.deepEqual(command.rect, { x: 1, y: 2, width: 300, height: 200 }); if (reopened) liveOverlay.current = nextOverlay; if (failure) throw new Error('CAPTURE_FAILED'); }, async getNotebook() { return { items: [{ id: 'saved-item' }] }; } } },
       notebookButtonRef: { current: { focus: () => events.push('focus') } }, setNotebookNotice: value => notices.push(value), language: 'en', text: copy.text, openNotebook() {}, notebookError: reason => reason.message,
@@ -3588,22 +3761,22 @@ test('run D: locked creation and capture explain refusal in place before sending
   assert.equal(commands, 0); assert.equal(notebookNodes(tree, node => node.type === 'picker').length, 0);
   assert.equal(notebookNodes(tree, node => node.props.role === 'alert')[0].props.children[0].props.children, copy.text('NOTEBOOK_LOCKED', 'en'));
 });
-test('settings v3 validates every new field and migrates v2 without losing appearance', t => {
+test('settings v4 validates every new field and migrates v2 without losing appearance', t => {
   const directory = temporaryDirectory(t, 'settings-v3'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
-  assert.equal(defaults.version, 3);
+  assert.equal(defaults.version, 4);
   for (const [key, bad] of [['searchEngine', 'unknown'], ['language', 'fr'], ['downloadsFolder', 'relative'], ['askWhereToSave', 1], ['blockAds', null], ['blockThirdPartyCookies', 'false']]) {
     assert.equal(validateSettings({ ...defaults, [key]: bad }), false);
     const missing = { ...defaults }; delete missing[key]; assert.equal(validateSettings(missing), false);
   }
   const legacy = { version: 2, theme: 'daylight', contrast: 'high', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' };
   writeFileSync(path, JSON.stringify(legacy));
-  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 3 });
-  assert.equal(JSON.parse(readFileSync(path)).version, 3);
+  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 4 });
+  assert.equal(JSON.parse(readFileSync(path)).version, 4);
   const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   writeFileSync(path, JSON.stringify(legacy));
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...require(name), renameSync() { throw new Error('Read-only'); } } : localRequire(name));
-  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 3 });
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 4 });
   assert.equal(JSON.parse(readFileSync(path)).version, 2);
 });
 
