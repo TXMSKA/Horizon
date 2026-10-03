@@ -42,20 +42,25 @@ export interface SiteSettingsEntry { host: string; origin: string; blocking: boo
 export interface PermissionPrompt { id: string; origin: string; permissions: SitePermission[] }
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 4; history: HistoryEntry[]; bookmarks: Bookmark[]; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
-export interface TabState { id: string; settings: SettingsSection | null; notebook: string | null; notebookItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; notebooks: NotebookSummary[]; notebookInUse: string | null; notebooksVersion: number; notebookReadError: boolean; notebookLocked: boolean; notebookStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export interface TabState { id: string; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
+export interface BrowserState { version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
 export type BrowserShortcut = 'focus-address' | 'new-tab' | 'close-tab' | 'next-tab' | 'previous-tab' | 'back' | 'forward' | 'reload' | 'stop' | 'history' | 'downloads' | 'favorites' | 'fullscreen' | 'bookmark' | 'find' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | `tab-${number}`;
-export type NotebookItemKind = 'note' | 'text' | 'area' | 'page';
+export type DesktopItemKind = 'note' | 'text' | 'area' | 'page' | 'link';
 export interface CaptureRect { x: number; y: number; width: number; height: number }
 export interface CaptureImage { filename: string; width: number; height: number; bytes: number; cut: boolean }
-export interface NotebookItem { id: string; kind: NotebookItemKind; title: string; text: string; note: string; source: { url: string; title: string } | null; image: CaptureImage | null; createdAt: number; updatedAt: number }
-export interface Notebook { id: string; name: string; createdAt: number; updatedAt: number; usedAt: number; items: NotebookItem[] }
-export interface NotebookSummary { id: string; name: string; notes: number; captures: number; updatedAt: number; usedAt: number; latest: Pick<NotebookItem, 'id' | 'kind' | 'title' | 'source'>[] }
-export type NotebookContent = Omit<Notebook, 'items'> & { items: (Omit<NotebookItem, 'image'> & { image: Omit<CaptureImage, 'filename'> | null })[] };
-export type NotebookError = 'NOTEBOOK_NAME_INVALID' | 'NOTEBOOK_NAME_EMPTY' | 'NOTEBOOK_NAME_LONG' | 'NOTEBOOK_NAME_DUPLICATE' | 'NOTEBOOK_LIMIT' | 'NOTEBOOK_ITEM_LIMIT' | 'NOTEBOOK_NOT_FOUND' | 'NOTEBOOK_ITEM_NOT_FOUND' | 'NOTEBOOK_ITEM_INVALID' | 'NOTEBOOK_STORAGE_FAILED' | 'NOTEBOOK_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'NOTHING_SELECTED';
+export interface DesktopItem { id: string; folder: string | null; kind: DesktopItemKind; title: string; text: string; note: string; source: { url: string; title: string } | null; image: CaptureImage | null; createdAt: number; updatedAt: number }
+export interface ProjectFolder { id: string; name: string; createdAt: number }
+export interface Project { id: string; name: string; createdAt: number; updatedAt: number; usedAt: number; folders: ProjectFolder[]; items: DesktopItem[] }
+export interface ProjectSummary { id: string; name: string; pages: number; notes: number; captures: number; folders: (ProjectFolder & { count: number })[]; updatedAt: number; usedAt: number; latest: Pick<DesktopItem, 'id' | 'folder' | 'kind' | 'title' | 'source' | 'createdAt' | 'updatedAt'>[] }
+export type DesktopItemContent = Omit<DesktopItem, 'image'> & { image: Omit<CaptureImage, 'filename'> | null };
+export type ProjectContent = Omit<Project, 'items'> & { items: DesktopItemContent[] };
+export type CaptureSummary = Pick<DesktopItem, 'id' | 'title' | 'source' | 'createdAt'>;
+export type DesktopPanelPage = { kind: 'home' | 'captures' | 'new-project' } | { kind: 'project'; project: string; folder?: string | null } | { kind: 'item'; project: string | null; id: string };
+export interface DesktopPanelState { open: boolean; page: DesktopPanelPage }
+export type DesktopError = 'DESKTOP_COMMAND_INVALID' | 'DESKTOP_LOCKED' | 'FOLDER_NAME_INVALID' | 'FOLDER_NAME_EMPTY' | 'FOLDER_NAME_LONG' | 'FOLDER_NAME_DUPLICATE' | 'FOLDER_LIMIT' | 'FOLDER_NOT_FOUND' | 'CAPTURE_LIMIT' | 'LINK_INVALID' | 'TEXT_INVALID' | 'DESKTOP_NOT_FOUND' | 'PROJECT_NAME_INVALID' | 'PROJECT_NAME_EMPTY' | 'PROJECT_NAME_LONG' | 'PROJECT_NAME_DUPLICATE' | 'PROJECT_LIMIT' | 'PROJECT_ITEM_LIMIT' | 'PROJECT_NOT_FOUND' | 'DESKTOP_ITEM_NOT_FOUND' | 'DESKTOP_ITEM_INVALID' | 'DESKTOP_STORAGE_FAILED' | 'DESKTOP_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'NOTHING_SELECTED';
 export type BrowserCommand =
   | { type: 'pin-app' | 'unpin-app'; id: HubApp }
   | { type: 'open-settings'; section: SettingsSection }
@@ -65,16 +70,28 @@ export type BrowserCommand =
   | { type: 'choose-downloads-folder' | 'reset-downloads-folder' | 'register-default-browser' }
   | { type: 'clear-browsing-data'; history: boolean; cookies: boolean; cache: boolean }
   | { type: 'reset-site'; host: string }
-  | { type: 'retry-notebook-storage' }
-  | { type: 'create-notebook'; name: string }
-  | { type: 'rename-notebook'; id: string; name: string }
-  | { type: 'delete-notebook' | 'set-notebook'; id: string }
-  | { type: 'open-notebook'; id: string; item?: string }
-  | { type: 'add-note'; notebook: string; title: string; text: string }
-  | { type: 'update-notebook-item'; notebook: string; id: string; title?: string; text?: string; note?: string }
-  | { type: 'delete-notebook-item'; notebook: string; id: string }
-  | { type: 'save-capture'; notebook: string; kind: 'text' | 'page' }
-  | { type: 'save-capture'; notebook: string; kind: 'area'; rect: CaptureRect }
+  | { type: 'retry-desktop-storage' }
+  | { type: 'create-project'; name: string }
+  | { type: 'rename-project'; id: string; name: string }
+  | { type: 'delete-project' | 'set-project'; id: string }
+  | { type: 'open-desktop'; id: string; item?: string }
+  | { type: 'open-desktop-panel'; page: DesktopPanelPage }
+  | { type: 'close-desktop-panel' }
+  | { type: 'create-folder'; project: string; name: string }
+  | { type: 'rename-folder'; project: string; id: string; name: string }
+  | { type: 'delete-folder'; project: string; id: string }
+  | { type: 'move-item-folder'; project: string; id: string; folder: string | null }
+  | { type: 'move-item-project'; project: string; id: string; toProject: string; folder: string | null }
+  | { type: 'add-capture-to-project'; id: string; project: string; folder: string | null }
+  | { type: 'add-link'; address: string; title: string; project: string; folder: string | null }
+  | { type: 'add-text'; text: string; source: { url: string; title: string } | null; project: string; folder: string | null }
+  | { type: 'delete-capture'; id: string }
+  | { type: 'add-note'; project: string; title: string; text: string; folder?: string | null }
+  | { type: 'update-item'; project: string | null; id: string; title?: string; text?: string; note?: string }
+  | { type: 'delete-item'; project: string; id: string }
+  | { type: 'save-capture'; project: string; folder?: string | null; kind: 'text' }
+  | { type: 'save-capture'; project: string | null; folder?: string | null; kind: 'page' }
+  | { type: 'save-capture'; project: string | null; folder?: string | null; kind: 'area'; rect: CaptureRect }
   | { type: 'set-blocking'; enabled: boolean }
   | { type: 'set-site-dark'; enabled: boolean }
   | { type: 'set-site-permission'; permission: SitePermission; decision: PermissionDecision }
@@ -99,7 +116,7 @@ export type BrowserCommand =
   | { type: 'stop-find' }
   | { type: 'delete-history'; url: string }
   | { type: 'clear-history' }
-  | { type: 'restore'; kind: 'history' | 'bookmarks' | 'downloads' | 'notebooks' }
+  | { type: 'restore'; kind: 'history' | 'bookmarks' | 'downloads' | 'desktop' }
   | { type: 'rename-bookmark'; url: string; title: string }
   | { type: 'delete-bookmark'; url: string }
   | { type: 'cancel-download' | 'show-download' | 'remove-download' | 'retry-download'; id: string };
@@ -113,8 +130,9 @@ export interface HorizonAPI {
   windowAction(action: WindowAction): Promise<void>;
   getState(): Promise<BrowserState>;
   capture(): Promise<Uint8Array | null>;
-  getNotebook(id: string): Promise<NotebookContent>;
-  getCaptureImage(notebook: string, item: string): Promise<Uint8Array | null>;
+  getProject(id: string): Promise<ProjectContent>;
+  getCaptures(): Promise<DesktopItemContent[]>;
+  getCaptureImage(project: string | null, item: string): Promise<Uint8Array | null>;
   getFavicon(id: string, hash: string): Promise<Uint8Array | null>;
   command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
   command(command: BrowserCommand): Promise<void>;
@@ -130,7 +148,8 @@ export const IPC = {
   state: 'horizon:state',
   capture: 'horizon:capture',
   favicon: 'horizon:favicon',
-  notebook: 'horizon:notebook',
+  project: 'horizon:project',
+  captures: 'horizon:captures',
   captureImage: 'horizon:capture-image',
   command: 'horizon:command',
   contentArea: 'horizon:content-area',

@@ -13,7 +13,7 @@ export function BrowserMenu({ language, active, keyboard, opener, onDismiss, onS
   onSettings: () => void; onAbout: () => void; run: (command: BrowserCommand) => Promise<boolean>;
 }) {
   const t = (key: CopyKey) => text(key, language);
-  const page = Boolean(active?.url && !active.notebook && !active.settings && !active.error);
+  const page = Boolean(active?.url && !active.desktop && !active.settings && !active.error);
   return <ToolbarPopover opener={opener}><Menu id="browser-menu" className="browser-tools-menu" label={t('menu')} keyboard={keyboard} opener={opener} onDismiss={reason => onDismiss(reason === 'escape')}>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onShortcut('new-tab')}><Plus aria-hidden="true" /><span>{t('newTab')}</span><kbd>Ctrl+T</kbd></button>
     <hr />

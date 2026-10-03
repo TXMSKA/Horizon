@@ -3,12 +3,12 @@ import type { TextareaHTMLAttributes } from 'react';
 import { Camera, Ellipsis, FileText, Pencil, Plus, Trash2 } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
-import type { BrowserCommand, Language, NotebookContent } from './shared/api';
-import type { NotebookEdits } from './shared/notebook-edits';
+import type { BrowserCommand, Language, ProjectContent } from './shared/api';
+import type { DesktopEdits } from './shared/desktop-edits';
 import { Menu } from './Menu';
 import { itemSite, notebookItemLabel, NotebookAnchor, notebookCounts, notebookError, NotebookNameForm, relativeNotebookDate } from './Notebooks';
 
-type Item = NotebookContent['items'][number];
+type Item = ProjectContent['items'][number];
 
 function GrowingTextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   const field = useRef<HTMLTextAreaElement>(null);
@@ -31,7 +31,7 @@ function GrowingTextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return <textarea {...props} ref={field} rows={1} />;
 }
 
-export function CaptureImage({ notebook, item, language }: { notebook: string; item: Item; language: Language }) {
+export function CaptureImage({ project: notebook, item, language }: { project: string; item: Item; language: Language }) {
   const box = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (!box.current || !item.image) return;
@@ -53,7 +53,7 @@ export function CaptureImage({ notebook, item, language }: { notebook: string; i
   return <figure className="notebook-capture"><div ref={box} className="notebook-image-box" aria-busy={!image && !failed}>{failed ? <div className="notebook-image-error" role="alert"><p>{text('notebookImageFailed', language)}</p><button className="profile-action neutral" type="button" onClick={() => setAttempt(previous => previous + 1)}>{text('retry', language)}</button></div> : image ? <img src={image} alt={text('notebookImage', language).replace('{title}', item.title)} onLoad={event => { event.currentTarget.style.width = `${event.currentTarget.naturalWidth / window.devicePixelRatio}px`; }} onError={() => { URL.revokeObjectURL(image); setImage(null); setFailed(true); }} /> : <div className="notebook-image-loading notebook-skeleton" role="status"><span className="visually-hidden">{text('loading', language)}</span></div>}</div>{item.image?.cut && <figcaption>{text('captureCut', language)}</figcaption>}</figure>;
 }
 
-function NotebookEditor({ notebook, item, language, edits, readOnly, onDelete }: { notebook: string; item: Item; language: Language; edits: NotebookEdits; readOnly: boolean; onDelete: () => void }) {
+function NotebookEditor({ project: notebook, item, language, edits, readOnly, onDelete }: { project: string; item: Item; language: Language; edits: DesktopEdits; readOnly: boolean; onDelete: () => void }) {
   const id = useId(), t = (key: CopyKey) => text(key, language);
   const [draft, setDraft] = useState(() => ({ title: item.title, text: item.text, note: item.note, ...edits.fields(notebook, item.id) }));
   useEffect(() => { setDraft({ title: item.title, text: item.text, note: item.note, ...edits.fields(notebook, item.id) }); }, [notebook, item.id, item.title, item.text, item.note, edits]);
@@ -63,24 +63,24 @@ function NotebookEditor({ notebook, item, language, edits, readOnly, onDelete }:
   return <article className="notebook-item" aria-label={draft.title || t('newNote')}>
     <div className="notebook-item-heading"><div className="notebook-title-field"><label htmlFor={`${id}-title`}>{t('noteTitle')}</label><input className="notebook-item-title" id={`${id}-title`} value={draft.title} maxLength={200} readOnly={readOnly} onChange={event => change('title', event.target.value)} /></div><button className="icon-button" type="button" aria-label={t('deleteItem').replace('{title}', draft.title || t('newNote'))} title={t('deleteItem').replace('{title}', draft.title || t('newNote'))} onClick={onDelete}><Trash2 aria-hidden="true" /></button></div>
     <p className="notebook-source">{item.source ? t('captureSource').replace('{site}', itemSite(item.source.url)).replace('{date}', relativeNotebookDate(item.createdAt, language)) : relativeNotebookDate(item.createdAt, language)} <time dateTime={new Date(item.createdAt).toISOString()} className="visually-hidden">{new Date(item.createdAt).toLocaleString(language)}</time></p>
-    {item.image ? <CaptureImage key={item.id} notebook={notebook} item={item} language={language} /> : <div className="notebook-editor-field"><label htmlFor={`${id}-text`}>{t('noteText')}</label><GrowingTextArea id={`${id}-text`} className="notebook-text" value={draft.text} maxLength={100000} readOnly={readOnly} onChange={event => change('text', event.target.value)} /></div>}
+    {item.image ? <CaptureImage key={item.id} project={notebook} item={item} language={language} /> : <div className="notebook-editor-field"><label htmlFor={`${id}-text`}>{t('noteText')}</label><GrowingTextArea id={`${id}-text`} className="notebook-text" value={draft.text} maxLength={100000} readOnly={readOnly} onChange={event => change('text', event.target.value)} /></div>}
     {item.kind !== 'note' && <div className="notebook-editor-field"><label htmlFor={`${id}-note`}>{t('captureNote')}</label><GrowingTextArea id={`${id}-note`} className="notebook-annotation" value={draft.note} placeholder={t('captureNotePlaceholder')} maxLength={20000} readOnly={readOnly} onChange={event => change('note', event.target.value)} /></div>}
   </article>;
 }
 
 export function NotebookView({ id, selected, version, language, edits, readOnly, locked = false, run, onOpen, onDelete }: {
-  id: string; selected: string | null; version: number; language: Language; edits: NotebookEdits; readOnly: boolean; locked?: boolean;
+  id: string; selected: string | null; version: number; language: Language; edits: DesktopEdits; readOnly: boolean; locked?: boolean;
   run: (command: BrowserCommand) => Promise<boolean>; onOpen: (id: string, item?: string) => void;
   onDelete: (command: BrowserCommand, message: CopyKey) => Promise<void>;
 }) {
-  const [content, setContent] = useState<NotebookContent | null>(null), [error, setError] = useState(''), [loading, setLoading] = useState(true), [attempt, setAttempt] = useState(0);
+  const [content, setContent] = useState<ProjectContent | null>(null), [error, setError] = useState(''), [loading, setLoading] = useState(true), [attempt, setAttempt] = useState(0);
   const [menu, setMenu] = useState(false), [rename, setRename] = useState(false), [busy, setBusy] = useState(false);
   const [focusItem, setFocusItem] = useState<string | null>(null);
   const action = useRef<HTMLButtonElement>(null), newNote = useRef<HTMLButtonElement>(null), pending = useRef(false);
   const t = (key: CopyKey) => text(key, language);
   useEffect(() => {
     let mounted = true; setLoading(true); setError('');
-    void window.horizon.getNotebook(id).then(notebook => { if (mounted) setContent(notebook); }).catch((reason: unknown) => { if (mounted) setError(notebookError(reason, language)); }).finally(() => { if (mounted) setLoading(false); });
+    void window.horizon.getProject(id).then(notebook => { if (mounted) setContent(notebook); }).catch((reason: unknown) => { if (mounted) setError(notebookError(reason, language)); }).finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
   }, [id, version, attempt, language]);
   const item = content?.items.find(item => item.id === selected) ?? content?.items[0];
@@ -90,13 +90,13 @@ export function NotebookView({ id, selected, version, language, edits, readOnly,
   }, [focusItem, item?.id]);
   const add = async () => {
     if (pending.current) return;
-    if (locked) { setError(t('NOTEBOOK_LOCKED')); return; }
+    if (locked) { setError(t('DESKTOP_LOCKED')); return; }
     pending.current = true; setBusy(true);
     try {
       await edits.flush();
-      const before = await window.horizon.getNotebook(id);
-      if (!await run({ type: 'add-note', notebook: id, title: t('newNote'), text: '' })) return;
-      const next = await window.horizon.getNotebook(id), added = next.items.find(item => !before.items.some(old => old.id === item.id));
+      const before = await window.horizon.getProject(id);
+      if (!await run({ type: 'add-note', project: id, title: t('newNote'), text: '' })) return;
+      const next = await window.horizon.getProject(id), added = next.items.find(item => !before.items.some(old => old.id === item.id));
       if (added) { setFocusItem(added.id); onOpen(id, added.id); }
     } catch (reason) { setError(notebookError(reason, language)); }
     finally { pending.current = false; setBusy(false); }
@@ -109,9 +109,9 @@ export function NotebookView({ id, selected, version, language, edits, readOnly,
       {content.items.length > 0 && <button ref={newNote} className="profile-action neutral notebook-new-note" type="button" disabled={busy} onClick={() => { void add(); }}><Plus aria-hidden="true" />{t('newNote')}</button>}
     </aside>
     <div className="notebook-detail">{error && <div className="notebook-view-error" role="alert"><span>{error}</span><button className="text-button" type="button" onClick={() => setAttempt(previous => previous + 1)}>{t('retry')}</button></div>}{loading && <span className="visually-hidden" role="status">{t('loading')}</span>}
-      {item ? <NotebookEditor key={item.id} notebook={id} item={item} language={language} edits={edits} readOnly={readOnly} onDelete={() => { void onDelete({ type: 'delete-notebook-item', notebook: id, id: item.id }, 'notebookItemDeleted'); }} /> : <div className="notebook-empty"><h2>{content.name}</h2><p>{t('emptyNotebook')}</p><button className="profile-action primary" type="button" disabled={busy} onClick={() => { void add(); }}>{t('newNote')}</button></div>}
+      {item ? <NotebookEditor key={item.id} project={id} item={item} language={language} edits={edits} readOnly={readOnly} onDelete={() => { void onDelete({ type: 'delete-item', project: id, id: item.id }, 'notebookItemDeleted'); }} /> : <div className="notebook-empty"><h2>{content.name}</h2><p>{t('emptyNotebook')}</p><button className="profile-action primary" type="button" disabled={busy} onClick={() => { void add(); }}>{t('newNote')}</button></div>}
     </div>
-    {menu && <NotebookAnchor opener={action}><Menu id="notebook-actions" className="notebook-actions-menu" label={t('notebookActions')} keyboard opener={action} onDismiss={reason => { setMenu(false); if (reason !== 'outside') action.current?.focus(); }}><button type="button" role="menuitem" tabIndex={-1} onClick={() => { setMenu(false); setRename(true); }}><Pencil aria-hidden="true" /><span>{t('renameNotebook')}</span></button><button type="button" role="menuitem" tabIndex={-1} onClick={() => { setMenu(false); void onDelete({ type: 'delete-notebook', id }, 'notebookDeleted'); }}><Trash2 aria-hidden="true" /><span>{t('deleteNotebook')}</span></button></Menu></NotebookAnchor>}
+    {menu && <NotebookAnchor opener={action}><Menu id="notebook-actions" className="notebook-actions-menu" label={t('notebookActions')} keyboard opener={action} onDismiss={reason => { setMenu(false); if (reason !== 'outside') action.current?.focus(); }}><button type="button" role="menuitem" tabIndex={-1} onClick={() => { setMenu(false); setRename(true); }}><Pencil aria-hidden="true" /><span>{t('renameNotebook')}</span></button><button type="button" role="menuitem" tabIndex={-1} onClick={() => { setMenu(false); void onDelete({ type: 'delete-project', id }, 'notebookDeleted'); }}><Trash2 aria-hidden="true" /><span>{t('deleteNotebook')}</span></button></Menu></NotebookAnchor>}
     {rename && <NotebookAnchor opener={action}><div className="notebook-name-popover" role="dialog" aria-label={t('renameNotebook')}><NotebookNameForm language={language} rename={id} initial={content.name} onCancel={() => { setRename(false); action.current?.focus(); }} onSuccess={() => { setRename(false); action.current?.focus(); }} /></div></NotebookAnchor>}
   </section>;
 }

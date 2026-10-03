@@ -1,6 +1,6 @@
 import type { WebContents } from 'electron';
 import type { CaptureRect } from '../src/shared/api';
-import { CAPTURE_LIMIT } from './notebooks';
+import { CAPTURE_LIMIT } from './desktop';
 
 export const SELECTION_WORLD = 1006;
 export const SELECTION_CODE = 'String(getSelection())';

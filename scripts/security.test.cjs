@@ -2214,11 +2214,11 @@ test('sandboxed preload validates the startup theme and exposes only the frozen 
     assert.equal(exposed.initialContrast, contrast === 'high' ? 'high' : 'standard');
     assert.equal(exposed.themeMigration, true);
     assert.equal(Object.isFrozen(exposed), true);
-    assert.deepEqual(Object.keys(exposed).sort(), ['capture', 'command', 'getCaptureImage', 'getFavicon', 'getLanguage', 'getNotebook', 'getState', 'initialContrast', 'initialTheme', 'onContextMenu', 'onShortcut', 'onState', 'setContentArea', 'themeMigration', 'windowAction']);
+    assert.deepEqual(Object.keys(exposed).sort(), ['capture', 'command', 'getCaptureImage', 'getCaptures', 'getFavicon', 'getLanguage', 'getProject', 'getState', 'initialContrast', 'initialTheme', 'onContextMenu', 'onShortcut', 'onState', 'setContentArea', 'themeMigration', 'windowAction']);
     await exposed.getFavicon('tab', 'a'.repeat(32));
     assert.deepEqual(invocations, [['horizon:favicon', 'tab', 'a'.repeat(32)]]);
-    await exposed.getNotebook('notebook'); await exposed.getCaptureImage('notebook', 'item');
-    assert.deepEqual(invocations.slice(1), [['horizon:notebook', 'notebook'], ['horizon:capture-image', 'notebook', 'item']]);
+    await exposed.getProject('notebook'); await exposed.getCaptureImage('notebook', 'item');
+    assert.deepEqual(invocations.slice(1), [['horizon:project', 'notebook'], ['horizon:capture-image', 'notebook', 'item']]);
   }
 });
 
@@ -2888,19 +2888,19 @@ test('cosmetic sanitization keeps only fixed hiding declarations and refuses loa
   const styles = '.ad { display:none!important; } .remote { background:url(https://evil.example/x); } .font { @font-face:x; } .custom { opacity:0; }';
   assert.deepEqual(safeCosmeticCSS(styles), { css: '.ad { display: none !important; }', rules: 1 });
 });
-const { validateNotebookStore, readNotebookStore, writeNotebookStore, writeCaptureFile, readCaptureFile, cleanupCaptureFiles, CAPTURE_LIMIT, CAPTURE_STORAGE_LIMIT } = require('../dist/electron/notebooks.js');
+const { validateDesktopStore, readDesktopStore, writeDesktopStore, writeCaptureFile, readCaptureFile, cleanupCaptureFiles, CAPTURE_LIMIT, CAPTURE_STORAGE_LIMIT } = require('../dist/electron/desktop.js');
 const { captureRectangle, captureSelection, captureWholePage, SELECTION_CODE, SELECTION_WORLD, CAPTURE_DEADLINE } = require('../dist/electron/captures.js');
 const plainCipher = { isEncryptionAvailable: () => false };
-function sampleNotebookItem(kind = 'note') {
-  return { id: randomUUID(), kind, title: 'Item', text: kind === 'note' || kind === 'text' ? 'Private text' : '', note: '',
+function sampleDesktopItem(kind = 'note') {
+  return { id: randomUUID(), folder: null, kind, title: 'Item', text: kind === 'note' || kind === 'text' ? 'Private text' : '', note: '',
     source: kind === 'note' ? null : { url: 'https://example.com/', title: 'Source' },
     image: kind === 'area' || kind === 'page' ? { filename: `${randomUUID()}.bin`, width: 1, height: 1, bytes: faviconPNG.length, cut: false } : null,
     createdAt: 1, updatedAt: 1 };
 }
-function sampleNotebookStore() {
+function sampleDesktopStore() {
   const id = randomUUID();
-  return { version: 1, key: require('node:crypto').randomBytes(32).toString('base64'), inUse: id,
-    notebooks: [{ id, name: 'Research', createdAt: 1, updatedAt: 1, usedAt: 1, items: ['note', 'text', 'area', 'page'].map(sampleNotebookItem) }] };
+  return { version: 2, captures: [], key: require('node:crypto').randomBytes(32).toString('base64'), inUse: id,
+    projects: [{ id, name: 'Research', createdAt: 1, updatedAt: 1, usedAt: 1, folders: [], items: ['note', 'text', 'area', 'page'].map(sampleDesktopItem) }] };
 }
 function timedModule(name, timers) {
   const filename = resolve(`dist/electron/${name}.js`), exported = {};
@@ -2913,68 +2913,253 @@ function fireTimers(timers, delay) {
   for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); }
 }
 
+test('Desktop migrates version 1 with every identity, value, key and capture file intact, even when saving fails', t => {
+  const directory = temporaryDirectory(t, 'desktop-migration'), path = join(directory, 'notebooks.json');
+  const next = sampleDesktopStore(), captures = join(directory, 'captures');
+  for (const item of next.projects[0].items.filter(item => item.image)) item.image.filename = writeCaptureFile(captures, next.key, item.id, faviconPNG);
+  next.projects[0].items[0].text = 'Lines\nTabs\tLegacy\u0001';
+  const legacy = { version: 1, key: next.key, inUse: next.inUse, notebooks: next.projects.map(project => {
+    const previous = structuredClone(project); delete previous.folders;
+    for (const item of previous.items) delete item.folder;
+    return previous;
+  }) };
+  for (const cipher of [plainCipher, authenticatedCipher()]) {
+    require('../dist/electron/store.js').writeStoreFile(path, legacy, cipher);
+    const before = new Map(readdirSync(captures).map(name => [name, readFileSync(join(captures, name))]));
+    assert.deepEqual(readDesktopStore(path, cipher), next);
+    assert.deepEqual(readDesktopStore(path, cipher), next);
+    for (const [name, bytes] of before) assert.deepEqual(readFileSync(join(captures, name)), bytes);
+    for (const item of next.projects[0].items.filter(item => item.image)) assert.deepEqual(readCaptureFile(captures, next.key, item), faviconPNG);
+    require('../dist/electron/store.js').writeStoreFile(path, legacy, cipher);
+    const original = readFileSync(path), filename = resolve('dist/electron/desktop.js'), localRequire = require('node:module').createRequire(filename), exported = {};
+    require('node:vm').compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === './store' ? { ...localRequire(name), writeStoreFile() { throw new Error('Read-only store'); } } : localRequire(name));
+    const status = { readError: false, memoryOnly: false };
+    assert.deepEqual(exported.readDesktopStore(path, cipher, status), next);
+    assert.deepEqual(status, { readError: false, memoryOnly: false }); assert.deepEqual(readFileSync(path), original);
+    assert.deepEqual(exported.readDesktopStore(path, cipher), next);
+    assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-')), false);
+  }
+  const invalid = structuredClone(legacy); invalid.notebooks[0].items[0].extra = true;
+  writeFileSync(path, JSON.stringify(invalid)); const status = { readError: false, memoryOnly: false };
+  assert.deepEqual(readDesktopStore(path, plainCipher, status).projects, []); assert.equal(status.readError, true);
+  assert.ok(readdirSync(directory).some(name => name.startsWith('notebooks.json.corrupt-')));
+  assert.equal(readdirSync(captures).length, 2);
+});
+
+test('Desktop folders enforce names and fifty per project, retain items on delete and restore their memberships', t => {
+  const directory = temporaryDirectory(t, 'desktop-folders'), timers = new Map(), { createDesktop } = timedModule('desktop', timers);
+  const runtime = createDesktop(join(directory, 'notebooks.json'), plainCipher, () => {}); t.after(() => runtime.dispose(true));
+  const project = runtime.create('First'), second = runtime.create('Second'), folder = runtime.createFolder(project.id, '  Sources  ');
+  assert.equal(folder.name, 'Sources'); assert.match(folder.id, /^[0-9a-f-]{36}$/); assert.ok(folder.createdAt > 0);
+  assert.throws(() => runtime.createFolder(project.id, 'SOURCES'), /FOLDER_NAME_DUPLICATE/);
+  const other = runtime.createFolder(second.id, 'Sources'); assert.notEqual(other.id, folder.id);
+  for (const [name, code] of [['', 'EMPTY'], [' ', 'EMPTY'], ['a'.repeat(81), 'LONG'], ['a\nb', 'INVALID'], ['x\u0085', 'INVALID']]) assert.throws(() => runtime.createFolder(project.id, name), new RegExp('FOLDER_NAME_' + code));
+  runtime.renameFolder(project.id, folder.id, '  Reading  '); assert.equal(folder.name, 'Reading');
+  runtime.addNote(project.id, 'Note', 'Body', folder.id); const item = project.items[0];
+  runtime.moveItemFolder(project.id, item.id, null); assert.equal(item.folder, null);
+  runtime.moveItemFolder(project.id, item.id, folder.id); assert.equal(item.folder, folder.id);
+  assert.throws(() => runtime.moveItemFolder(project.id, item.id, other.id), /FOLDER_NOT_FOUND/);
+  assert.equal(runtime.state().projects.find(entry => entry.id === project.id).folders[0].count, 1);
+  runtime.deleteFolder(project.id, folder.id); assert.equal(item.folder, null); assert.equal(project.items.length, 1);
+  runtime.restore(); assert.equal(item.folder, folder.id); assert.equal(project.folders[0], folder);
+  for (let index = 1; index < 50; index++) runtime.createFolder(project.id, `Folder ${index}`);
+  assert.throws(() => runtime.createFolder(project.id, 'Extra'), /FOLDER_LIMIT/);
+  assert.throws(() => runtime.renameFolder(project.id, folder.id, 'FOLDER 1'), /FOLDER_NAME_DUPLICATE/);
+  runtime.flush(); assert.equal(validateDesktopStore(readDesktopStore(join(directory, 'notebooks.json'))), true);
+  const schema = sampleDesktopStore(); schema.projects[0].folders = [folder]; schema.projects[0].items[0].folder = folder.id;
+  assert.equal(validateDesktopStore(schema), true);
+  for (const field of ['items', 'folders']) { const sparse = structuredClone(schema); sparse.projects[0][field] = new Array(1); assert.equal(validateDesktopStore(sparse), false); }
+  const sparseCaptures = structuredClone(schema); sparseCaptures.captures = new Array(1); assert.equal(validateDesktopStore(sparseCaptures), false);
+  for (const change of [value => { value.projects[0].items[0].folder = randomUUID(); }, value => { value.projects[0].folders[0].extra = true; }, value => { value.projects[0].folders.push({ ...folder, id: randomUUID(), name: 'READING' }); }, value => { value.projects[0].folders = new Array(1); }, value => { value.projects[0].folders = Array.from({ length: 51 }, (_, index) => ({ id: randomUUID(), name: String(index), createdAt: 1 })); }]) {
+    const value = structuredClone(schema); change(value); assert.equal(validateDesktopStore(value), false);
+  }
+});
+
+test('Desktop moves items between projects and kept captures without changing their identities or encrypted files', t => {
+  const directory = temporaryDirectory(t, 'desktop-moves'), timers = new Map(), { createDesktop } = timedModule('desktop', timers);
+  const path = join(directory, 'notebooks.json'), runtime = createDesktop(path, plainCipher, () => {}); t.after(() => runtime.dispose(true));
+  const first = runtime.create('First'), second = runtime.create('Second'), folder = runtime.createFolder(second.id, 'Destination');
+  runtime.addNote(first.id, 'Note', 'Body'); const note = first.items[0], before = structuredClone(note);
+  runtime.moveItemProject(first.id, note.id, second.id, folder.id); assert.deepEqual(note, { ...before, folder: folder.id }); assert.equal(first.items.length, 0);
+  runtime.moveItemProject(second.id, note.id, first.id, null); assert.deepEqual(note, before);
+  const capture = sampleDesktopItem('area'); capture.image = null;
+  runtime.addCapture(null, capture, faviconPNG, { width: 1, height: 1, cut: false });
+  const imagePath = join(directory, 'captures', capture.image.filename), encrypted = readFileSync(imagePath), captured = structuredClone(capture);
+  assert.deepEqual(runtime.image(null, capture.id), faviconPNG); assert.equal(runtime.state().captures[0].id, capture.id);
+  assert.equal(JSON.stringify(runtime.state()).includes('image'), false); assert.equal(JSON.stringify(runtime.captures()).includes('.bin'), false);
+  runtime.addCaptureToProject(capture.id, second.id, folder.id); assert.equal(runtime.captures().length, 0);
+  assert.deepEqual(second.items[0], { ...captured, folder: folder.id }); assert.deepEqual(runtime.image(second.id, capture.id), faviconPNG);
+  assert.throws(() => runtime.addCapture(second.id, structuredClone(capture)), /DESKTOP_ITEM_INVALID/); assert.deepEqual(runtime.image(second.id, capture.id), faviconPNG);
+  assert.deepEqual(readFileSync(imagePath), encrypted); assert.equal(readdirSync(join(directory, 'captures')).length, 1);
+  runtime.moveItemProject(second.id, capture.id, first.id, null); assert.deepEqual(runtime.image(first.id, capture.id), faviconPNG);
+  runtime.deleteItem(first.id, capture.id); runtime.restore(); assert.deepEqual(runtime.image(first.id, capture.id), faviconPNG);
+  runtime.delete(first.id); runtime.restore(); assert.deepEqual(runtime.image(first.id, capture.id), faviconPNG);
+  const kept = sampleDesktopItem('page'); kept.image = null; runtime.addCapture(null, kept, faviconPNG, { width: 1, height: 1, cut: false });
+  runtime.deleteItem(null, kept.id); assert.ok(existsSync(join(directory, 'captures', kept.image.filename))); runtime.restore(); assert.deepEqual(runtime.image(null, kept.id), faviconPNG);
+  runtime.deleteItem(null, kept.id); fireTimers(timers, 8000); assert.equal(existsSync(join(directory, 'captures', kept.image.filename)), false);
+  runtime.flush(); const reopened = createDesktop(path, plainCipher, () => {}); t.after(() => reopened.dispose(true));
+  assert.deepEqual(reopened.image(first.id, capture.id), faviconPNG);
+  second.items = Array.from({ length: 2000 }, () => sampleDesktopItem());
+  assert.throws(() => runtime.moveItemProject(first.id, note.id, second.id, null), /PROJECT_ITEM_LIMIT/); assert.equal(first.items.includes(note), true);
+  runtime.captureList().push(...Array.from({ length: 2000 }, () => sampleDesktopItem('area')));
+  assert.throws(() => runtime.addCapture(null, sampleDesktopItem('area'), faviconPNG, { width: 1, height: 1, cut: false }), /CAPTURE_LIMIT/);
+  assert.equal(readdirSync(join(directory, 'captures')).length, 1); runtime.dispose(true);
+});
+
+test('Desktop dropped links and text enforce schemes, control characters and exact length caps', t => {
+  const directory = temporaryDirectory(t, 'desktop-drops'), timers = new Map(), { createDesktop } = timedModule('desktop', timers);
+  const runtime = createDesktop(join(directory, 'notebooks.json'), plainCipher, () => {}); t.after(() => runtime.dispose(true));
+  const project = runtime.create('Drops'), url = 'https://example.com/';
+  runtime.addLink(project.id, null, url + 'x'.repeat(8192 - url.length), 't'.repeat(200));
+  runtime.addText(project.id, null, 'x'.repeat(100000), { url, title: 't'.repeat(200) }); runtime.addText(project.id, null, 'Lines\nTabs\tText', null);
+  assert.equal(project.items[0].kind, 'link'); assert.equal(runtime.state().projects[0].pages, 1); assert.equal(project.items[2].source, null);
+  for (const address of ['javascript:alert(1)', 'data:text/html,hi', 'file:///x', 'ftp://example.com', 'horizon://desktop/captures', url + '\u0001', url + '\n', url + 'x'.repeat(8193 - url.length)]) assert.throws(() => runtime.addLink(project.id, null, address, 'Title'), /LINK_INVALID/);
+  for (const title of ['x'.repeat(201), 'x\n', 'x\u0001', 'x\u0085']) assert.throws(() => runtime.addLink(project.id, null, url, title), /LINK_INVALID/);
+  for (const text of ['x'.repeat(100001), 'x\0', 'x\u0001', 'x\u0085']) assert.throws(() => runtime.addText(project.id, null, text, null), /TEXT_INVALID/);
+  for (const source of [{ url: 'file:///x', title: '' }, { url, title: 'x'.repeat(201) }, { url, title: '\n' }, { url, title: '', extra: true }]) assert.throws(() => runtime.addText(project.id, null, 'Text', source), /TEXT_INVALID/);
+  const link = project.items[0]; runtime.update(project.id, link.id, { title: 'Edited', note: 'Note' });
+  assert.throws(() => runtime.update(project.id, link.id, { text: 'Body' }), /DESKTOP_ITEM_INVALID/);
+  assert.throws(() => runtime.update(project.id, link.id, { note: 'x'.repeat(20001) }), /DESKTOP_ITEM_INVALID/);
+  assert.throws(() => runtime.update(project.id, link.id, { title: '\n' }), /DESKTOP_ITEM_INVALID/);
+  runtime.deleteItem(project.id, link.id); runtime.restore(); assert.equal(project.items[0].note, 'Note');
+});
+
+test('every new Desktop command checks exact keys and the current profile project, folder, item and capture ids', () => {
+  const stored = sampleDesktopStore(), projects = stored.projects, project = projects[0].id, id = projects[0].items[0].id;
+  const folder = randomUUID(); projects[0].folders.push({ id: folder, name: 'Folder', createdAt: 1 });
+  const other = { ...projects[0], id: randomUUID(), name: 'Other', folders: [], items: [] }; projects.push(other);
+  const capture = sampleDesktopItem('area'), captures = [capture];
+  const commands = [
+    { type: 'create-folder', project, name: 'Name' }, { type: 'rename-folder', project, id: folder, name: 'Name' }, { type: 'delete-folder', project, id: folder },
+    { type: 'move-item-folder', project, id, folder }, { type: 'move-item-folder', project, id, folder: null },
+    { type: 'move-item-project', project, id, toProject: other.id, folder: null }, { type: 'add-capture-to-project', project, id: capture.id, folder },
+    { type: 'add-link', project, folder, address: 'https://example.com/', title: 'Page' }, { type: 'add-text', project, folder: null, text: 'Text', source: null },
+    { type: 'add-note', project, folder, title: 'Note', text: 'Body' }, { type: 'delete-capture', id: capture.id }, { type: 'update-item', project: null, id: capture.id, note: 'Note' },
+    { type: 'save-capture', project: null, kind: 'page' }, { type: 'save-capture', project: null, folder: null, kind: 'area', rect: { x: 0, y: 0, width: 10, height: 10 } },
+    { type: 'open-desktop', id: 'captures', item: capture.id }, ...[{ kind: 'home' }, { kind: 'captures' }, { kind: 'new-project' }, { kind: 'project', project, folder }, { kind: 'item', project, id }, { kind: 'item', project: null, id: capture.id }].map(page => ({ type: 'open-desktop-panel', page })),
+    { type: 'close-desktop-panel' },
+  ];
+  for (const command of commands) {
+    assert.deepEqual(validateCommand(command, new Set(), projects, captures), command);
+    assert.throws(() => validateCommand({ ...command, extra: true }, new Set(), projects, captures));
+    for (const key of Object.keys(command)) {
+      if (['folder', 'item'].includes(key)) continue;
+      const missing = { ...command }; delete missing[key]; assert.throws(() => validateCommand(missing, new Set(), projects, captures));
+    }
+    for (const key of ['project', 'id', 'folder', 'toProject']) if (Object.hasOwn(command, key)) assert.throws(() => validateCommand({ ...command, [key]: randomUUID() }, new Set(), projects, captures));
+    if (command.page) for (const key of ['project', 'id', 'folder']) if (Object.hasOwn(command.page, key)) assert.throws(() => validateCommand({ ...command, page: { ...command.page, [key]: randomUUID() } }, new Set(), projects, captures));
+  }
+  for (const invalid of [
+    { type: 'save-capture', project: null, kind: 'text' }, { type: 'save-capture', project: null, folder, kind: 'page' }, { type: 'delete-item', project: null, id: capture.id },
+    { type: 'move-item-project', project, id, toProject: other.id, folder }, { type: 'open-desktop', id: 'captures', item: id },
+    { type: 'open-desktop-panel', page: { kind: 'home', project } }, { type: 'open-desktop-panel', page: { kind: 'project', project, folder: undefined } },
+    { type: 'open-desktop-panel', page: { kind: 'item', project: null, id } }, { type: 'add-note', project, title: '', text: '', folder: undefined },
+    { type: 'add-link', project, folder: null, address: 'javascript:alert(1)', title: '' }, { type: 'add-text', project, folder: null, text: '\u0001', source: null },
+  ]) assert.throws(() => validateCommand(invalid, new Set(), projects, captures));
+});
+
+test('Desktop addresses activate existing profile tabs and the panel persists across tab changes with chrome zoom', async t => {
+  const browser = notebookBrowser(t), { command, state, window, handlers, event, views } = browser;
+  command({ type: 'create-project', name: 'My Research' }); const project = state().projectInUse;
+  command({ type: 'create-folder', project, name: 'Folder' }); const folder = browser.notebook(project).folders[0].id;
+  command({ type: 'navigate', input: 'horizon://desktop/my-research' }); const tab = state().activeId;
+  command({ type: 'new-tab', input: 'horizon://desktop/my-research' }); assert.equal(state().activeId, tab); assert.equal(state().tabs.length, 1);
+  command({ type: 'navigate', input: 'horizon://desktop/captures' }); const captureTab = state().activeId;
+  command({ type: 'open-desktop', id: 'captures' }); assert.equal(state().activeId, captureTab);
+  assert.equal(views.length, 0); assert.deepEqual(state().store.history, []); assert.equal(state().siteSettings, null);
+  assert.throws(() => command({ type: 'navigate', input: 'horizon://desktop/missing' }), /DESKTOP_NOT_FOUND/);
+  command({ type: 'new-tab' }); browser.navigate(); browser.area(false); const webTab = state().activeId;
+  window.webContents.zoom = 1.25;
+  command({ type: 'open-desktop-panel', page: { kind: 'project', project, folder } });
+  assert.equal(views[0].getBounds().width, 300); assert.equal(views[0].getBounds().y, 125); assert.equal(views[0].getVisible(), true);
+  command({ type: 'activate-tab', id: tab }); command({ type: 'activate-tab', id: webTab }); assert.deepEqual(state().desktopPanel, { open: true, page: { kind: 'project', project, folder } });
+  command({ type: 'close-desktop-panel' }); assert.equal(views[0].getBounds().width, 800); assert.equal(state().desktopPanel.open, false);
+  await command({ type: 'save-capture', project: null, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } });
+  const captures = () => handlers.get('horizon:captures')(event), capture = captures()[0];
+  assert.deepEqual(browser.image(null, capture.id), faviconPNG); assert.equal(state().captures[0].id, capture.id);
+  for (const page of [{ kind: 'home' }, { kind: 'captures' }, { kind: 'new-project' }, { kind: 'item', project: null, id: capture.id }]) { command({ type: 'open-desktop-panel', page }); assert.deepEqual(state().desktopPanel.page, page); }
+  command({ type: 'delete-capture', id: capture.id }); assert.deepEqual(state().desktopPanel.page, { kind: 'captures' });
+  command({ type: 'restore', kind: 'desktop' }); assert.equal(captures().length, 1);
+  command({ type: 'add-capture-to-project', id: capture.id, project, folder }); assert.equal(captures().length, 0); assert.deepEqual(browser.image(project, capture.id), faviconPNG);
+  command({ type: 'open-desktop-panel', page: { kind: 'item', project, id: capture.id } });
+  command({ type: 'delete-item', project, id: capture.id }); assert.deepEqual(state().desktopPanel.page, { kind: 'project', project }); command({ type: 'restore', kind: 'desktop' });
+  command({ type: 'open-desktop-panel', page: { kind: 'project', project, folder } }); command({ type: 'delete-folder', project, id: folder }); assert.deepEqual(state().desktopPanel.page, { kind: 'project', project }); command({ type: 'restore', kind: 'desktop' });
+  command({ type: 'delete-project', id: project }); assert.deepEqual(state().desktopPanel.page, { kind: 'home' }); command({ type: 'restore', kind: 'desktop' });
+  for (const channel of ['horizon:project', 'horizon:captures', 'horizon:capture-image']) {
+    const args = channel === 'horizon:project' ? [project] : channel === 'horizon:captures' ? [] : [project, capture.id];
+    assert.throws(() => handlers.get(channel)({ ...event, sender: {} }, ...args)); assert.throws(() => handlers.get(channel)({ ...event, senderFrame: {} }, ...args));
+    assert.throws(() => handlers.get(channel)(event, ...args, 'extra'));
+  }
+  const originalProfile = state().activeProfileId;
+  command({ type: 'create-profile', name: 'Other profile', color: 'blue' }); assert.notEqual(state().activeProfileId, originalProfile);
+  assert.deepEqual(captures(), []); assert.throws(() => browser.image(null, capture.id));
+  assert.throws(() => command({ type: 'open-desktop-panel', page: { kind: 'project', project } }));
+  assert.throws(() => command({ type: 'add-capture-to-project', id: capture.id, project, folder: null }));
+  browser.close(); assert.equal(handlers.size, 0); assert.equal(browser.timers.size, 0);
+});
+
 test('notebook schema validates exact shapes, names, sources, UUIDs, text and every limit', () => {
-  const original = sampleNotebookStore(); assert.equal(validateNotebookStore(original), true);
-  const invalid = change => { const store = structuredClone(original); change(store); assert.equal(validateNotebookStore(store), false); };
-  for (const value of [null, [], {}, { ...original, extra: true }]) assert.equal(validateNotebookStore(value), false);
-  for (const name of ['', ' ', ' padded ', 'a'.repeat(81), 'line\nname', 'null\0name', 'control\u0085']) invalid(store => { store.notebooks[0].name = name; });
+  const original = sampleDesktopStore(); assert.equal(validateDesktopStore(original), true);
+  const invalid = change => { const store = structuredClone(original); change(store); assert.equal(validateDesktopStore(store), false); };
+  for (const value of [null, [], {}, { ...original, extra: true }]) assert.equal(validateDesktopStore(value), false);
+  for (const name of ['', ' ', ' padded ', 'a'.repeat(81), 'line\nname', 'null\0name', 'control\u0085']) invalid(store => { store.projects[0].name = name; });
   for (const key of ['', 'a'.repeat(44), Buffer.alloc(31).toString('base64')]) invalid(store => { store.key = key; });
-  invalid(store => { store.version = 2; }); invalid(store => { store.inUse = randomUUID(); });
-  invalid(store => { store.notebooks[0].extra = true; }); invalid(store => { store.notebooks[0].id = '../escape'; });
-  invalid(store => { store.notebooks.push({ ...store.notebooks[0], id: randomUUID(), name: 'RESEARCH', items: [] }); });
-  invalid(store => { store.notebooks.push({ ...store.notebooks[0], name: 'Other', items: [] }); });
-  for (const field of ['createdAt', 'updatedAt', 'usedAt']) for (const value of [-1, 1.1, Infinity, 8640000000000001]) invalid(store => { store.notebooks[0][field] = value; });
-  for (const [field, value] of [['extra', true], ['id', 'bad'], ['kind', 'unknown'], ['title', 'x'.repeat(201)], ['text', 'x'.repeat(100001)], ['note', 'x'.repeat(20001)], ['text', '\0'], ['createdAt', -1], ['updatedAt', 1.5]]) invalid(store => { store.notebooks[0].items[1][field] = value; });
-  invalid(store => { store.notebooks[0].items.push(store.notebooks[0].items[0]); });
-  invalid(store => { store.notebooks[0].items[0].source = { url: 'https://example.com/', title: '' }; });
-  invalid(store => { store.notebooks[0].items[0].note = 'annotation'; });
-  for (const url of ['file:///private', 'horizon://app/', 'https://user@example.com/']) invalid(store => { store.notebooks[0].items[1].source.url = url; });
-  invalid(store => { store.notebooks[0].items[1].source.extra = true; }); invalid(store => { store.notebooks[0].items[1].source.title = 'x'.repeat(4097); });
-  invalid(store => { store.notebooks[0].items[1].image = store.notebooks[0].items[2].image; });
-  invalid(store => { store.notebooks[0].items[2].image = null; }); invalid(store => { store.notebooks[0].items[2].text = 'body'; });
-  for (const [field, value] of [['filename', '../private.bin'], ['filename', 'page.png'], ['width', 0], ['height', -1], ['bytes', CAPTURE_LIMIT + 1], ['bytes', 0], ['cut', 'yes'], ['extra', true]]) invalid(store => { store.notebooks[0].items[2].image[field] = value; });
-  invalid(store => { store.notebooks[0].items[2].image.cut = true; });
-  invalid(store => { store.notebooks[0].items[3].image.height = 16385; });
-  invalid(store => { store.notebooks[0].items[3].image.filename = store.notebooks[0].items[2].image.filename; });
-  const bounded = structuredClone(original); bounded.notebooks[0].items = [];
-  for (let index = 1; index < 200; index++) bounded.notebooks.push({ ...bounded.notebooks[0], id: randomUUID(), name: `Notebook ${index}`, items: [] });
-  assert.equal(validateNotebookStore(bounded), true);
-  bounded.notebooks.push({ ...bounded.notebooks[0], id: randomUUID(), name: 'Over limit' }); assert.equal(validateNotebookStore(bounded), false);
-  const items = structuredClone(original); items.notebooks[0].items = Array.from({ length: 2000 }, () => sampleNotebookItem());
-  assert.equal(validateNotebookStore(items), true); items.notebooks[0].items.push(sampleNotebookItem()); assert.equal(validateNotebookStore(items), false);
-  const quota = structuredClone(original); quota.notebooks[0].items = Array.from({ length: 41 }, () => ({ ...sampleNotebookItem('page'), image: { filename: `${randomUUID()}.bin`, width: 1, height: 1, bytes: CAPTURE_LIMIT, cut: true } }));
-  assert.equal(validateNotebookStore(quota), false); quota.notebooks[0].items.pop(); assert.equal(validateNotebookStore(quota), true);
+  invalid(store => { store.version = 3; }); invalid(store => { store.inUse = randomUUID(); });
+  invalid(store => { store.projects[0].extra = true; }); invalid(store => { store.projects[0].id = '../escape'; });
+  invalid(store => { store.projects.push({ ...store.projects[0], id: randomUUID(), name: 'RESEARCH', items: [] }); });
+  invalid(store => { store.projects.push({ ...store.projects[0], name: 'Other', items: [] }); });
+  for (const field of ['createdAt', 'updatedAt', 'usedAt']) for (const value of [-1, 1.1, Infinity, 8640000000000001]) invalid(store => { store.projects[0][field] = value; });
+  for (const [field, value] of [['extra', true], ['id', 'bad'], ['kind', 'unknown'], ['title', 'x'.repeat(201)], ['text', 'x'.repeat(100001)], ['note', 'x'.repeat(20001)], ['text', '\0'], ['createdAt', -1], ['updatedAt', 1.5]]) invalid(store => { store.projects[0].items[1][field] = value; });
+  invalid(store => { store.projects[0].items.push(store.projects[0].items[0]); });
+  invalid(store => { store.projects[0].items[0].source = { url: 'https://example.com/', title: '' }; });
+  invalid(store => { store.projects[0].items[0].note = 'annotation'; });
+  for (const url of ['file:///private', 'horizon://app/', 'https://user@example.com/']) invalid(store => { store.projects[0].items[1].source.url = url; });
+  invalid(store => { store.projects[0].items[1].source.extra = true; }); invalid(store => { store.projects[0].items[1].source.title = 'x'.repeat(4097); });
+  invalid(store => { store.projects[0].items[1].image = store.projects[0].items[2].image; });
+  invalid(store => { store.projects[0].items[2].image = null; }); invalid(store => { store.projects[0].items[2].text = 'body'; });
+  for (const [field, value] of [['filename', '../private.bin'], ['filename', 'page.png'], ['width', 0], ['height', -1], ['bytes', CAPTURE_LIMIT + 1], ['bytes', 0], ['cut', 'yes'], ['extra', true]]) invalid(store => { store.projects[0].items[2].image[field] = value; });
+  invalid(store => { store.projects[0].items[2].image.cut = true; });
+  invalid(store => { store.projects[0].items[3].image.height = 16385; });
+  invalid(store => { store.projects[0].items[3].image.filename = store.projects[0].items[2].image.filename; });
+  const bounded = structuredClone(original); bounded.projects[0].items = [];
+  for (let index = 1; index < 200; index++) bounded.projects.push({ ...bounded.projects[0], id: randomUUID(), name: `Notebook ${index}`, items: [] });
+  assert.equal(validateDesktopStore(bounded), true);
+  bounded.projects.push({ ...bounded.projects[0], id: randomUUID(), name: 'Over limit' }); assert.equal(validateDesktopStore(bounded), false);
+  const items = structuredClone(original); items.projects[0].items = Array.from({ length: 2000 }, () => sampleDesktopItem());
+  assert.equal(validateDesktopStore(items), true); items.projects[0].items.push(sampleDesktopItem()); assert.equal(validateDesktopStore(items), false);
+  const quota = structuredClone(original); quota.projects[0].items = Array.from({ length: 41 }, () => ({ ...sampleDesktopItem('page'), image: { filename: `${randomUUID()}.bin`, width: 1, height: 1, bytes: CAPTURE_LIMIT, cut: true } }));
+  assert.equal(validateDesktopStore(quota), false); quota.projects[0].items.pop(); assert.equal(validateDesktopStore(quota), true);
 });
 
 test('notebook stores share encrypted and plain storage protections and recover corrupt originals', t => {
-  const directory = temporaryDirectory(t, 'notebook-store'), path = join(directory, 'notebooks.json'), store = sampleNotebookStore();
+  const directory = temporaryDirectory(t, 'notebook-store'), path = join(directory, 'notebooks.json'), store = sampleDesktopStore();
   for (const cipher of [plainCipher, authenticatedCipher()]) {
-    writeNotebookStore(path, store, cipher); assert.deepEqual(readNotebookStore(path, cipher), store);
+    writeDesktopStore(path, store, cipher); assert.deepEqual(readDesktopStore(path, cipher), store);
     const original = readFileSync(path);
     assert.equal(original.includes(Buffer.from('Private text')), cipher === plainCipher);
     if (cipher !== plainCipher) {
       const status = { readError: false, memoryOnly: false };
-      assert.deepEqual(readNotebookStore(path, plainCipher, status).notebooks, []); assert.deepEqual(status, { readError: true, memoryOnly: true });
-      assert.throws(() => writeNotebookStore(path, store, plainCipher)); assert.deepEqual(readFileSync(path), original);
+      assert.deepEqual(readDesktopStore(path, plainCipher, status).projects, []); assert.deepEqual(status, { readError: true, memoryOnly: true });
+      assert.throws(() => writeDesktopStore(path, store, plainCipher)); assert.deepEqual(readFileSync(path), original);
       original[original.length - 1] ^= 1; writeFileSync(path, original);
     } else writeFileSync(path, '{broken');
     const corrupt = readFileSync(path), status = { readError: false, memoryOnly: false };
-    assert.deepEqual(readNotebookStore(path, cipher, status).notebooks, []); assert.equal(status.readError, true);
+    assert.deepEqual(readDesktopStore(path, cipher, status).projects, []); assert.equal(status.readError, true);
     assert.ok(readdirSync(directory).filter(name => name.startsWith('notebooks.json.corrupt-')).some(name => readFileSync(join(directory, name)).equals(corrupt)));
   }
-  const upgrade = join(directory, 'upgrade.json'); writeNotebookStore(upgrade, store, plainCipher); const encrypted = authenticatedCipher();
-  assert.deepEqual(readNotebookStore(upgrade, encrypted), store); assert.ok(readFileSync(upgrade).subarray(0, 16).toString().startsWith('HORIZON-STORE-1'));
+  const upgrade = join(directory, 'upgrade.json'); writeDesktopStore(upgrade, store, plainCipher); const encrypted = authenticatedCipher();
+  assert.deepEqual(readDesktopStore(upgrade, encrypted), store); assert.ok(readFileSync(upgrade).subarray(0, 16).toString().startsWith('HORIZON-STORE-1'));
   assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
-  assert.throws(() => writeNotebookStore(path, { ...store, extra: true }, encrypted));
-  writeFileSync(path, JSON.stringify({ ...store, version: 2 })); const status = { readError: false, memoryOnly: false };
-  assert.deepEqual(readNotebookStore(path, plainCipher, status).notebooks, []); assert.equal(status.readError, true);
+  assert.throws(() => writeDesktopStore(path, { ...store, extra: true }, encrypted));
+  writeFileSync(path, JSON.stringify({ ...store, version: 3 })); const status = { readError: false, memoryOnly: false };
+  assert.deepEqual(readDesktopStore(path, plainCipher, status).projects, []); assert.equal(status.readError, true);
   const blocked = join(directory, 'file'); writeFileSync(blocked, 'file'); const failed = { readError: false, memoryOnly: false };
-  assert.deepEqual(readNotebookStore(join(blocked, 'notebooks.json'), plainCipher, failed).notebooks, []); assert.equal(failed.readError, true);
+  assert.deepEqual(readDesktopStore(join(blocked, 'notebooks.json'), plainCipher, failed).projects, []); assert.equal(failed.readError, true);
   if (process.platform !== 'win32') assert.equal(require('node:fs').statSync(path).mode & 0o777, 0o600);
 });
 
 test('capture files authenticate bytes and item identity, enforce quotas and clean only generated regular orphans', t => {
-  const root = temporaryDirectory(t, 'capture-files'), directory = join(root, 'captures'), store = sampleNotebookStore(), item = store.notebooks[0].items[2];
+  const root = temporaryDirectory(t, 'capture-files'), directory = join(root, 'captures'), store = sampleDesktopStore(), item = store.projects[0].items[2];
   item.image.filename = writeCaptureFile(directory, store.key, item.id, faviconPNG);
   const path = join(directory, item.image.filename), encrypted = readFileSync(path);
   assert.equal(encrypted.length, faviconPNG.length + 28); assert.equal(encrypted.includes(faviconPNG), false);
@@ -2990,16 +3175,16 @@ test('capture files authenticate bytes and item identity, enforce quotas and cle
   assert.equal(existsSync(path), true); assert.equal(existsSync(join(directory, orphan)), false);
   assert.equal(existsSync(foreign), true); assert.equal(existsSync(junction), true); assert.equal(existsSync(join(target, 'keep')), true);
   const redirected = join(root, 'redirected'); symlinkSync(directory, redirected, process.platform === 'win32' ? 'junction' : 'dir');
-  assert.throws(() => cleanupCaptureFiles(redirected, store), /NOTEBOOK_STORAGE_FAILED/);
-  assert.throws(() => writeCaptureFile(redirected, store.key, randomUUID(), faviconPNG), /NOTEBOOK_STORAGE_FAILED/);
+  assert.throws(() => cleanupCaptureFiles(redirected, store), /DESKTOP_STORAGE_FAILED/);
+  assert.throws(() => writeCaptureFile(redirected, store.key, randomUUID(), faviconPNG), /DESKTOP_STORAGE_FAILED/);
   assert.equal(readCaptureFile(redirected, store.key, item), null);
   const missingTarget = join(root, 'missing-target'), dangling = join(root, 'dangling'); mkdirSync(missingTarget);
   symlinkSync(missingTarget, dangling, process.platform === 'win32' ? 'junction' : 'dir'); require('node:fs').rmdirSync(missingTarget);
-  assert.throws(() => cleanupCaptureFiles(dangling, store), /NOTEBOOK_STORAGE_FAILED/);
-  assert.throws(() => writeCaptureFile(dangling, store.key, randomUUID(), faviconPNG), /NOTEBOOK_STORAGE_FAILED/);
+  assert.throws(() => cleanupCaptureFiles(dangling, store), /DESKTOP_STORAGE_FAILED/);
+  assert.throws(() => writeCaptureFile(dangling, store.key, randomUUID(), faviconPNG), /DESKTOP_STORAGE_FAILED/);
   assert.throws(() => writeCaptureFile(directory, store.key, randomUUID(), Buffer.alloc(CAPTURE_LIMIT + 1)), /CAPTURE_TOO_LARGE/);
   const quota = join(directory, `${randomUUID()}.bin`); writeFileSync(quota, ''); require('node:fs').truncateSync(quota, CAPTURE_STORAGE_LIMIT);
-  assert.throws(() => writeCaptureFile(directory, store.key, randomUUID(), faviconPNG), /NOTEBOOK_STORAGE_FULL/);
+  assert.throws(() => writeCaptureFile(directory, store.key, randomUUID(), faviconPNG), /DESKTOP_STORAGE_FULL/);
   require('node:fs').unlinkSync(quota);
   if (process.platform !== 'win32') {
     assert.equal(require('node:fs').statSync(directory).mode & 0o777, 0o700); assert.equal(require('node:fs').statSync(path).mode & 0o777, 0o600);
@@ -3008,58 +3193,58 @@ test('capture files authenticate bytes and item identity, enforce quotas and cle
 
 test('notebook runtime debounces, flushes, enforces named limits and retains captures through undo', t => {
   const root = temporaryDirectory(t, 'notebook-runtime'), path = join(root, 'notebooks.json'), timers = new Map();
-  const { createNotebooks } = timedModule('notebooks', timers), runtime = createNotebooks(path, plainCipher, () => {});
+  const { createDesktop } = timedModule('desktop', timers), runtime = createDesktop(path, plainCipher, () => {});
   const notebook = runtime.create('  Research  '); assert.equal(notebook.name, 'Research');
   runtime.addNote(notebook.id, 'Title', 'Private body'); const note = notebook.items[0];
   assert.equal([...timers.values()].filter(timer => timer.delay === 500).length, 1);
-  assert.deepEqual(readNotebookStore(path).notebooks, []); runtime.flush(); assert.equal(readNotebookStore(path).notebooks[0].items[0].text, 'Private body');
-  assert.throws(() => runtime.create('RESEARCH'), /NOTEBOOK_NAME_DUPLICATE/);
-  for (const [name, error] of [['', 'EMPTY'], ['x'.repeat(81), 'LONG'], ['a\nb', 'INVALID']]) assert.throws(() => runtime.create(name), new RegExp('NOTEBOOK_NAME_' + error));
+  assert.deepEqual(readDesktopStore(path).projects, []); runtime.flush(); assert.equal(readDesktopStore(path).projects[0].items[0].text, 'Private body');
+  assert.throws(() => runtime.create('RESEARCH'), /PROJECT_NAME_DUPLICATE/);
+  for (const [name, error] of [['', 'EMPTY'], ['x'.repeat(81), 'LONG'], ['a\nb', 'INVALID']]) assert.throws(() => runtime.create(name), new RegExp('PROJECT_NAME_' + error));
   runtime.update(notebook.id, note.id, { text: 'Edited' }); assert.equal(runtime.content(notebook.id).items[0].text, 'Edited');
-  assert.throws(() => runtime.update(notebook.id, note.id, { title: 'x'.repeat(201) }), /NOTEBOOK_ITEM_INVALID/);
-  assert.throws(() => runtime.update(notebook.id, note.id, { note: 'annotation' }), /NOTEBOOK_ITEM_INVALID/);
-  const capture = sampleNotebookItem('area'); capture.image = null; runtime.addCapture(notebook.id, capture, faviconPNG, { width: 1, height: 1, cut: false });
+  assert.throws(() => runtime.update(notebook.id, note.id, { title: 'x'.repeat(201) }), /DESKTOP_ITEM_INVALID/);
+  assert.throws(() => runtime.update(notebook.id, note.id, { note: 'annotation' }), /DESKTOP_ITEM_INVALID/);
+  const capture = sampleDesktopItem('area'); capture.image = null; runtime.addCapture(notebook.id, capture, faviconPNG, { width: 1, height: 1, cut: false });
   const capturePath = join(root, 'captures', capture.image.filename); assert.deepEqual(runtime.image(notebook.id, capture.id), faviconPNG);
-  const state = runtime.state(); assert.equal(state.notebookInUse, notebook.id); assert.equal(state.notebooks[0].notes, 1); assert.equal(state.notebooks[0].captures, 1);
+  const state = runtime.state(); assert.equal(state.projectInUse, notebook.id); assert.equal(state.projects[0].notes, 1); assert.equal(state.projects[0].captures, 1);
   assert.equal(JSON.stringify(state).includes('Edited'), false); assert.equal(JSON.stringify(state).includes('.bin'), false); assert.equal(JSON.stringify(state).includes('image'), false);
   assert.equal(JSON.stringify(runtime.content(notebook.id)).includes('.bin'), false);
   runtime.deleteItem(notebook.id, capture.id); assert.equal(existsSync(capturePath), true); runtime.restore(); assert.deepEqual(runtime.image(notebook.id, capture.id), faviconPNG);
-  runtime.delete(notebook.id); assert.equal(runtime.state().notebookInUse, null); runtime.restore(); assert.equal(runtime.state().notebookInUse, notebook.id);
+  runtime.delete(notebook.id); assert.equal(runtime.state().projectInUse, null); runtime.restore(); assert.equal(runtime.state().projectInUse, notebook.id);
   runtime.deleteItem(notebook.id, capture.id); fireTimers(timers, 8000); assert.equal(existsSync(capturePath), false); runtime.restore(); assert.equal(notebook.items.length, 1);
   runtime.deleteItem(notebook.id, note.id); runtime.forget(); runtime.restore(); assert.equal(notebook.items.length, 0);
   for (let index = 0; index < 2000; index++) runtime.addNote(notebook.id, '', '');
-  assert.throws(() => runtime.addNote(notebook.id, '', ''), /NOTEBOOK_ITEM_LIMIT/);
-  assert.throws(() => runtime.addCapture(notebook.id, sampleNotebookItem('text')), /NOTEBOOK_ITEM_LIMIT/);
+  assert.throws(() => runtime.addNote(notebook.id, '', ''), /PROJECT_ITEM_LIMIT/);
+  assert.throws(() => runtime.addCapture(notebook.id, sampleDesktopItem('text')), /PROJECT_ITEM_LIMIT/);
   for (let index = 1; index < 200; index++) runtime.create(`Notebook ${index}`);
-  assert.throws(() => runtime.create('Over limit'), /NOTEBOOK_LIMIT/);
-  const pending = runtime.state().notebooksVersion; runtime.dispose(); assert.equal(timers.size, 0); assert.ok(pending > 2000); assert.equal(readNotebookStore(path).notebooks.length, 200);
-  const discarded = createNotebooks(join(root, 'discarded.json'), plainCipher, () => {}); discarded.create('Unsaved'); discarded.dispose(true);
-  assert.equal(timers.size, 0); assert.deepEqual(readNotebookStore(join(root, 'discarded.json')).notebooks, []);
+  assert.throws(() => runtime.create('Over limit'), /PROJECT_LIMIT/);
+  const pending = runtime.state().desktopVersion; runtime.dispose(); assert.equal(timers.size, 0); assert.ok(pending > 2000); assert.equal(readDesktopStore(path).projects.length, 200);
+  const discarded = createDesktop(join(root, 'discarded.json'), plainCipher, () => {}); discarded.create('Unsaved'); discarded.dispose(true);
+  assert.equal(timers.size, 0); assert.deepEqual(readDesktopStore(join(root, 'discarded.json')).projects, []);
 });
 
 test('all notebook commands validate exact arguments and refuse another profile notebook or item', () => {
-  const notebooks = sampleNotebookStore().notebooks, notebook = notebooks[0], id = notebook.id, item = notebook.items[0].id;
-  const commands = [ { type: 'create-notebook', name: 'New' }, { type: 'rename-notebook', id, name: 'Name' },
-    ...['delete-notebook', 'set-notebook'].map(type => ({ type, id })), { type: 'open-notebook', id }, { type: 'open-notebook', id, item },
-    { type: 'add-note', notebook: id, title: '', text: '' }, { type: 'update-notebook-item', notebook: id, id: item, title: '', text: 'Body' },
-    { type: 'update-notebook-item', notebook: id, id: item, note: '' }, { type: 'delete-notebook-item', notebook: id, id: item },
-    ...['text', 'page'].map(kind => ({ type: 'save-capture', notebook: id, kind })), { type: 'save-capture', notebook: id, kind: 'area', rect: { x: -10, y: 10, width: 30, height: 40 } },
-    { type: 'restore', kind: 'notebooks' } ];
+  const notebooks = sampleDesktopStore().projects, notebook = notebooks[0], id = notebook.id, item = notebook.items[0].id;
+  const commands = [ { type: 'create-project', name: 'New' }, { type: 'rename-project', id, name: 'Name' },
+    ...['delete-project', 'set-project'].map(type => ({ type, id })), { type: 'open-desktop', id }, { type: 'open-desktop', id, item },
+    { type: 'add-note', project: id, title: '', text: '' }, { type: 'update-item', project: id, id: item, title: '', text: 'Body' },
+    { type: 'update-item', project: id, id: item, note: '' }, { type: 'delete-item', project: id, id: item },
+    ...['text', 'page'].map(kind => ({ type: 'save-capture', project: id, kind })), { type: 'save-capture', project: id, kind: 'area', rect: { x: -10, y: 10, width: 30, height: 40 } },
+    { type: 'restore', kind: 'desktop' } ];
   for (const command of commands) {
     assert.deepEqual(validateCommand(command, new Set(), notebooks), command);
     assert.throws(() => validateCommand({ ...command, extra: true }, new Set(), notebooks));
     for (const key of Object.keys(command).filter(key => !['item', 'title', 'text', 'note'].includes(key))) {
       const missing = { ...command }; delete missing[key]; assert.throws(() => validateCommand(missing, new Set(), notebooks));
     }
-    if (command.notebook) assert.throws(() => validateCommand({ ...command, notebook: randomUUID() }, new Set(), notebooks));
+    if (command.project) assert.throws(() => validateCommand({ ...command, project: randomUUID() }, new Set(), notebooks));
     if (command.id) assert.throws(() => validateCommand({ ...command, id: randomUUID() }, new Set(), notebooks));
   }
-  const invalid = [ { type: 'open-notebook', id, item: randomUUID() }, { type: 'open-notebook', id, item: undefined },
-    { type: 'update-notebook-item', notebook: id, id: item }, { type: 'update-notebook-item', notebook: id, id: item, title: undefined },
-    { type: 'update-notebook-item', notebook: id, id: item, text: 'x'.repeat(100001) }, { type: 'update-notebook-item', notebook: id, id: item, note: 'x'.repeat(20001) },
-    { type: 'add-note', notebook: id, title: 'x'.repeat(201), text: '' }, { type: 'save-capture', notebook: id, kind: 'note' },
-    { type: 'save-capture', notebook: id, kind: 'text', rect: {} } ];
-  for (const rect of [{ x: 1, y: 1, width: 0, height: 9 }, { x: NaN, y: 1, width: 9, height: 9 }, { x: 0, y: 0, width: 9, height: Infinity }, { x: 0, y: 0, width: 9, height: 9, extra: 0 }]) invalid.push({ type: 'save-capture', notebook: id, kind: 'area', rect });
+  const invalid = [ { type: 'open-desktop', id, item: randomUUID() }, { type: 'open-desktop', id, item: undefined },
+    { type: 'update-item', project: id, id: item }, { type: 'update-item', project: id, id: item, title: undefined },
+    { type: 'update-item', project: id, id: item, text: 'x'.repeat(100001) }, { type: 'update-item', project: id, id: item, note: 'x'.repeat(20001) },
+    { type: 'add-note', project: id, title: 'x'.repeat(201), text: '' }, { type: 'save-capture', project: id, kind: 'note' },
+    { type: 'save-capture', project: id, kind: 'text', rect: {} } ];
+  for (const rect of [{ x: 1, y: 1, width: 0, height: 9 }, { x: NaN, y: 1, width: 9, height: 9 }, { x: 0, y: 0, width: 9, height: Infinity }, { x: 0, y: 0, width: 9, height: 9, extra: 0 }]) invalid.push({ type: 'save-capture', project: id, kind: 'area', rect });
   invalid.forEach(command => assert.throws(() => validateCommand(command, new Set(), notebooks)));
 });
 
@@ -3103,7 +3288,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
   let close = () => {}; t.after(() => close());
   const directory = temporaryDirectory(t, 'notebook-browser'), handlers = new Map(), views = [], timers = new Map(), sessions = new Map();
-  const notebookModule = timedModule('notebooks', timers), captureModule = timedModule('captures', timers);
+  const notebookModule = timedModule('desktop', timers), captureModule = timedModule('captures', timers);
   let contentsId = 0;
   class Contents extends EventEmitter {
     constructor(targetSession) {
@@ -3157,7 +3342,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
-    name === 'electron' ? electron : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './notebooks' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
+    name === 'electron' ? electron : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, contentView: { addChildView() {}, removeChildView() {} } });
   electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
@@ -3171,7 +3356,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   let closed = false; close = () => { if (!closed) { closed = true; window.emit('closed'); } };
   const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
   const state = () => handlers.get('horizon:state')(event), command = value => handlers.get('horizon:command')(event, value);
-  const notebook = (...args) => handlers.get('horizon:notebook')(event, ...args), image = (...args) => handlers.get('horizon:capture-image')(event, ...args);
+  const notebook = (...args) => handlers.get('horizon:project')(event, ...args), image = (...args) => handlers.get('horizon:capture-image')(event, ...args);
   const area = hidden => handlers.get('horizon:content-area')(event, { top: 100, hidden });
   const navigate = (url = 'https://example.com/') => { command({ type: 'navigate', input: url }); views.at(-1).webContents.emit('did-navigate', {}, url); };
   return { directory, handlers, views, timers, sessions, window, app, close, event, state, command, notebook, image, area, navigate, settings, openLaunch: browser.openLaunch, isLaunchNavigation: exported.isLaunchNavigation };
@@ -3179,80 +3364,80 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
 
 test('notebook tabs are chrome pages, remain consistent across editing and never enter history or a web view', async t => {
   const browser = notebookBrowser(t), { state, command, notebook, views } = browser;
-  command({ type: 'create-notebook', name: 'My Research' }); const id = state().notebookInUse;
-  command({ type: 'add-note', notebook: id, title: 'A note', text: 'Secret note' }); const item = notebook(id).items[0].id;
-  const version = state().notebooksVersion;
-  command({ type: 'open-notebook', id, item }); const tab = state().activeId;
-  assert.equal(views.length, 0); assert.equal(state().tabs.find(entry => entry.id === tab).notebook, id);
-  assert.equal(state().tabs.find(entry => entry.id === tab).notebookItem, item);
-  assert.equal(state().tabs.find(entry => entry.id === tab).url, 'horizon://notebooks/my-research');
+  command({ type: 'create-project', name: 'My Research' }); const id = state().projectInUse;
+  command({ type: 'add-note', project: id, title: 'A note', text: 'Secret note' }); const item = notebook(id).items[0].id;
+  const version = state().desktopVersion;
+  command({ type: 'open-desktop', id, item }); const tab = state().activeId;
+  assert.equal(views.length, 0); assert.equal(state().tabs.find(entry => entry.id === tab).desktop, id);
+  assert.equal(state().tabs.find(entry => entry.id === tab).desktopItem, item);
+  assert.equal(state().tabs.find(entry => entry.id === tab).url, 'horizon://desktop/my-research');
   assert.deepEqual(state().store.history, []); assert.equal(state().siteSettings, null); assert.equal(state().permissionPrompt, null);
   assert.equal(state().tabs.find(entry => entry.id === tab).favicon, null); assert.deepEqual(state().tabs.find(entry => entry.id === tab).blocked, { ads: 0, trackers: 0, cookies: 0 });
-  command({ type: 'open-notebook', id }); assert.equal(state().activeId, tab); assert.equal(state().tabs.length, 1);
-  command({ type: 'rename-notebook', id, name: 'Renamed Name' }); assert.equal(state().tabs.find(entry => entry.id === tab).url, 'horizon://notebooks/renamed-name');
-  assert.equal(state().tabs.find(entry => entry.id === tab).title, 'Renamed Name'); assert.ok(state().notebooksVersion > version);
-  await assert.rejects(command({ type: 'save-capture', notebook: id, kind: 'text' }), /CAPTURE_UNAVAILABLE/);
-  command({ type: 'update-notebook-item', notebook: id, id: item, title: 'Edited title', text: 'Secret edit' });
+  command({ type: 'open-desktop', id }); assert.equal(state().activeId, tab); assert.equal(state().tabs.length, 1);
+  command({ type: 'rename-project', id, name: 'Renamed Name' }); assert.equal(state().tabs.find(entry => entry.id === tab).url, 'horizon://desktop/renamed-name');
+  assert.equal(state().tabs.find(entry => entry.id === tab).title, 'Renamed Name'); assert.ok(state().desktopVersion > version);
+  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'text' }), /CAPTURE_UNAVAILABLE/);
+  command({ type: 'update-item', project: id, id: item, title: 'Edited title', text: 'Secret edit' });
   const wire = JSON.stringify(state()); assert.equal(wire.includes('Secret edit'), false); assert.equal(wire.includes('Secret note'), false);
-  command({ type: 'open-notebook', id, item }); command({ type: 'delete-notebook-item', notebook: id, id: item });
-  assert.equal(state().tabs.find(entry => entry.id === tab).notebookItem, null); command({ type: 'restore', kind: 'notebooks' }); assert.equal(notebook(id).items.length, 1);
-  command({ type: 'navigate', input: 'example.com' }); assert.equal(state().tabs.find(entry => entry.id === tab).notebook, null); assert.equal(views.length, 1);
+  command({ type: 'open-desktop', id, item }); command({ type: 'delete-item', project: id, id: item });
+  assert.equal(state().tabs.find(entry => entry.id === tab).desktopItem, null); command({ type: 'restore', kind: 'desktop' }); assert.equal(notebook(id).items.length, 1);
+  command({ type: 'navigate', input: 'example.com' }); assert.equal(state().tabs.find(entry => entry.id === tab).desktop, null); assert.equal(views.length, 1);
   views[0].webContents.emit('did-navigate', {}, 'https://example.com/'); assert.equal(state().store.history.length, 1);
-  command({ type: 'open-notebook', id }); const reopened = state().activeId; command({ type: 'close-tab', id: reopened });
-  command({ type: 'open-notebook', id });
-  for (const target of [...state().tabs].filter(tab => tab.notebook !== id)) command({ type: 'close-tab', id: target.id });
-  assert.equal(state().tabs.length, 1); command({ type: 'delete-notebook', id });
-  assert.equal(state().tabs.length, 1); assert.equal(state().tabs[0].url, ''); assert.equal(state().tabs[0].notebook, null);
-  command({ type: 'restore', kind: 'notebooks' }); assert.equal(notebook(id).items.length, 1);
+  command({ type: 'open-desktop', id }); const reopened = state().activeId; command({ type: 'close-tab', id: reopened });
+  command({ type: 'open-desktop', id });
+  for (const target of [...state().tabs].filter(tab => tab.desktop !== id)) command({ type: 'close-tab', id: target.id });
+  assert.equal(state().tabs.length, 1); command({ type: 'delete-project', id });
+  assert.equal(state().tabs.length, 1); assert.equal(state().tabs[0].url, ''); assert.equal(state().tabs[0].desktop, null);
+  command({ type: 'restore', kind: 'desktop' }); assert.equal(notebook(id).items.length, 1);
   const profile = state().activeProfileId; browser.app.emit('before-quit');
-  assert.equal(readNotebookStore(join(browser.directory, 'profiles', profile, 'notebooks.json')).notebooks[0].items[0].text, 'Secret edit');
+  assert.equal(readDesktopStore(join(browser.directory, 'profiles', profile, 'notebooks.json')).projects[0].items[0].text, 'Secret edit');
   browser.close(); assert.equal(browser.handlers.size, 0); assert.equal(browser.timers.size, 0);
 });
 
 test('capture commands save all three kinds to the current profile and image IPC exposes bytes without paths', async t => {
   const browser = notebookBrowser(t), { state, command, notebook, image, handlers, event, window } = browser;
-  command({ type: 'create-notebook', name: 'Captures' }); const id = state().notebookInUse;
-  await assert.rejects(command({ type: 'save-capture', notebook: id, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } }), /CAPTURE_UNAVAILABLE/);
+  command({ type: 'create-project', name: 'Captures' }); const id = state().projectInUse;
+  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } }), /CAPTURE_UNAVAILABLE/);
   browser.navigate(); const view = browser.views[0]; window.webContents.zoom = 1.5; browser.area(true);
-  await command({ type: 'save-capture', notebook: id, kind: 'text' });
+  await command({ type: 'save-capture', project: id, kind: 'text' });
   const text = notebook(id).items[0]; assert.equal(text.text, 'Selected text'); assert.equal(text.title, 'A web page');
   assert.deepEqual(text.source, { url: 'https://example.com/', title: 'A web page' });
   assert.deepEqual(view.webContents.selectionArgs, [1006, [{ code: 'String(getSelection())' }]]);
-  await command({ type: 'save-capture', notebook: id, kind: 'area', rect: { x: -10, y: -10, width: 1000, height: 1000 } });
+  await command({ type: 'save-capture', project: id, kind: 'area', rect: { x: -10, y: -10, width: 1000, height: 1000 } });
   assert.deepEqual(view.webContents.captureArgs, [{ x: 0, y: 0, width: 800, height: 450 }, { stayHidden: true }]);
   const area = notebook(id).items[1]; assert.deepEqual(image(id, area.id), faviconPNG); assert.equal(image(id, text.id), null);
   assert.deepEqual(area.image, { width: 1, height: 1, bytes: faviconPNG.length, cut: false }); assert.equal(JSON.stringify(notebook(id)).includes('.bin'), false);
-  await assert.rejects(command({ type: 'save-capture', notebook: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/); assert.equal(view.webContents.protocol.length, 0);
+  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/); assert.equal(view.webContents.protocol.length, 0);
   browser.area(false); view.setVisible(false);
-  await assert.rejects(command({ type: 'save-capture', notebook: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/);
+  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/);
   view.setVisible(true); const originalBounds = view.getBounds(); view.setBounds({ ...originalBounds, x: 800 });
-  await assert.rejects(command({ type: 'save-capture', notebook: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/);
-  view.setBounds(originalBounds); await command({ type: 'save-capture', notebook: id, kind: 'page' });
+  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'page' }), /CAPTURE_PAGE_HIDDEN/);
+  view.setBounds(originalBounds); await command({ type: 'save-capture', project: id, kind: 'page' });
   assert.equal(view.webContents.attached, false); assert.equal(view.webContents.detached, 1); assert.equal(notebook(id).items.length, 3);
-  assert.equal(state().notebooks[0].captures, 3); assert.equal(state().notebooks[0].latest.length, 3);
+  assert.equal(state().projects[0].captures, 3); assert.equal(state().projects[0].latest.length, 3);
   assert.equal(JSON.stringify(state()).includes('Selected text'), false); assert.equal(JSON.stringify(state()).includes('image'), false);
-  view.webContents.selection = ''; await assert.rejects(command({ type: 'save-capture', notebook: id, kind: 'text' }), /NOTHING_SELECTED/);
-  await assert.rejects(command({ type: 'save-capture', notebook: id, kind: 'area', rect: { x: 0, y: 0, width: 1, height: 1 } }), /CAPTURE_AREA_SMALL/);
+  view.webContents.selection = ''; await assert.rejects(command({ type: 'save-capture', project: id, kind: 'text' }), /NOTHING_SELECTED/);
+  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'area', rect: { x: 0, y: 0, width: 1, height: 1 } }), /CAPTURE_AREA_SMALL/);
   view.webContents.executeJavaScriptInIsolatedWorld = async () => { throw new Error('Native detail'); };
-  await assert.rejects(command({ type: 'save-capture', notebook: id, kind: 'text' }), /CAPTURE_FAILED/);
-  for (const channel of ['horizon:notebook', 'horizon:capture-image']) {
-    const args = channel === 'horizon:notebook' ? [id] : [id, area.id];
+  await assert.rejects(command({ type: 'save-capture', project: id, kind: 'text' }), /CAPTURE_FAILED/);
+  for (const channel of ['horizon:project', 'horizon:capture-image']) {
+    const args = channel === 'horizon:project' ? [id] : [id, area.id];
     assert.throws(() => handlers.get(channel)({ ...event, sender: {} }, ...args));
     assert.throws(() => handlers.get(channel)({ ...event, senderFrame: { url: 'horizon://app/' } }, ...args));
     assert.throws(() => handlers.get(channel)(event, ...args, 'extra'));
     assert.throws(() => handlers.get(channel)(event, '../escape', ...args.slice(1)));
     assert.throws(() => handlers.get(channel)(event));
   }
-  assert.throws(() => image(id, randomUUID()), /NOTEBOOK_ITEM_NOT_FOUND/); assert.throws(() => notebook(randomUUID()), /NOTEBOOK_NOT_FOUND/);
+  assert.throws(() => image(id, randomUUID()), /DESKTOP_ITEM_NOT_FOUND/); assert.throws(() => notebook(randomUUID()), /PROJECT_NOT_FOUND/);
   const work = state().profiles.find(profile => profile.id !== state().activeProfileId); command({ type: 'switch-profile', id: work.id });
-  assert.deepEqual(state().notebooks, []); assert.throws(() => notebook(id), /NOTEBOOK_NOT_FOUND/); assert.throws(() => image(id, area.id), /NOTEBOOK_NOT_FOUND/);
-  for (const value of [{ type: 'open-notebook', id }, { type: 'save-capture', notebook: id, kind: 'text' }, { type: 'delete-notebook-item', notebook: id, id: area.id }]) assert.throws(() => command(value));
+  assert.deepEqual(state().projects, []); assert.throws(() => notebook(id), /PROJECT_NOT_FOUND/); assert.throws(() => image(id, area.id), /PROJECT_NOT_FOUND/);
+  for (const value of [{ type: 'open-desktop', id }, { type: 'save-capture', project: id, kind: 'text' }, { type: 'delete-item', project: id, id: area.id }]) assert.throws(() => command(value));
   browser.close(); assert.equal(handlers.size, 0); assert.equal(browser.timers.size, 0);
 });
 
 test('captures abandon changed tabs, pages, errors and profiles even when the original becomes active again', async t => {
   const browser = notebookBrowser(t), { state, command, notebook } = browser;
-  command({ type: 'create-notebook', name: 'Research' }); const id = state().notebookInUse; browser.navigate();
+  command({ type: 'create-project', name: 'Research' }); const id = state().projectInUse; browser.navigate();
   const tab = state().activeId, profile = state().activeProfileId, view = browser.views[0];
   const changes = [
     () => { browser.navigate(); },
@@ -3264,13 +3449,13 @@ test('captures abandon changed tabs, pages, errors and profiles even when the or
   for (const change of changes) {
     browser.navigate(); let finish;
     view.webContents.capturePage = () => new Promise(done => { finish = done; });
-    const work = command({ type: 'save-capture', notebook: id, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } });
+    const work = command({ type: 'save-capture', project: id, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } });
     const rejected = assert.rejects(work, /CAPTURE_CHANGED/); change(); finish({ toPNG: () => faviconPNG }); await rejected;
     assert.equal(notebook(id).items.length, 0);
   }
   browser.navigate(); let finish;
   view.webContents.executeJavaScriptInIsolatedWorld = () => new Promise(done => { finish = done; });
-  const pending = command({ type: 'save-capture', notebook: id, kind: 'text' }), rejected = assert.rejects(pending, /CAPTURE_CHANGED/);
+  const pending = command({ type: 'save-capture', project: id, kind: 'text' }), rejected = assert.rejects(pending, /CAPTURE_CHANGED/);
   command({ type: 'close-tab', id: tab }); finish('Selection'); await rejected; assert.equal(notebook(id).items.length, 0);
   browser.close(); assert.equal(browser.timers.size, 0);
 });
@@ -3278,53 +3463,53 @@ test('captures abandon changed tabs, pages, errors and profiles even when the or
 test('profile deletion stops notebook writes and undo timers and capture deadlines detach through command IPC', async t => {
   const browser = notebookBrowser(t), { state, command, notebook } = browser;
   const original = state().activeProfileId, other = state().profiles.find(profile => profile.id !== original);
-  command({ type: 'switch-profile', id: other.id }); command({ type: 'create-notebook', name: 'Deleted profile' });
-  const id = state().notebookInUse; command({ type: 'add-note', notebook: id, title: '', text: 'Unsaved' });
-  command({ type: 'delete-notebook-item', notebook: id, id: notebook(id).items[0].id });
+  command({ type: 'switch-profile', id: other.id }); command({ type: 'create-project', name: 'Deleted profile' });
+  const id = state().projectInUse; command({ type: 'add-note', project: id, title: '', text: 'Unsaved' });
+  command({ type: 'delete-item', project: id, id: notebook(id).items[0].id });
   browser.navigate(); browser.area(false); const deletedView = browser.views.at(-1);
   deletedView.webContents.debugger.sendCommand = () => new Promise(() => {});
-  const deletedCapture = command({ type: 'save-capture', notebook: id, kind: 'page' }), abandoned = assert.rejects(deletedCapture, /CAPTURE_CHANGED/);
+  const deletedCapture = command({ type: 'save-capture', project: id, kind: 'page' }), abandoned = assert.rejects(deletedCapture, /CAPTURE_CHANGED/);
   await command({ type: 'delete-profile', id: other.id }); fireTimers(browser.timers, 500); fireTimers(browser.timers, 8000);
   await abandoned; assert.equal(deletedView.webContents.detached, 1);
   assert.equal(existsSync(join(browser.directory, 'profiles', other.id)), false); assert.equal(browser.timers.size, 0);
-  command({ type: 'create-notebook', name: 'Current profile' }); const current = state().notebookInUse; browser.navigate(); browser.area(false);
+  command({ type: 'create-project', name: 'Current profile' }); const current = state().projectInUse; browser.navigate(); browser.area(false);
   const view = browser.views.at(-1); view.webContents.debugger.sendCommand = () => new Promise(() => {});
-  const pending = command({ type: 'save-capture', notebook: current, kind: 'page' }), rejected = assert.rejects(pending, /CAPTURE_TIMEOUT/);
+  const pending = command({ type: 'save-capture', project: current, kind: 'page' }), rejected = assert.rejects(pending, /CAPTURE_TIMEOUT/);
   fireTimers(browser.timers, CAPTURE_DEADLINE); await rejected; assert.equal(view.webContents.attached, false); assert.equal(view.webContents.detached, 1);
   assert.equal(notebook(current).items.length, 0); browser.close(); assert.equal(browser.timers.size, 0);
 });
 test('notebook read and save errors reach state, encrypted originals survive missing keys and quit leaves undo files for orphan cleanup', t => {
   const root = temporaryDirectory(t, 'notebook-recovery'), path = join(root, 'notebooks.json'), timers = new Map();
-  const { createNotebooks } = timedModule('notebooks', timers);
-  const runtime = createNotebooks(path, plainCipher, () => {}), notebook = runtime.create('Research'), capture = sampleNotebookItem('area');
+  const { createDesktop } = timedModule('desktop', timers);
+  const runtime = createDesktop(path, plainCipher, () => {}), notebook = runtime.create('Research'), capture = sampleDesktopItem('area');
   capture.image = null; runtime.addCapture(notebook.id, capture, faviconPNG, { width: 1, height: 1, cut: false }); runtime.flush();
   const file = join(root, 'captures', capture.image.filename);
   runtime.deleteItem(notebook.id, capture.id); runtime.dispose(); assert.equal(existsSync(file), true); assert.equal(timers.size, 0);
-  const reopened = createNotebooks(path, plainCipher, () => {}); assert.equal(existsSync(file), false); assert.equal(reopened.content(notebook.id).items.length, 0); reopened.dispose();
-  const stored = sampleNotebookStore(), protectedItem = stored.notebooks[0].items[2];
+  const reopened = createDesktop(path, plainCipher, () => {}); assert.equal(existsSync(file), false); assert.equal(reopened.content(notebook.id).items.length, 0); reopened.dispose();
+  const stored = sampleDesktopStore(), protectedItem = stored.projects[0].items[2];
   protectedItem.image.filename = writeCaptureFile(join(root, 'captures'), stored.key, protectedItem.id, faviconPNG);
-  const cipher = authenticatedCipher(); writeNotebookStore(path, stored, cipher); const original = readFileSync(path);
-  const unavailable = createNotebooks(path, plainCipher, () => {}); assert.equal(unavailable.state().notebookReadError, false); assert.equal(unavailable.state().notebookLocked, true);
-  assert.throws(() => unavailable.create('Memory'), /NOTEBOOK_LOCKED/);
-  assert.throws(() => unavailable.addNote(stored.notebooks[0].id, '', 'Session edit'), /NOTEBOOK_LOCKED/);
-  assert.throws(() => unavailable.addCapture(stored.notebooks[0].id, sampleNotebookItem('text')), /NOTEBOOK_LOCKED/);
+  const cipher = authenticatedCipher(); writeDesktopStore(path, stored, cipher); const original = readFileSync(path);
+  const unavailable = createDesktop(path, plainCipher, () => {}); assert.equal(unavailable.state().desktopReadError, false); assert.equal(unavailable.state().desktopLocked, true);
+  assert.throws(() => unavailable.create('Memory'), /DESKTOP_LOCKED/);
+  assert.throws(() => unavailable.addNote(stored.projects[0].id, '', 'Session edit'), /DESKTOP_LOCKED/);
+  assert.throws(() => unavailable.addCapture(stored.projects[0].id, sampleDesktopItem('text')), /DESKTOP_LOCKED/);
   unavailable.dispose(); assert.equal(timers.size, 0); assert.deepEqual(readFileSync(path), original);
   const protectedFile = join(root, 'captures', protectedItem.image.filename); assert.equal(existsSync(protectedFile), true);
   original[original.length - 1] ^= 1; writeFileSync(path, original);
-  const recovered = createNotebooks(path, cipher, () => {}); assert.equal(recovered.state().notebookReadError, true); assert.deepEqual(recovered.state().notebooks, []);
+  const recovered = createDesktop(path, cipher, () => {}); assert.equal(recovered.state().desktopReadError, true); assert.deepEqual(recovered.state().projects, []);
   assert.equal(existsSync(protectedFile), true); recovered.dispose();
   const blocked = join(root, 'blocked'); writeFileSync(blocked, 'file');
-  const failed = createNotebooks(join(blocked, 'notebooks.json'), plainCipher, () => {}), failedNotebook = failed.create('Unavailable disk');
-  failed.flush(); assert.equal(failed.state().notebookReadError, true); assert.equal(failed.state().notebookStorageError, true);
-  const failedItem = sampleNotebookItem('area'); failedItem.image = null;
-  assert.throws(() => failed.addCapture(failedNotebook.id, failedItem, faviconPNG, { width: 1, height: 1, cut: false }), /NOTEBOOK_STORAGE_FAILED/);
+  const failed = createDesktop(join(blocked, 'notebooks.json'), plainCipher, () => {}), failedNotebook = failed.create('Unavailable disk');
+  failed.flush(); assert.equal(failed.state().desktopReadError, true); assert.equal(failed.state().desktopStorageError, true);
+  const failedItem = sampleDesktopItem('area'); failedItem.image = null;
+  assert.throws(() => failed.addCapture(failedNotebook.id, failedItem, faviconPNG, { width: 1, height: 1, cut: false }), /DESKTOP_STORAGE_FAILED/);
   failed.dispose(); assert.equal(timers.size, 0);
 });
 
 test('capture storage allows linked user-data ancestors but rejects every owned linked folder', t => {
   const root = temporaryDirectory(t, 'notebook-linked-home'), actual = join(root, 'actual'), linked = join(root, 'linked');
   mkdirSync(actual); symlinkSync(actual, linked, process.platform === 'win32' ? 'junction' : 'dir');
-  const store = sampleNotebookStore(), item = store.notebooks[0].items[2], directory = join(linked, 'profiles', store.notebooks[0].id, 'captures');
+  const store = sampleDesktopStore(), item = store.projects[0].items[2], directory = join(linked, 'profiles', store.projects[0].id, 'captures');
   item.image.filename = writeCaptureFile(directory, store.key, item.id, faviconPNG);
   assert.deepEqual(readCaptureFile(directory, store.key, item), faviconPNG);
   assert.doesNotThrow(() => cleanupCaptureFiles(directory, store));
@@ -3334,44 +3519,44 @@ test('capture storage allows linked user-data ancestors but rejects every owned 
     const linkAt = join(owned, ...parts.slice(0, depth + 1)); mkdirSync(require('node:path').dirname(linkAt), { recursive: true });
     symlinkSync(target, linkAt, process.platform === 'win32' ? 'junction' : 'dir');
     const captures = join(owned, ...parts);
-    assert.throws(() => writeCaptureFile(captures, store.key, randomUUID(), faviconPNG), /NOTEBOOK_STORAGE_FAILED/);
+    assert.throws(() => writeCaptureFile(captures, store.key, randomUUID(), faviconPNG), /DESKTOP_STORAGE_FAILED/);
   }
 });
 
 test('unreadable notebook stores preserve recovery captures on this and subsequent launches', t => {
   const root = temporaryDirectory(t, 'notebook-corrupt-captures'), path = join(root, 'profiles', randomUUID(), 'notebooks.json'), timers = new Map();
-  const { createNotebooks } = timedModule('notebooks', timers), runtime = createNotebooks(path, plainCipher, () => {}), notebook = runtime.create('Recoverable');
-  const item = sampleNotebookItem('area'); item.image = null;
+  const { createDesktop } = timedModule('desktop', timers), runtime = createDesktop(path, plainCipher, () => {}), notebook = runtime.create('Recoverable');
+  const item = sampleDesktopItem('area'); item.image = null;
   runtime.addCapture(notebook.id, item, faviconPNG, { width: 1, height: 1, cut: false }); runtime.dispose();
   const capture = join(require('node:path').dirname(path), 'captures', item.image.filename), bytes = readFileSync(capture);
   const original = readFileSync(path, 'utf8'); writeFileSync(path, '{corrupt');
-  const recovered = createNotebooks(path, plainCipher, () => {});
-  assert.equal(recovered.state().notebookReadError, true); assert.deepEqual(readFileSync(capture), bytes); recovered.dispose();
-  const next = createNotebooks(path, plainCipher, () => {}); assert.equal(next.state().notebookReadError, false);
+  const recovered = createDesktop(path, plainCipher, () => {});
+  assert.equal(recovered.state().desktopReadError, true); assert.deepEqual(readFileSync(capture), bytes); recovered.dispose();
+  const next = createDesktop(path, plainCipher, () => {}); assert.equal(next.state().desktopReadError, false);
   assert.deepEqual(readFileSync(capture), bytes); next.dispose();
   // The preserved key still decrypts the image once the original store is restored.
-  writeFileSync(path, original); const restored = createNotebooks(path, plainCipher, () => {});
+  writeFileSync(path, original); const restored = createDesktop(path, plainCipher, () => {});
   assert.deepEqual(restored.image(notebook.id, item.id), faviconPNG); restored.dispose();
 });
 
 test('notebook addresses keep non-ASCII names readable while removing address delimiters', t => {
   const browser = notebookBrowser(t), { command, state } = browser;
-  command({ type: 'create-notebook', name: 'Café 東京: otoño + ideas (2026)' }); const id = state().notebookInUse;
-  command({ type: 'open-notebook', id }); assert.equal(state().tabs[0].url, 'horizon://notebooks/café-東京:-otoño-+-ideas-(2026)');
-  command({ type: 'rename-notebook', id, name: 'Café / rutas? #mapa % <x> "a" \\ b' });
-  assert.equal(state().tabs[0].url, 'horizon://notebooks/café--rutas-mapa--x-a--b');
+  command({ type: 'create-project', name: 'Café 東京: otoño + ideas (2026)' }); const id = state().projectInUse;
+  command({ type: 'open-desktop', id }); assert.equal(state().tabs[0].url, 'horizon://desktop/café-東京:-otoño-+-ideas-(2026)');
+  command({ type: 'rename-project', id, name: 'Café / rutas? #mapa % <x> "a" \\ b' });
+  assert.equal(state().tabs[0].url, 'horizon://desktop/café--rutas-mapa--x-a--b');
   browser.close();
 });
 
 test('opening a notebook reuses only an active start page or its existing notebook tab', t => {
   const browser = notebookBrowser(t), { command, state } = browser, home = state().activeId;
-  command({ type: 'create-notebook', name: 'First' }); const first = state().notebookInUse;
-  command({ type: 'open-notebook', id: first }); assert.equal(state().activeId, home); assert.equal(state().tabs.length, 1);
+  command({ type: 'create-project', name: 'First' }); const first = state().projectInUse;
+  command({ type: 'open-desktop', id: first }); assert.equal(state().activeId, home); assert.equal(state().tabs.length, 1);
   command({ type: 'new-tab' }); const blank = state().activeId;
-  command({ type: 'open-notebook', id: first }); assert.equal(state().activeId, home); assert.equal(state().tabs.find(tab => tab.id === blank).url, '');
+  command({ type: 'open-desktop', id: first }); assert.equal(state().activeId, home); assert.equal(state().tabs.find(tab => tab.id === blank).url, '');
   command({ type: 'activate-tab', id: blank }); browser.navigate();
-  command({ type: 'create-notebook', name: 'Second' }); const second = state().notebookInUse;
-  command({ type: 'open-notebook', id: second }); assert.notEqual(state().activeId, blank); assert.equal(state().tabs.length, 3);
+  command({ type: 'create-project', name: 'Second' }); const second = state().projectInUse;
+  command({ type: 'open-desktop', id: second }); assert.notEqual(state().activeId, blank); assert.equal(state().tabs.length, 3);
   assert.equal(state().tabs.find(tab => tab.id === blank).url, 'https://example.com/'); browser.close();
 });
 
@@ -3554,7 +3739,7 @@ test('About uses the app version, a labelled modal and Close focus with Escape r
 test('capture controls start on Area, expose radio semantics and move selection by arrows, dragging and two clicks', () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), focused = [], document = { body: {}, activeElement: null };
   const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': { NotebookPicker: 'picker', notebookError: reason => reason.message } }, { document });
-  const render = () => hooks.render(() => CaptureOverlay({ state: { notebooks: [] }, language: 'en', header: { current: null }, onClose() {}, onSave() {} }));
+  const render = () => hooks.render(() => CaptureOverlay({ state: { projects: [] }, language: 'en', header: { current: null }, onClose() {}, onSave() {} }));
   let tree = render(), radios = notebookNodes(tree, node => node.props.role === 'radio');
   assert.equal(tree.props.role, 'dialog'); assert.equal(tree.props['aria-modal'], 'true'); assert.equal(tree.props['aria-label'], copy.text('capturePurpose', 'en'));
   assert.equal(notebookNodes(tree, node => node.props.role === 'radiogroup').length, 1);
@@ -3595,7 +3780,7 @@ test('capture image bytes stay in IPC and blob URLs are revoked on retry, errors
     const hooks = notebookTestHooks(), created = [], revoked = [], requests = []; let finish;
     const window = { horizon: { getCaptureImage(...args) { requests.push(args); return new Promise(resolve => { finish = resolve; }); } } };
     const { CaptureImage } = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': {} }, { window, URL: { createObjectURL() { const url = 'blob:private-' + created.length; created.push(url); return url; }, revokeObjectURL: url => revoked.push(url) }, Blob, Uint8Array });
-    const render = () => hooks.render(() => CaptureImage({ notebook: 'book', item: { id: 'image', title: 'Capture', image: { cut: false } }, language: 'en' }));
+    const render = () => hooks.render(() => CaptureImage({ project: 'book', item: { id: 'image', title: 'Capture', image: { cut: false } }, language: 'en' }));
     render(); hooks.flush(); assert.deepEqual(requests, [['book', 'image']]);
     if (outcome === 'stale') hooks.dispose();
     finish(outcome === 'null' ? null : new Uint8Array([1, 2, 3])); await Promise.resolve();
@@ -3611,27 +3796,27 @@ test('capture image bytes stay in IPC and blob URLs are revoked on retry, errors
 });
 
 test('notebook summaries omit text, annotations, image bytes and generated filenames', t => {
-  const root = temporaryDirectory(t, 'notebook-summary-interface'), timers = new Map(), { createNotebooks } = timedModule('notebooks', timers);
-  const runtime = createNotebooks(join(root, 'notebooks.json'), plainCipher, () => {}), notebook = runtime.create('Research'), item = sampleNotebookItem('text');
+  const root = temporaryDirectory(t, 'notebook-summary-interface'), timers = new Map(), { createDesktop } = timedModule('desktop', timers);
+  const runtime = createDesktop(join(root, 'notebooks.json'), plainCipher, () => {}), notebook = runtime.create('Research'), item = sampleDesktopItem('text');
   item.text = 'PRIVATE CAPTURE BODY'; item.note = 'PRIVATE ANNOTATION'; runtime.addCapture(notebook.id, item);
-  const image = sampleNotebookItem('area'); image.image = null; runtime.addCapture(notebook.id, image, faviconPNG, { width: 1, height: 1, cut: false });
-  const summary = runtime.state().notebooks[0]; assert.equal(summary.latest.find(entry => entry.id === item.id).source.url, 'https://example.com/');
-  for (const entry of summary.latest) assert.deepEqual(Object.keys(entry).sort(), ['id', 'kind', 'source', 'title']);
+  const image = sampleDesktopItem('area'); image.image = null; runtime.addCapture(notebook.id, image, faviconPNG, { width: 1, height: 1, cut: false });
+  const summary = runtime.state().projects[0]; assert.equal(summary.latest.find(entry => entry.id === item.id).source.url, 'https://example.com/');
+  for (const entry of summary.latest) assert.deepEqual(Object.keys(entry).sort(), ['createdAt', 'folder', 'id', 'kind', 'source', 'title', 'updatedAt']);
   const state = JSON.stringify(runtime.state()); for (const secret of [item.text, item.note, image.image.filename, faviconPNG.toString('base64')]) assert.equal(state.includes(secret), false);
   runtime.dispose();
 });
 
 test('debounced notebook edits serialize and flush before switching, retaining failed and newer drafts', async () => {
   const timers = new Map(), sent = [], errors = [];
-  const { NotebookEdits } = interfaceModule('src/shared/notebook-edits.ts', {}, { setTimeout(callback) { const timer = {}; timers.set(timer, callback); return timer; }, clearTimeout(timer) { timers.delete(timer); } });
+  const { DesktopEdits } = interfaceModule('src/shared/desktop-edits.ts', {}, { setTimeout(callback) { const timer = {}; timers.set(timer, callback); return timer; }, clearTimeout(timer) { timers.delete(timer); } });
   let finish, fail = false;
-  const edits = new NotebookEdits(command => { sent.push(command); if (fail) return Promise.reject(new Error('NOTEBOOK_STORAGE_FAILED')); return new Promise(resolve => { finish = resolve; }); }, reason => errors.push(reason));
+  const edits = new DesktopEdits(command => { sent.push(command); if (fail) return Promise.reject(new Error('DESKTOP_STORAGE_FAILED')); return new Promise(resolve => { finish = resolve; }); }, reason => errors.push(reason));
   edits.change('book', 'item', { title: 'First' }); edits.change('book', 'item', { text: 'Draft' }); assert.equal(timers.size, 1);
   const first = edits.flush(); await Promise.resolve(); await Promise.resolve();
-  assert.deepEqual(sent[0], { type: 'update-notebook-item', notebook: 'book', id: 'item', title: 'First', text: 'Draft' });
+  assert.deepEqual(sent[0], { type: 'update-item', project: 'book', id: 'item', title: 'First', text: 'Draft' });
   edits.change('book', 'item', { title: 'Latest' }); finish(); await Promise.resolve(); await Promise.resolve();
   assert.equal(sent[1].title, 'Latest'); finish(); await first; assert.deepEqual(edits.fields('book', 'item'), {});
-  fail = true; edits.change('book', 'item', { note: 'Kept on failure' }); await assert.rejects(edits.flush(), /NOTEBOOK_STORAGE_FAILED/);
+  fail = true; edits.change('book', 'item', { note: 'Kept on failure' }); await assert.rejects(edits.flush(), /DESKTOP_STORAGE_FAILED/);
   assert.equal(edits.fields('book', 'item').note, 'Kept on failure');
   fail = false; const retry = edits.flush(); await Promise.resolve(); await Promise.resolve(); finish(); await retry;
   assert.deepEqual(edits.fields('book', 'item'), {}); assert.equal(timers.size, 0); assert.deepEqual(errors, []);
@@ -3643,7 +3828,7 @@ test('notebook home metadata uses actual counts, calendar-relative dates and eac
   assert.equal(helpers.notebookResumeMeta({ notes: 6, captures: 0, updatedAt: yesterday }, 'en', now), '6 notes, yesterday');
   assert.equal(helpers.notebookResumeMeta({ notes: 1, captures: 3, updatedAt: now }, 'en', now), '1 note and 3 captures, today');
   for (const language of ['en', 'es']) {
-    const labels = Object.keys(copy.copy).filter(key => /^(NOTEBOOK_|CAPTURE_|NOTHING_SELECTED)/.test(key)).map(key => helpers.notebookError(new Error("Error invoking command: " + key), language));
+    const labels = Object.keys(copy.copy).filter(key => /^(PROJECT_|DESKTOP_|CAPTURE_|NOTHING_SELECTED)/.test(key)).map(key => helpers.notebookError(new Error("Error invoking command: " + key), language));
     assert.equal(labels.length, 20); assert.equal(new Set(labels).size, 20); assert.ok(labels.every(label => label.length > 10));
   }
 });
@@ -3651,13 +3836,13 @@ test('notebook home metadata uses actual counts, calendar-relative dates and eac
 test('notebook chooser orders last use after the current notebook, preselects it and starts with a labelled form on first use', () => {
   const copy = interfaceModule('src/copy.ts'), hooks = notebookTestHooks();
   const module = interfaceModule('src/Notebooks.tsx', { react: hooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': { Menu: 'menu' } });
-  const chosen = [], state = { notebookInUse: 'current', notebooks: [{ id: 'older', name: 'Older', notes: 0, captures: 2, usedAt: 1 }, { id: 'latest', name: 'Latest', notes: 2, captures: 0, usedAt: 3 }, { id: 'current', name: 'Current', notes: 1, captures: 1, usedAt: 2 }] };
+  const chosen = [], state = { projectInUse: 'current', projects: [{ id: 'older', name: 'Older', notes: 0, captures: 2, usedAt: 1 }, { id: 'latest', name: 'Latest', notes: 2, captures: 0, usedAt: 3 }, { id: 'current', name: 'Current', notes: 1, captures: 1, usedAt: 2 }] };
   const tree = hooks.render(() => module.NotebookPicker({ state, language: 'en', opener: { current: null }, onClose() {}, onChoose: notebook => chosen.push(notebook.id), choosing: true }));
   const rows = notebookNodes(tree, node => node.props.role === 'menuitemradio');
   assert.deepEqual(rows.map(row => row.props.children[1].props.children[0].props.children), ['Current', 'Latest', 'Older']);
   assert.deepEqual(rows.map(row => row.props['aria-checked']), [true, false, false]); rows[0].props.onClick(); assert.deepEqual(chosen, ['current']);
   const emptyHooks = notebookTestHooks(), emptyModule = interfaceModule('src/Notebooks.tsx', { react: emptyHooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} });
-  const first = emptyHooks.render(() => emptyModule.NotebookPicker({ state: { notebooks: [], notebookInUse: null }, language: 'en', opener: { current: null }, onClose() {}, onChoose() {} }));
+  const first = emptyHooks.render(() => emptyModule.NotebookPicker({ state: { projects: [], projectInUse: null }, language: 'en', opener: { current: null }, onClose() {}, onChoose() {} }));
   assert.equal(notebookNodes(first, node => node.type === emptyModule.NotebookNameForm).length, 1);
   const formHooks = notebookTestHooks(), forms = interfaceModule('src/Notebooks.tsx', { react: formHooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} });
   const form = formHooks.render(() => forms.NotebookNameForm({ language: 'en', onCancel() {}, onSuccess() {} }));
@@ -3691,11 +3876,11 @@ test('full-page capture waits for visible content; save results respect closed a
     const events = [], notices = [], exported = {}; let visible;
     const overlay = { scope: 'scope', mode: 'capture' }, liveOverlay = { current: overlay }, nextOverlay = { scope: 'scope', mode: 'capture' };
     const globals = {
-      state: { notebookLocked: false }, notebookScope: 'scope', liveNotebookScope: { current: 'scope' }, notebookOverlay: overlay, liveNotebookOverlay: liveOverlay, edits: { flush: async () => events.push('flush') },
+      state: { desktopLocked: false }, notebookScope: 'scope', liveNotebookScope: { current: 'scope' }, notebookOverlay: overlay, liveNotebookOverlay: liveOverlay, edits: { flush: async () => events.push('flush') },
       setPageCapturePending: value => events.push('pending:' + value), setNotebookOverlay: value => { assert.equal(value, null); liveOverlay.current = value; events.push('closed'); },
       setMenuOpen() {}, setProfileOpen() {}, setHubPage() {}, setLyraOpen() {}, setShieldScope() {}, setSuggestionsOpen() {}, setPanel() {},
       requestAnimationFrame: callback => queueMicrotask(callback), reportArea: hidden => { assert.equal(hidden, false); events.push('visible'); return new Promise(resolve => { visible = resolve; }); },
-      window: { horizon: { async command(command) { events.push('capture'); assert.equal(command.kind, kind); if (kind === 'area') assert.deepEqual(command.rect, { x: 1, y: 2, width: 300, height: 200 }); if (reopened) liveOverlay.current = nextOverlay; if (failure) throw new Error('CAPTURE_FAILED'); }, async getNotebook() { return { items: [{ id: 'saved-item' }] }; } } },
+      window: { horizon: { async command(command) { events.push('capture'); assert.equal(command.kind, kind); if (kind === 'area') assert.deepEqual(command.rect, { x: 1, y: 2, width: 300, height: 200 }); if (reopened) liveOverlay.current = nextOverlay; if (failure) throw new Error('CAPTURE_FAILED'); }, async getProject() { return { items: [{ id: 'saved-item' }] }; } } },
       notebookButtonRef: { current: { focus: () => events.push('focus') } }, setNotebookNotice: value => notices.push(value), language: 'en', text: copy.text, openNotebook() {}, notebookError: reason => reason.message,
     };
     compileFunction(compiled, ['exports', ...Object.keys(globals)])(exported, ...Object.values(globals));
@@ -3708,25 +3893,25 @@ test('full-page capture waits for visible content; save results respect closed a
 });
 
 test('notebook storage Retry writes existing contents without another capture and validates its no-argument command', t => {
-  assert.deepEqual(validateCommand({ type: 'retry-notebook-storage' }), { type: 'retry-notebook-storage' });
-  assert.throws(() => validateCommand({ type: 'retry-notebook-storage', notebook: randomUUID() }));
+  assert.deepEqual(validateCommand({ type: 'retry-desktop-storage' }), { type: 'retry-desktop-storage' });
+  assert.throws(() => validateCommand({ type: 'retry-desktop-storage', project: randomUUID() }));
   const root = temporaryDirectory(t, 'notebook-storage-retry'), blocked = join(root, 'blocked'); writeFileSync(blocked, 'file');
-  const timers = new Map(), { createNotebooks } = timedModule('notebooks', timers), runtime = createNotebooks(join(blocked, 'notebooks.json'), plainCipher, () => {});
+  const timers = new Map(), { createDesktop } = timedModule('desktop', timers), runtime = createDesktop(join(blocked, 'notebooks.json'), plainCipher, () => {});
   const notebook = runtime.create('Research'); runtime.addNote(notebook.id, 'Draft', 'Keep this text'); runtime.flush();
-  assert.equal(runtime.state().notebookStorageError, true); assert.throws(() => runtime.retry(), /NOTEBOOK_STORAGE_FAILED/);
-  require('node:fs').unlinkSync(blocked); runtime.retry(); assert.equal(runtime.state().notebookStorageError, false);
-  const saved = readNotebookStore(join(blocked, 'notebooks.json')); assert.equal(saved.notebooks[0].items.length, 1); assert.equal(saved.notebooks[0].items[0].text, 'Keep this text'); runtime.dispose();
-  const browser = notebookBrowser(t); browser.command({ type: 'create-notebook', name: 'Captures' }); browser.navigate();
-  const id = browser.state().notebookInUse;
-  return browser.command({ type: 'save-capture', notebook: id, kind: 'text' }).then(() => {
-    const before = browser.notebook(id); browser.command({ type: 'retry-notebook-storage' }); assert.deepEqual(browser.notebook(id).items, before.items); browser.close();
+  assert.equal(runtime.state().desktopStorageError, true); assert.throws(() => runtime.retry(), /DESKTOP_STORAGE_FAILED/);
+  require('node:fs').unlinkSync(blocked); runtime.retry(); assert.equal(runtime.state().desktopStorageError, false);
+  const saved = readDesktopStore(join(blocked, 'notebooks.json')); assert.equal(saved.projects[0].items.length, 1); assert.equal(saved.projects[0].items[0].text, 'Keep this text'); runtime.dispose();
+  const browser = notebookBrowser(t); browser.command({ type: 'create-project', name: 'Captures' }); browser.navigate();
+  const id = browser.state().projectInUse;
+  return browser.command({ type: 'save-capture', project: id, kind: 'text' }).then(() => {
+    const before = browser.notebook(id); browser.command({ type: 'retry-desktop-storage' }); assert.deepEqual(browser.notebook(id).items, before.items); browser.close();
   });
 });
 
 test('capture guidance stays accessible and hidden while the error and retry remain visible', () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts');
   const { CaptureOverlay } = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': {} }, { document: { body: {} } });
-  const render = () => hooks.render(() => CaptureOverlay({ state: { notebookStorageError: true }, language: 'en', header: { current: null }, onClose() {}, onSave() {}, onRetryStorage() {} }));
+  const render = () => hooks.render(() => CaptureOverlay({ state: { desktopStorageError: true }, language: 'en', header: { current: null }, onClose() {}, onSave() {}, onRetryStorage() {} }));
   let tree = render();
   const selection = notebookNodes(tree, node => node.props.className === 'capture-selection')[0];
   assert.equal(selection.props['aria-describedby'], 'capture-instructions capture-size');
@@ -3745,7 +3930,7 @@ test('capture guidance stays accessible and hidden while the error and retry rem
 test('notebook fields keep labels, read as board typography and grow and shrink with content and column width', async () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), item = { id: 'item', kind: 'text', title: 'Title', text: 'Text', note: '', createdAt: Date.now() };
   let resized, disconnected = 0;
-  const module = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': { relativeNotebookDate: () => 'today', notebookCounts: () => '1 capture', notebookItemLabel: () => 'example.com' } }, { window: { horizon: { getNotebook: async () => ({ name: 'Book', items: [item] }) } }, ResizeObserver: class { constructor(callback) { resized = callback; } observe() {} disconnect() { disconnected++; } } });
+  const module = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': { relativeNotebookDate: () => 'today', notebookCounts: () => '1 capture', notebookItemLabel: () => 'example.com' } }, { window: { horizon: { getProject: async () => ({ name: 'Book', items: [item] }) } }, ResizeObserver: class { constructor(callback) { resized = callback; } observe() {} disconnect() { disconnected++; } } });
   const render = () => hooks.render(() => module.NotebookView({ id: 'book', language: 'en', edits: {}, onOpen() {}, onDelete() {} }));
   render(); hooks.flush(); await Promise.resolve();
   const editor = notebookNodes(render(), node => typeof node.type === 'function' && node.props.item === item)[0];
@@ -3777,7 +3962,7 @@ test('capture images use natural pixels divided by display scale and keep column
   for (const scale of [1, 1.25, 2]) {
     const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts');
     const { CaptureImage } = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': {} }, { window: { devicePixelRatio: scale, horizon: { getCaptureImage: async () => new Uint8Array([1]) } }, URL: { createObjectURL: () => 'blob:image', revokeObjectURL() {} }, Blob, Uint8Array });
-    const render = () => hooks.render(() => CaptureImage({ notebook: 'book', item: { id: 'item', title: 'Capture' }, language: 'en' }));
+    const render = () => hooks.render(() => CaptureImage({ project: 'book', item: { id: 'item', title: 'Capture' }, language: 'en' }));
     render(); hooks.flush(); await Promise.resolve();
     const image = notebookNodes(render(), node => node.type === 'img')[0], element = { naturalWidth: 500 * scale, naturalHeight: 220 * scale, style: {} };
     image.props.onLoad({ currentTarget: element }); assert.equal(element.style.width, '500px'); hooks.dispose();
@@ -3812,27 +3997,27 @@ test('area arrows move and Shift resizes by ten, Alt uses one, and all edges sta
 
 test('run D: locked notebooks refuse every creation, preserve originals and reopen after encryption returns', t => {
   const root = temporaryDirectory(t, 'notebook-locked-d'), path = join(root, 'notebooks.json'), timers = new Map();
-  const cipher = authenticatedCipher(), stored = sampleNotebookStore(); writeNotebookStore(path, stored, cipher);
+  const cipher = authenticatedCipher(), stored = sampleDesktopStore(); writeDesktopStore(path, stored, cipher);
   const bytes = readFileSync(path); let available = false;
-  const { createNotebooks } = timedModule('notebooks', timers);
-  const runtime = createNotebooks(path, { ...cipher, isEncryptionAvailable: () => available }, () => {});
-  assert.equal(runtime.state().notebookLocked, true); assert.equal(runtime.state().notebookReadError, false);
-  assert.throws(() => runtime.create('Blocked'), /NOTEBOOK_LOCKED/);
-  assert.throws(() => runtime.addNote(stored.notebooks[0].id, '', ''), /NOTEBOOK_LOCKED/);
-  assert.throws(() => runtime.addCapture(stored.notebooks[0].id, sampleNotebookItem('text')), /NOTEBOOK_LOCKED/);
+  const { createDesktop } = timedModule('desktop', timers);
+  const runtime = createDesktop(path, { ...cipher, isEncryptionAvailable: () => available }, () => {});
+  assert.equal(runtime.state().desktopLocked, true); assert.equal(runtime.state().desktopReadError, false);
+  assert.throws(() => runtime.create('Blocked'), /DESKTOP_LOCKED/);
+  assert.throws(() => runtime.addNote(stored.projects[0].id, '', ''), /DESKTOP_LOCKED/);
+  assert.throws(() => runtime.addCapture(stored.projects[0].id, sampleDesktopItem('text')), /DESKTOP_LOCKED/);
   assert.deepEqual(readFileSync(path), bytes); assert.equal(timers.size, 0);
-  available = true; runtime.retry(); assert.equal(runtime.state().notebookLocked, false);
-  assert.equal(runtime.content(stored.notebooks[0].id).items.length, stored.notebooks[0].items.length); runtime.dispose();
+  available = true; runtime.retry(); assert.equal(runtime.state().desktopLocked, false);
+  assert.equal(runtime.content(stored.projects[0].id).items.length, stored.projects[0].items.length); runtime.dispose();
   const app = readFileSync('src/App.tsx', 'utf8');
   assert.match(app, /setDismissedNotebookRead\(state.activeProfileId\)/);
-  assert.match(app, /state\?\.notebookLocked \? 'NOTEBOOK_LOCKED'/);
-  for (const language of ['en', 'es']) assert.ok(interfaceModule('src/copy.ts').text('NOTEBOOK_LOCKED', language));
+  assert.match(app, /state\?\.desktopLocked \? 'DESKTOP_LOCKED'/);
+  for (const language of ['en', 'es']) assert.ok(interfaceModule('src/copy.ts').text('DESKTOP_LOCKED', language));
 });
 
 test('run D: notebook loading has list and detail placeholders and images reserve stored proportions before arrival', () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), styles = {};
   const module = interfaceModule('src/NotebookView.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': {} }, { window: { devicePixelRatio: 2, horizon: { getCaptureImage: () => new Promise(() => {}) } } });
-  const tree = hooks.render(() => module.CaptureImage({ notebook: 'book', item: { id: 'image', title: '', image: { width: 1000, height: 440 } }, language: 'en' }));
+  const tree = hooks.render(() => module.CaptureImage({ project: 'book', item: { id: 'image', title: '', image: { width: 1000, height: 440 } }, language: 'en' }));
   notebookNodes(tree, node => node.props.className === 'notebook-image-box')[0].props.ref.current = { style: { setProperty: (name, value) => { styles[name] = value; } } };
   hooks.flush(); assert.deepEqual(styles, { width: '500px', 'aspect-ratio': '1000 / 440' });
   assert.equal(notebookNodes(tree, node => node.type === 'LoaderCircle').length, 0); hooks.dispose();
@@ -3848,7 +4033,7 @@ test('run D: both notebook pickers filter above eight and offer the typed name w
   for (const choosing of [false, true]) {
     const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts');
     const module = interfaceModule('src/Notebooks.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': { Menu: 'menu' } });
-    const state = { activeProfileId: 'profile', notebooks: Array.from({ length: 9 }, (_, i) => ({ id: String(i), name: `Book ${i}`, notes: 0, captures: 0, usedAt: i })), notebookInUse: '0' };
+    const state = { activeProfileId: 'profile', projects: Array.from({ length: 9 }, (_, i) => ({ id: String(i), name: `Book ${i}`, notes: 0, captures: 0, usedAt: i })), projectInUse: '0' };
     const render = () => hooks.render(() => module.NotebookPicker({ state, language: 'en', choosing, opener: { current: null }, onClose() {}, onChoose() {} }));
     let tree = render(), input = notebookNodes(tree, node => node.type === 'input')[0];
     assert.equal(notebookNodes(tree, node => node.type === 'label')[0].props.htmlFor, input.props.id);
@@ -3857,10 +4042,10 @@ test('run D: both notebook pickers filter above eight and offer the typed name w
     notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Travel' } }); tree = render();
     assert.equal(notebookNodes(tree, node => node.props.role === 'menuitemradio').length, 0);
     assert.equal(notebookNodes(tree, node => node.props.role === 'status').length, 1);
-    const create = notebookNodes(tree, node => node.props.role === 'menuitem')[0]; assert.equal(create.props.children[1].props.children, 'New notebook: Travel'); create.props.onClick();
+    const create = notebookNodes(tree, node => node.props.role === 'menuitem')[0]; assert.equal(create.props.children[1].props.children, 'New project: Travel'); create.props.onClick();
     tree = render(); assert.equal(notebookNodes(tree, node => node.type === module.NotebookNameForm)[0].props.initial, 'Travel');
     const smallHooks = notebookTestHooks(); const small = interfaceModule('src/Notebooks.tsx', { react: smallHooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': { Menu: 'menu' } });
-    assert.equal(notebookNodes(smallHooks.render(() => small.NotebookPicker({ state: { ...state, notebooks: state.notebooks.slice(0, 8) }, language: 'en', opener: { current: null } })), node => node.type === 'input').length, 0);
+    assert.equal(notebookNodes(smallHooks.render(() => small.NotebookPicker({ state: { ...state, projects: state.projects.slice(0, 8) }, language: 'en', opener: { current: null } })), node => node.type === 'input').length, 0);
   }
 });
 
@@ -3868,7 +4053,7 @@ test('run D: cancelled and escaped notebook names survive remount, until cleared
   let activeHooks = notebookTestHooks(), cancelled = 0;
   const react = Object.fromEntries(Object.keys(activeHooks.react).map(key => [key, (...args) => activeHooks.react[key](...args)]));
   const copy = interfaceModule('src/copy.ts'), sent = [];
-  const module = interfaceModule('src/Notebooks.tsx', { react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} }, { window: { horizon: { command: async command => { sent.push(command); }, getState: async () => ({ notebooks: [{ id: 'saved', name: 'Submitted' }] }) } } });
+  const module = interfaceModule('src/Notebooks.tsx', { react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} }, { window: { horizon: { command: async command => { sent.push(command); }, getState: async () => ({ projects: [{ id: 'saved', name: 'Submitted' }] }) } } });
   const render = () => activeHooks.render(() => module.NotebookNameForm({ language: 'en', profileId: 'draft', onCancel: () => { cancelled++; }, onSuccess() {} }));
   let tree = render(); notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Kept' } }); tree = render();
   tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); assert.equal(cancelled, 1);
@@ -3890,12 +4075,12 @@ test('run D: notebook and start-page rows distinguish text, area, whole page and
     const items = ['text', 'area', 'page', 'note'].map((kind, i) => ({ id: String(i), kind, title: 'Same title', source: kind === 'note' ? null : { url: 'https://example.com/path' } }));
     const expected = ['example.com', copy.text('sourceCapture', language), copy.text('sourceFullPage', language), copy.text('sourceNote', language)];
     assert.deepEqual(items.map(item => notebooks.notebookItemLabel(item, language)), expected);
-    const home = hooks.render(() => notebooks.NotebookHome({ state: { notebooks: [{ id: 'book', name: 'Book', latest: items, notes: 1, captures: 3, updatedAt: Date.now() }] }, language }));
+    const home = hooks.render(() => notebooks.NotebookHome({ state: { projects: [{ id: 'book', name: 'Book', latest: items, notes: 1, captures: 3, updatedAt: Date.now() }] }, language }));
     const rows = notebookNodes(home, node => node.props.className === 'notebook-home-row');
     assert.deepEqual(rows.map(row => row.props.children[0].type), ['FileText', 'Camera', 'Camera', 'FileText']);
     assert.deepEqual(rows.map(row => row.props.children[2].props.children), expected);
     const viewHooks = notebookTestHooks();
-    const view = interfaceModule('src/NotebookView.tsx', { react: viewHooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': notebooks }, { window: { horizon: { getNotebook: async () => ({ name: 'Book', items }) } } });
+    const view = interfaceModule('src/NotebookView.tsx', { react: viewHooks.react, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {}, './Notebooks': notebooks }, { window: { horizon: { getProject: async () => ({ name: 'Book', items }) } } });
     const render = () => viewHooks.render(() => view.NotebookView({ id: 'book', language, edits: {}, readOnly: false })); render(); viewHooks.flush(); await Promise.resolve(); await Promise.resolve();
     const list = notebookNodes(render(), node => node.props.className?.startsWith('notebook-list-row'));
     assert.deepEqual(list.map(row => row.props.children[0].type), ['FileText', 'Camera', 'Camera', 'FileText']);
@@ -3906,7 +4091,7 @@ test('run D: notebook and start-page rows distinguish text, area, whole page and
 test('run D: saving keeps its label with a spinner and page progress persists until replaced', async () => {
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'); let complete;
   const module = interfaceModule('src/Capture.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': { NotebookPicker: 'picker', notebookError: reason => reason.message } }, { document: { body: {} } });
-  const render = () => hooks.render(() => module.CaptureOverlay({ state: { notebooks: [] }, language: 'en', header: { current: null }, onSave: () => new Promise(resolve => { complete = resolve; }), onClose() {} }));
+  const render = () => hooks.render(() => module.CaptureOverlay({ state: { projects: [] }, language: 'en', header: { current: null }, onSave: () => new Promise(resolve => { complete = resolve; }), onClose() {} }));
   let tree = render(); notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0].props.onClick(); tree = render();
   const saving = notebookNodes(tree, node => node.type === 'picker')[0].props.onChoose({ id: 'book', name: 'Book' }); tree = render();
   const button = notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0];
@@ -3930,13 +4115,13 @@ test('run D: locked creation and capture explain refusal in place before sending
   const notebooks = interfaceModule('src/Notebooks.tsx', { react: hooks.react, 'react-dom': {}, 'lucide-react': notebookTestIcons, './copy': copy, './Menu': {} }, { window: { horizon: { command() { commands++; } } } });
   const render = () => hooks.render(() => notebooks.NotebookNameForm({ language: 'es', profileId: 'locked', locked: true, onCancel() {}, onSuccess() {} }));
   let tree = render(); notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: 'Research' } }); tree = render(); tree.props.onSubmit({ preventDefault() {} });
-  assert.equal(commands, 0); assert.equal(notebookNodes(render(), node => node.props.role === 'alert')[0].props.children[1], copy.text('NOTEBOOK_LOCKED', 'es'));
+  assert.equal(commands, 0); assert.equal(notebookNodes(render(), node => node.props.role === 'alert')[0].props.children[1], copy.text('DESKTOP_LOCKED', 'es'));
   const captureHooks = notebookTestHooks();
   const capture = interfaceModule('src/Capture.tsx', { react: captureHooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': copy, './Notebooks': { NotebookPicker: 'picker' } }, { document: { body: {} } });
-  const captureRender = () => captureHooks.render(() => capture.CaptureOverlay({ state: { notebookLocked: true }, language: 'en', header: { current: null }, onSave() { commands++; }, onClose() {} }));
+  const captureRender = () => captureHooks.render(() => capture.CaptureOverlay({ state: { desktopLocked: true }, language: 'en', header: { current: null }, onSave() { commands++; }, onClose() {} }));
   tree = captureRender(); notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0].props.onClick(); tree = captureRender();
   assert.equal(commands, 0); assert.equal(notebookNodes(tree, node => node.type === 'picker').length, 0);
-  assert.equal(notebookNodes(tree, node => node.props.role === 'alert')[0].props.children[0].props.children, copy.text('NOTEBOOK_LOCKED', 'en'));
+  assert.equal(notebookNodes(tree, node => node.props.role === 'alert')[0].props.children[0].props.children, copy.text('DESKTOP_LOCKED', 'en'));
 });
 test('settings v4 validates every new field and migrates v2 without losing appearance', t => {
   const directory = temporaryDirectory(t, 'settings-v3'), path = join(directory, 'settings.json');

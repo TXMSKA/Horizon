@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { IPC, SEARCH_ENGINES } from '../src/shared/api';
-import type { BrowserCommand, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, NotebookItem, Profile, SettingsSection, TabState } from '../src/shared/api';
+import type { BrowserCommand, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserShortcut } from '../src/shared/shortcuts';
 import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName, settingsAddress, settingsSection } from './browsing';
 import { readStore, reserveDownloadPath, writeStore } from './store';
@@ -22,7 +22,7 @@ import type { ProfileRegistry } from './profiles';
 import { createBlockingEngine } from './blocking';
 import { listSites, PermissionQueue, requestedPermissions, resetSite, secureOrigin, setBlocking, setPermission, setSiteDark, siteHost, siteSettings, stripCookieHeaders } from './site-settings';
 import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages';
-import { createNotebooks } from './notebooks';
+import { createDesktop, desktopAddress } from './desktop';
 import { captureRectangle, captureSelection, captureWholePage, pngSize } from './captures';
 
 interface Tab { state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
@@ -177,7 +177,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const storePath = profileStorePath(userData, profile.id);
     const readStatus = { readError: false, memoryOnly: false };
     const store = readStore(storePath, safeStorage, readStatus);
-    const notebooks = createNotebooks(resolve(dirname(storePath), 'notebooks.json'), safeStorage, publish);
+    const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, publish);
+    const desktopPanel: DesktopPanelState = { open: false, page: { kind: 'home' } };
     const tabs: Tab[] = [];
     let activeId = '';
     let storageError = false;
@@ -193,7 +194,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const forget = () => { clearTimeout(restoreTimeout); restoreTimeout = undefined; kept = undefined; };
     const keep = (kind: 'history' | 'bookmarks' | 'downloads') => {
       forget();
-      notebooks.forget();
+      desktop.forget();
       if (kind === 'history') kept = { kind, entries: structuredClone(store.history) };
       else if (kind === 'bookmarks') kept = { kind, entries: structuredClone(store.bookmarks) };
       else kept = { kind, entries: structuredClone(store.downloads) };
@@ -276,9 +277,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     webSession.webRequest.onCompleted(details => { requests.delete(details.id); });
     webSession.webRequest.onErrorOccurred(details => { requests.delete(details.id); });
 
-    const state = () => ({ ...notebooks.state(), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, storageError, storageReadError: readStatus.readError,
+    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, storageError, storageReadError: readStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
-      blockingReady: blocker.ready, siteSettings: active()?.state.settings ? null : siteSettings(store.siteSettings, active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: permissions.prompt(activeId) });
+      blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : siteSettings(store.siteSettings, active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: permissions.prompt(activeId) });
     const flush = () => {
       if (pendingWrite === undefined) return;
       clearTimeout(pendingWrite); pendingWrite = undefined;
@@ -340,7 +341,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (!tab.view || !page(tab.view)) continue;
         const fullscreen = isCurrent() && tab.state.id === activeId && tab.state.fullscreen;
         const y = fullscreen ? 0 : top;
-        tab.view.setBounds({ x: 0, y, width, height: Math.max(0, height - y) });
+        const panelWidth = !fullscreen && desktopPanel.open ? Math.ceil(400 * window.webContents.getZoomFactor()) : 0;
+        tab.view.setBounds({ x: 0, y, width: Math.max(0, width - panelWidth), height: Math.max(0, height - y) });
         tab.view.setVisible(isCurrent() && tab.state.id === activeId && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
       }
     };
@@ -421,7 +423,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const load = (tab: Tab, url: string, launch = false) => {
       if (!isAllowedURL(url) && !(launch && isLocalHTMLURL(url))) throw new Error('Invalid navigation URL');
-      tab.state.notebook = null; tab.state.notebookItem = null; tab.state.settings = null;
+      tab.state.desktop = null; tab.state.desktopItem = null; tab.state.settings = null;
       if (active() === tab) invalidateCaptures();
       invalidateMenu(tab.state.id);
       permissions.drop(tab.state.id);
@@ -445,7 +447,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const newTab = (url?: string, foreground = true, contents?: WebContents, launch = false) => {
       if (disposed || closing) throw new Error('Profile is closed');
       if (tabs.length >= 200) throw new Error('Tab limit reached');
-      const tab: Tab = { pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), settings: null, notebook: null, notebookItem: null, url: url ?? '', title: url ?? '', favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
+      const tab: Tab = { pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), settings: null, desktop: null, desktopItem: null, url: url ?? '', title: url ?? '', favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
       clearFavicon(tab, url);
       tabs.push(tab);
       if (foreground || !activeId) activate(tab);
@@ -711,11 +713,41 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     webSession.on('will-download', downloadHandler);
 
-    const notebookAddress = (name: string) => `horizon://notebooks/${name.toLowerCase().replace(/\s+/g, '-').replace(/[<>"/\\?#%{}|^`]/g, '')}`;
+    const desktopDestination = (input: string) => {
+      const address = input.trim();
+      if (!address.toLowerCase().startsWith('horizon://desktop/')) return null;
+      if (address === 'horizon://desktop/captures') return 'captures';
+      const project = desktop.list().find(project => desktopAddress(project.name) === address);
+      if (!project) throw new Error('DESKTOP_NOT_FOUND');
+      return project.id;
+    };
+    const openDesktop = (id: string, item?: string) => {
+      const name = id === 'captures' ? 'Captures' : desktop.get(id).name;
+      if (item) desktop.item(id === 'captures' ? null : id, item);
+      const tab = active();
+      const target = tabs.find(tab => tab.state.desktop === id) ?? (tab && !tab.view && !tab.state.url && !tab.state.desktop && !tab.state.settings ? tab : newTab());
+      target.state.desktop = id; target.state.desktopItem = item ?? null;
+      target.state.url = id === 'captures' ? 'horizon://desktop/captures' : desktopAddress(name); target.state.title = name;
+      activate(target); if (id !== 'captures') desktop.use(id); update();
+    };
+    const reconcileDesktop = () => {
+      for (const target of tabs) if (target.state.desktopItem && target.state.desktop) {
+        try { desktop.item(target.state.desktop === 'captures' ? null : target.state.desktop, target.state.desktopItem); }
+        catch { target.state.desktopItem = null; }
+      }
+      const page = desktopPanel.page;
+      if (page.kind === 'project') {
+        try { desktop.get(page.project); if (page.folder) desktop.folder(page.project, page.folder); }
+        catch { desktopPanel.page = desktop.list().some(project => project.id === page.project) ? { kind: 'project', project: page.project } : { kind: 'home' }; }
+      } else if (page.kind === 'item') {
+        try { desktop.item(page.project, page.id); }
+        catch { desktopPanel.page = page.project === null ? { kind: 'captures' } : desktop.list().some(project => project.id === page.project) ? { kind: 'project', project: page.project } : { kind: 'home' }; }
+      }
+    };
     const saveCapture = async (command: Extract<BrowserCommand, { type: 'save-capture' }>) => {
-      notebooks.assertUnlocked();
+      desktop.assertUnlocked();
       const tab = active(), view = tab?.view, contents = page(view);
-      if (!tab || !view || !contents || tab.state.notebook || tab.state.error || tab.navigating || !isWebURL(tab.state.url)) throw new Error('CAPTURE_UNAVAILABLE');
+      if (!tab || !view || !contents || tab.state.desktop || tab.state.error || tab.navigating || !isWebURL(tab.state.url)) throw new Error('CAPTURE_UNAVAILABLE');
       const request = new AbortController(); captureRequests.add(request);
       const generation = captureGeneration, navigation = tab.navigation, pageLoad = tab.pageLoad, url = tab.state.url;
       const check = () => {
@@ -723,15 +755,15 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           || page(view) !== contents || tab.navigation !== navigation || tab.pageLoad !== pageLoad || tab.state.url !== url || tab.state.error) throw new Error('CAPTURE_CHANGED');
       };
       const now = Date.now(), title = tab.state.title;
-      const entry: NotebookItem = { id: randomUUID(), kind: command.kind, title: title.slice(0, 200), text: '', note: '',
+      const entry: DesktopItem = { id: randomUUID(), folder: command.folder ?? null, kind: command.kind, title: title.slice(0, 200), text: '', note: '',
         source: { url, title: title.slice(0, 4096) }, image: null, createdAt: now, updatedAt: now };
       try {
-        if (command.kind === 'text') { entry.text = await captureSelection(contents); check(); notebooks.addCapture(command.notebook, entry); }
+        if (command.kind === 'text') { entry.text = await captureSelection(contents); check(); desktop.addCapture(command.project, entry); }
         else if (command.kind === 'area') {
           const rect = captureRectangle(command.rect, window.webContents.getZoomFactor(), view.getBounds());
           const image = await contents.capturePage(rect, { stayHidden: true }); check();
           const bytes = image.toPNG();
-          notebooks.addCapture(command.notebook, entry, bytes, { ...pngSize(bytes), cut: false });
+          desktop.addCapture(command.project, entry, bytes, { ...pngSize(bytes), cut: false });
         } else {
           const visible = () => {
             const bounds = view.getBounds(), windowBounds = window.getContentBounds();
@@ -740,11 +772,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           };
           const scale = screen.getDisplayMatching(window.getContentBounds()).scaleFactor * contents.getZoomFactor();
           const result = await captureWholePage(contents, visible(), scale, () => { check(); if (!visible()) throw new Error('CAPTURE_PAGE_HIDDEN'); }, request.signal);
-          check(); notebooks.addCapture(command.notebook, entry, result.bytes, result.image);
+          check(); desktop.addCapture(command.project, entry, result.bytes, result.image);
         }
         update();
       } catch (error: unknown) {
-        if (error instanceof Error && /^(NOTEBOOK_|CAPTURE_|NOTHING_SELECTED$)/.test(error.message)) throw error;
+        if (error instanceof Error && /^(PROJECT_|FOLDER_|DESKTOP_|CAPTURE_|NOTHING_SELECTED$)/.test(error.message)) throw error;
         try { check(); } catch { throw new Error('CAPTURE_CHANGED'); }
         throw new Error('CAPTURE_FAILED');
       } finally { captureRequests.delete(request); }
@@ -774,38 +806,45 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           }
           break;
         }
-        case 'retry-notebook-storage': notebooks.retry(); break;
-        case 'create-notebook': notebooks.create(command.name); break;
-        case 'rename-notebook':
-          notebooks.rename(command.id, command.name);
-          for (const target of tabs) if (target.state.notebook === command.id) {
-            target.state.title = notebooks.get(command.id).name; target.state.url = notebookAddress(target.state.title);
+        case 'retry-desktop-storage': desktop.retry(); break;
+        case 'open-desktop-panel':
+          desktopPanel.open = true; desktopPanel.page = structuredClone(command.page);
+          if (command.page.kind === 'project' || command.page.kind === 'item' && command.page.project !== null) desktop.use(command.page.project!);
+          window.webContents.focus(); break;
+        case 'close-desktop-panel': desktopPanel.open = false; break;
+        case 'create-project': desktop.create(command.name); break;
+        case 'rename-project':
+          desktop.rename(command.id, command.name);
+          for (const target of tabs) if (target.state.desktop === command.id) {
+            target.state.title = desktop.get(command.id).name; target.state.url = desktopAddress(target.state.title);
           }
           break;
-        case 'delete-notebook':
-          forget(); notebooks.delete(command.id);
-          for (const target of [...tabs]) if (target.state.notebook === command.id) closeTab(target);
+        case 'delete-project':
+          forget(); desktop.delete(command.id);
+          for (const target of [...tabs]) if (target.state.desktop === command.id) closeTab(target);
           break;
-        case 'set-notebook': notebooks.use(command.id); break;
-        case 'open-notebook': {
-          const notebook = notebooks.get(command.id);
-          if (command.item) notebooks.item(command.id, command.item);
-          const target = tabs.find(tab => tab.state.notebook === command.id) ?? (!tab.state.url && !tab.state.notebook && !tab.state.settings ? tab : newTab());
-          target.state.notebook = command.id; target.state.notebookItem = command.item ?? null;
-          target.state.url = notebookAddress(notebook.name); target.state.title = notebook.name;
-          activate(target); notebooks.use(command.id); break;
-        }
-        case 'add-note': notebooks.addNote(command.notebook, command.title, command.text); break;
-        case 'update-notebook-item': {
+        case 'set-project': desktop.use(command.id); break;
+        case 'open-desktop': openDesktop(command.id, command.item); break;
+        case 'create-folder': desktop.createFolder(command.project, command.name); break;
+        case 'rename-folder': desktop.renameFolder(command.project, command.id, command.name); break;
+        case 'delete-folder': forget(); desktop.deleteFolder(command.project, command.id); break;
+        case 'move-item-folder': desktop.moveItemFolder(command.project, command.id, command.folder); break;
+        case 'move-item-project': desktop.moveItemProject(command.project, command.id, command.toProject, command.folder); break;
+        case 'add-capture-to-project': desktop.addCaptureToProject(command.id, command.project, command.folder); break;
+        case 'add-link': desktop.addLink(command.project, command.folder, command.address, command.title); break;
+        case 'add-text': desktop.addText(command.project, command.folder, command.text, command.source); break;
+        case 'delete-capture': forget(); desktop.deleteItem(null, command.id); break;
+        case 'add-note': desktop.addNote(command.project, command.title, command.text, command.folder); break;
+        case 'update-item': {
           const fields: { title?: string; text?: string; note?: string } = {};
           if (command.title !== undefined) fields.title = command.title;
           if (command.text !== undefined) fields.text = command.text;
           if (command.note !== undefined) fields.note = command.note;
-          notebooks.update(command.notebook, command.id, fields); break;
+          desktop.update(command.project, command.id, fields); break;
         }
-        case 'delete-notebook-item':
-          forget(); notebooks.deleteItem(command.notebook, command.id);
-          for (const target of tabs) if (target.state.notebook === command.notebook && target.state.notebookItem === command.id) target.state.notebookItem = null;
+        case 'delete-item':
+          forget(); desktop.deleteItem(command.project, command.id);
+          for (const target of tabs) if (target.state.desktop === command.project && target.state.desktopItem === command.id) target.state.desktopItem = null;
           break;
         case 'save-capture': return saveCapture(command);
         case 'set-site-dark': {
@@ -833,6 +872,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'theme': case 'migrate-theme': settings.setTheme(command.value, command.type === 'migrate-theme'); break;
         case 'contrast': settings.setContrast(command.value); break;
         case 'new-tab': {
+          const destination = command.input ? desktopDestination(command.input) : null;
+          if (destination) { openDesktop(destination); break; }
           const section = command.input ? settingsSection(command.input) : null;
           if (section) openSettings(section); else newTab(command.input ? classifyInput(command.input, settings.searchEngine) : undefined, !command.background); break;
         }
@@ -895,6 +936,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           closeTab(target); break;
         }
         case 'navigate': {
+          const destination = desktopDestination(command.input);
+          if (destination) { openDesktop(destination); break; }
           const section = settingsSection(command.input);
           if (section) openSettings(section); else load(tab, classifyInput(command.input, settings.searchEngine)); break;
         }
@@ -925,7 +968,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'delete-history': keep('history'); store.history = store.history.filter(entry => entry.url !== command.url); persist(); break;
         case 'clear-history': keep('history'); store.history = []; persist(); break;
         case 'restore':
-          if (command.kind === 'notebooks') { notebooks.restore(); break; }
+          if (command.kind === 'desktop') { desktop.restore(); break; }
           if (kept?.kind !== command.kind) break;
           if (kept.kind === 'history') store.history = kept.entries;
           else if (kept.kind === 'bookmarks') store.bookmarks = kept.entries;
@@ -958,10 +1001,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (items.has(command.id)) throw new Error('Download is still active');
           keep('downloads'); store.downloads = store.downloads.filter(entry => entry.id !== command.id); persist(); break;
       }
-      refresh(tab); update();
+      reconcileDesktop(); refresh(tab); update();
     };
     const suspend = () => {
-      invalidateCaptures(); notebooks.forget();
+      invalidateCaptures(); desktop.forget();
       forget();
       const tab = active();
       if (tab) { leaveFullscreen(tab); page(tab.view)?.stopFindInPage('clearSelection'); tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; }
@@ -972,7 +1015,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         try { cleanup(); } catch (error: unknown) { storageFailure(error); }
       };
       if (discard) disposed = true;
-      invalidateCaptures(); notebooks.dispose(discard);
+      invalidateCaptures(); desktop.dispose(discard);
       forget();
       if (!discard) for (const item of items.values()) item.cancel();
       disposed = true;
@@ -995,7 +1038,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       requests.clear();
       if (!discard && (store.clearHistoryOnClose || store.clearCacheOnClose)) return clearBeforeDeadline([clearOnClose]);
     };
-    return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS, notebooks, resetCounts, resetCookies, clearData, clearOnClose, stopForClear };
+    return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear };
 
   }
   ipcMain.handle(IPC.state, (event, ...args: unknown[]) => {
@@ -1011,15 +1054,20 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!tab) throw new Error('Unknown tab');
     return tab.state.favicon === hash ? tab.faviconBytes ?? null : null;
   });
-  ipcMain.handle(IPC.notebook, (event, ...args: unknown[]) => {
+  ipcMain.handle(IPC.project, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
-    if (args.length !== 1 || !isProfileId(args[0])) throw new Error('Invalid notebook arguments');
-    return current().notebooks.content(args[0]);
+    if (args.length !== 1 || !isProfileId(args[0])) throw new Error('Invalid project arguments');
+    return current().desktop.content(args[0]);
   });
   ipcMain.handle(IPC.captureImage, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
-    if (args.length !== 2 || !isProfileId(args[0]) || !isProfileId(args[1])) throw new Error('Invalid capture image arguments');
-    return current().notebooks.image(args[0], args[1]);
+    if (args.length !== 2 || args[0] !== null && !isProfileId(args[0]) || !isProfileId(args[1])) throw new Error('Invalid capture image arguments');
+    return current().desktop.image(args[0], args[1]);
+  });
+  ipcMain.handle(IPC.captures, (event, ...args: unknown[]) => {
+    validateSender(event, window.webContents);
+    if (args.length) throw new Error('Invalid captures arguments');
+    return current().desktop.captures();
   });
   ipcMain.handle(IPC.capture, async (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
@@ -1046,7 +1094,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     validateSender(event, window.webContents);
     if (args.length !== 1) throw new Error('Invalid command arguments');
     if (deleting) throw new Error('Profile deletion is in progress');
-    return run(validateCommand(args[0], new Set(registry.profiles.map(profile => profile.id)), current().notebooks.list()));
+    return run(validateCommand(args[0], new Set(registry.profiles.map(profile => profile.id)), current().desktop.list(), current().desktop.captureList()));
   });
   ipcMain.handle(IPC.contentArea, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
@@ -1057,7 +1105,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     area = next; layout();
     if (covering && window.isFocused()) window.webContents.focus();
   });
-  const flush = () => { for (const runtime of runtimes.values()) { runtime.flush(); runtime.notebooks.flush(); } };
+  const flush = () => { for (const runtime of runtimes.values()) { runtime.flush(); runtime.desktop.flush(); } };
   let quitting: Promise<void> | undefined;
   let quitCleared = false;
   const needsClearOnClose = () => registry.profiles.some(profile => {
@@ -1088,7 +1136,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     for (const runtime of runtimes.values()) runtime.dispose();
     app.removeListener('before-quit', beforeQuit);
     window.removeListener('focus', refreshDefaultBrowser);
-    for (const channel of [IPC.state, IPC.capture, IPC.favicon, IPC.notebook, IPC.captureImage, IPC.command, IPC.contentArea]) ipcMain.removeHandler(channel);
+    for (const channel of [IPC.state, IPC.capture, IPC.favicon, IPC.project, IPC.captures, IPC.captureImage, IPC.command, IPC.contentArea]) ipcMain.removeHandler(channel);
   });
   app.on('before-quit', beforeQuit);
   const initial = runtimeFor(registry.profiles.find(profile => profile.id === registry.activeId)!);

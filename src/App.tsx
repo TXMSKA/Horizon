@@ -9,7 +9,7 @@ import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { SEARCH_ENGINES } from './shared/api';
-import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureRect, ContextMenuItemId, Language, NotebookSummary, PageContextMenu, SettingsSection, WindowAction } from './shared/api';
+import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureRect, ContextMenuItemId, Language, ProjectSummary, PageContextMenu, SettingsSection, WindowAction } from './shared/api';
 import { browserShortcut } from './shared/shortcuts';
 import { applyTheme } from './theme';
 import { Menu } from './Menu';
@@ -28,7 +28,7 @@ import type { CaptureKind } from './Capture';
 import { NotebookHome, NotebookPicker, NotebookStatus, notebookError } from './Notebooks';
 import type { NotebookNotice } from './Notebooks';
 import { NotebookView } from './NotebookView';
-import { NotebookEdits } from './shared/notebook-edits';
+import { DesktopEdits } from './shared/desktop-edits';
 import { Settings, settingsError } from './Settings';
 
 type Panel = LibraryPanel | null;
@@ -90,8 +90,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const notebookOpener = useRef<HTMLElement | null>(null);
   const [dismissedNotebookRead, setDismissedNotebookRead] = useState<string | null>(null);
   const [notebookNotice, setNotebookNotice] = useState<NotebookNotice | null>(null);
-  const editsRef = useRef<NotebookEdits | null>(null);
-  const edits = useMemo(() => new NotebookEdits(command => window.horizon.command(command), reason => {
+  const editsRef = useRef<DesktopEdits | null>(null);
+  const edits = useMemo(() => new DesktopEdits(command => window.horizon.command(command), reason => {
     setNotebookNotice({ message: notebookError(reason, language), failure: true, action: text('retry', language), onAction: () => { void editsRef.current?.flush().then(() => setNotebookNotice(null)).catch(reason => setError(notebookError(reason, language))); } });
   }), [language]);
   useLayoutEffect(() => { editsRef.current = edits; }, [edits]);
@@ -135,7 +135,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const permissionOpen = Boolean(!aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !notebookMode && !suggestionsOpen && !contextMenu && !shieldOpen && !panel && !findOpen);
   const popover = Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(notebookMode) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
-  const pageShowing = Boolean(activeUrl && !active?.notebook && !active?.settings && !active?.error && (!active?.fullscreen || popover));
+  const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
   // Third-party cookies are refused before the filter lists load, so a count can exist while the lists are not ready.
   const showBlocked = Boolean(site?.blocking && totalBlocked > 0);
@@ -160,23 +160,23 @@ export function App({ language: initialLanguage }: { language: Language }) {
     setNotebookOverlay(null); (notebookMode === 'capture' ? notebookButtonRef : notebookOpener).current?.focus();
   }, [notebookMode]);
   const retryNotebookStorage = useCallback(async function retry(): Promise<void> {
-    try { await edits.flush(); await window.horizon.command({ type: 'retry-notebook-storage' }); setNotebookNotice(null); }
+    try { await edits.flush(); await window.horizon.command({ type: 'retry-desktop-storage' }); setNotebookNotice(null); }
     catch (reason) { setNotebookNotice({ message: notebookError(reason, language), failure: true, action: text('retry', language), onAction: () => { void retry(); } }); }
   }, [edits, language]);
   useEffect(() => {
-    if (state?.notebookStorageError && notebookMode !== 'capture') setNotebookNotice({ message: text('NOTEBOOK_STORAGE_FAILED', language), failure: true, action: text('retry', language), onAction: () => { void retryNotebookStorage(); } });
-  }, [state?.notebookStorageError, notebookMode, language, retryNotebookStorage]);
+    if (state?.desktopStorageError && notebookMode !== 'capture') setNotebookNotice({ message: text('DESKTOP_STORAGE_FAILED', language), failure: true, action: text('retry', language), onAction: () => { void retryNotebookStorage(); } });
+  }, [state?.desktopStorageError, notebookMode, language, retryNotebookStorage]);
   const openNotebook = (id: string, item?: string) => {
     setNotebookOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setDirty(false);
-    void run({ type: 'open-notebook', id, ...(item ? { item } : {}) });
+    void run({ type: 'open-desktop', id, ...(item ? { item } : {}) });
   };
-  const saveNotebookCapture = async (notebook: NotebookSummary, kind: CaptureKind, rect: CaptureRect) => {
+  const saveNotebookCapture = async (notebook: ProjectSummary, kind: CaptureKind, rect: CaptureRect) => {
     const scope = notebookScope;
     const overlay = notebookOverlay;
-    const command: BrowserCommand = kind === 'area' ? { type: 'save-capture', notebook: notebook.id, kind, rect } : { type: 'save-capture', notebook: notebook.id, kind };
+    const command: BrowserCommand = kind === 'area' ? { type: 'save-capture', project: notebook.id, kind, rect } : { type: 'save-capture', project: notebook.id, kind };
     const save = async () => {
       if (liveNotebookScope.current !== scope) throw new Error('CAPTURE_CHANGED');
-      if (state?.notebookLocked) throw new Error('NOTEBOOK_LOCKED');
+      if (state?.desktopLocked) throw new Error('DESKTOP_LOCKED');
       await edits.flush();
       if (kind === 'page') {
         setNotebookNotice({ message: text('capturingPage', language), pending: true });
@@ -187,7 +187,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       }
       if (liveNotebookScope.current !== scope) throw new Error('CAPTURE_CHANGED');
       await window.horizon.command(command);
-      const content = await window.horizon.getNotebook(notebook.id), item = content.items.at(-1)?.id;
+      const content = await window.horizon.getProject(notebook.id), item = content.items.at(-1)?.id;
       if (liveNotebookOverlay.current === overlay) setNotebookOverlay(null);
       if (liveNotebookScope.current === scope && (!liveNotebookOverlay.current || liveNotebookOverlay.current === overlay)) notebookButtonRef.current?.focus();
       setNotebookNotice({ message: text('notebookSaved', language).replace('{name}', notebook.name), action: text('openNotebook', language), onAction: () => { setNotebookNotice(null); openNotebook(notebook.id, item); } });
@@ -202,7 +202,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   };
   const deleteNotebookEntry = async (command: BrowserCommand, message: CopyKey) => {
     dismissUndo();
-    if (await run(command)) setNotebookNotice({ message: text(message, language), undo: true, action: text('undo', language), onAction: () => { setNotebookNotice(null); void run({ type: 'restore', kind: 'notebooks' }); } });
+    if (await run(command)) setNotebookNotice({ message: text(message, language), undo: true, action: text('undo', language), onAction: () => { setNotebookNotice(null); void run({ type: 'restore', kind: 'desktop' }); } });
   };
   const closeShield = useCallback((focusShield = true) => {
     setShieldScope(null); if (focusShield) shieldButtonRef.current?.focus();
@@ -427,7 +427,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       if (tab) { closeFind(); openPanel(null); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); }); }
     } else if (action === 'history' || action === 'downloads' || action === 'favorites') openPanel(action === 'favorites' ? 'bookmarks' : action);
     else if (action === 'fullscreen') { openPanel(null); closeFind(); void run({ type: 'fullscreen' }); }
-    else if (action === 'find' && activeUrl && !active?.notebook && !active?.settings && !active?.error) { openPanel(null); setSuggestionsOpen(false); setFindOpen(true); requestAnimationFrame(() => { findRef.current?.focus(); findRef.current?.select(); }); }
+    else if (action === 'find' && activeUrl && !active?.desktop && !active?.settings && !active?.error) { openPanel(null); setSuggestionsOpen(false); setFindOpen(true); requestAnimationFrame(() => { findRef.current?.focus(); findRef.current?.select(); }); }
     else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') void run({ type: 'zoom', delta: action === 'zoom-in' ? 1 : action === 'zoom-out' ? -1 : 0 });
     else if (action === 'stop') {
       if (aboutOpen) setAboutOpen(false);
@@ -470,9 +470,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
       seen.add(item.url);
       return `${item.title} ${item.url}`.toLowerCase().includes(query.toLowerCase());
     }).slice(0, 8).map(item => ({ kind: 'createdAt' in item ? 'bookmark' as const : 'history' as const, url: item.url, title: item.title || item.url, hint: 'createdAt' in item ? text('bookmarks', language) : new URL(item.url).host }));
-    const notebooks = (state?.notebooks ?? []).filter(notebook => notebook.name.toLowerCase().includes(query.toLowerCase())).slice(0, 3).map(notebook => ({ kind: 'notebook' as const, url: notebook.id, title: notebook.name, hint: text('notebookHint', language) }));
+    const notebooks = (state?.projects ?? []).filter(notebook => notebook.name.toLowerCase().includes(query.toLowerCase())).slice(0, 3).map(notebook => ({ kind: 'notebook' as const, url: notebook.id, title: notebook.name, hint: text('notebookHint', language) }));
     return [search, ...local, ...notebooks];
-  }, [query, address, dirty, activeUrl, language, state?.searchEngine, state?.store.bookmarks, state?.store.history, state?.notebooks]);
+  }, [query, address, dirty, activeUrl, language, state?.searchEngine, state?.store.bookmarks, state?.store.history, state?.projects]);
   const chooseSuggestion = (item: typeof suggestions[number]) => { if (item.kind === 'notebook') openNotebook(item.url); else navigate(item.url); };
   const iconButton = (Icon: LucideIcon, key: CopyKey, onClick: () => void, disabled = false, accent = false) => <button
     className={`icon-button${accent ? ' accent' : ''}`} type="button" onClick={onClick} disabled={disabled} aria-label={t(key)} title={t(key)}><Icon aria-hidden="true" /></button>;
@@ -485,7 +485,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   return <>
     <div className="visually-hidden" role="status" aria-live="polite">{announcement}</div>
     <NotebookStatus notice={notebookNotice} language={language} onClose={closeNotebookNotice} />
-    <a className="skip-link" href="#content" onClick={event => { event.preventDefault(); if (activeUrl && !active?.notebook && !active?.settings && !hidden && !active?.error) void run({ type: 'focus-page' }); else document.getElementById('content')?.focus(); }}>{t('skip')}</a>
+    <a className="skip-link" href="#content" onClick={event => { event.preventDefault(); if (activeUrl && !active?.desktop && !active?.settings && !hidden && !active?.error) void run({ type: 'focus-page' }); else document.getElementById('content')?.focus(); }}>{t('skip')}</a>
     <header className="chrome" ref={headerRef} hidden={active?.fullscreen}>
       <div className="tab-strip">
         <nav className="tabs" role="tablist" aria-label={t('tabs')}>
@@ -502,7 +502,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
                 event.preventDefault(); const selected = state.tabs[next]; if (!selected) return; closeFind(); setDirty(false); setSuggestionsOpen(false);
                 void run({ type: 'activate-tab', id: selected.id }); document.getElementById(`tab-${selected.id}`)?.focus();
               }}>
-              {tab.loading ? <LoaderCircle className="spinner accent" aria-label={t('loading')} /> : !tab.url || tab.notebook || tab.settings ? <HorizonMark /> : tab.favicon && favicons[tab.id]?.hash === tab.favicon ? <img className="tab-favicon" src={favicons[tab.id]?.url} alt="" aria-hidden="true" onError={() => setFavicons(previous => { if (previous[tab.id]?.hash !== tab.favicon) return previous; const next = { ...previous }; delete next[tab.id]; return next; })} /> : <span className="tab-initial" aria-hidden="true">{(tab.title || tab.url).slice(0, 1).toUpperCase()}</span>}
+              {tab.loading ? <LoaderCircle className="spinner accent" aria-label={t('loading')} /> : !tab.url || tab.desktop || tab.settings ? <HorizonMark /> : tab.favicon && favicons[tab.id]?.hash === tab.favicon ? <img className="tab-favicon" src={favicons[tab.id]?.url} alt="" aria-hidden="true" onError={() => setFavicons(previous => { if (previous[tab.id]?.hash !== tab.favicon) return previous; const next = { ...previous }; delete next[tab.id]; return next; })} /> : <span className="tab-initial" aria-hidden="true">{(tab.title || tab.url).slice(0, 1).toUpperCase()}</span>}
               <span>{tab.settings ? t('settings') : tab.title || t('home')}</span>
             </button>
             {iconButton(X, 'closeTab', () => { if (tab.id === state.activeId) closeFind(); void run({ type: 'close-tab', id: tab.id }); })}
@@ -516,8 +516,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
         </div>
       </div>
       <div className="toolbar" role="toolbar" aria-label={t('toolbar')}>
-        <div className="navigation-buttons">{iconButton(ArrowLeft, 'back', () => shortcut('back'), !active?.canGoBack)}{iconButton(ArrowRight, 'forward', () => shortcut('forward'), !active?.canGoForward)}{iconButton(active?.loading ? X : RotateCw, active?.loading ? 'stop' : 'reload', () => shortcut(active?.loading ? 'stop' : 'reload'), !activeUrl || Boolean(active?.notebook) || Boolean(active?.settings))}</div>
-        <form className="address-bar" onSubmit={event => { event.preventDefault(); const suggestion = suggestionsOpen && suggestionIndex >= 0 ? suggestions[suggestionIndex] : undefined; if (suggestion) chooseSuggestion(suggestion); else if (!dirty && active?.notebook) addressRef.current?.blur(); else navigate(dirty ? address : activeUrl); }}>
+        <div className="navigation-buttons">{iconButton(ArrowLeft, 'back', () => shortcut('back'), !active?.canGoBack)}{iconButton(ArrowRight, 'forward', () => shortcut('forward'), !active?.canGoForward)}{iconButton(active?.loading ? X : RotateCw, active?.loading ? 'stop' : 'reload', () => shortcut(active?.loading ? 'stop' : 'reload'), !activeUrl || Boolean(active?.desktop) || Boolean(active?.settings))}</div>
+        <form className="address-bar" onSubmit={event => { event.preventDefault(); const suggestion = suggestionsOpen && suggestionIndex >= 0 ? suggestions[suggestionIndex] : undefined; if (suggestion) chooseSuggestion(suggestion); else if (!dirty && active?.desktop) addressRef.current?.blur(); else navigate(dirty ? address : activeUrl); }}>
           {site ? <button className={`icon-button shield-button${site.blocking && state?.blockingReady ? ' accent' : ''}`} ref={shieldButtonRef} type="button" aria-label={shieldLabel} title={shieldLabel} aria-haspopup="dialog" aria-expanded={shieldOpen} aria-controls="shield-popover" onClick={() => {
             setNotebookOverlay(null); dismissUndo(); closeContextMenu(); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); closeFind(); setShieldScope(previous => previous === siteScope ? null : siteScope);
           }}><ShieldIcon aria-hidden="true" /></button> : <ShieldCheck className="accent" aria-label={t('protection')} />}
@@ -538,7 +538,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
         </form>
         <div className="tools"><button className="icon-button" ref={notebookButtonRef} type="button" aria-label={t('notebooks')} title={t('notebooks')} aria-haspopup="dialog" aria-expanded={Boolean(notebookMode)} onClick={() => {
           notebookOpener.current = notebookButtonRef.current; setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); closeFind(); closeContextMenu();
-          setNotebookOverlay(previous => previous?.scope === notebookScope ? null : { scope: notebookScope, mode: /^https?:/.test(activeUrl) && !active?.notebook ? 'capture' : 'list' });
+          setNotebookOverlay(previous => previous?.scope === notebookScope ? null : { scope: notebookScope, mode: /^https?:/.test(activeUrl) && !active?.desktop ? 'capture' : 'list' });
         }}><NotebookPen aria-hidden="true" /></button>
           {state?.quickAccess.map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={() => openHub(app)}><Icon aria-hidden="true" /></button>; })}
           <button className="icon-button" ref={hubButtonRef} type="button" aria-label={t('hub')} title={t('hub')} aria-haspopup="dialog" aria-expanded={Boolean(hubPage)} aria-controls="hub-popup" onClick={() => { if (hubPage) { setHubPage(null); hubButtonRef.current?.focus(); } else openHub('home'); }}><LayoutGrid aria-hidden="true" /></button>
@@ -553,7 +553,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
         <span className="match-count" role="status">{findText ? active?.find.total ? `${active.find.active} ${t('matchOf')} ${active.find.total}` : t('notFound') : ''}</span>
         {iconButton(ArrowUp, 'previousMatch', () => { void run({ type: 'find', text: findText, forward: false, next: true }); }, !findText)}{iconButton(ArrowDown, 'nextMatch', () => { void run({ type: 'find', text: findText, forward: true, next: true }); }, !findText)}{iconButton(X, 'close', () => { closeFind(); void run({ type: 'focus-page' }); })}
       </div>}
-      {(error || state?.storageReadError || state?.storageError || (state?.notebookReadError && dismissedNotebookRead !== state.activeProfileId) || state?.notebookLocked || state?.notebookStorageError) && <div className="shell-status" role="alert"><span>{error || t(state?.notebookLocked ? 'NOTEBOOK_LOCKED' : state?.notebookReadError && dismissedNotebookRead !== state.activeProfileId ? 'notebookReadFailed' : state?.notebookStorageError ? 'NOTEBOOK_STORAGE_FAILED' : state?.storageReadError ? 'storageReadError' : 'storageError')}</span>{state?.notebookLocked && <button className="text-button" type="button" onClick={() => { void retryNotebookStorage(); }}>{t('retry')}</button>}{(error || state?.notebookReadError && !state.notebookLocked && dismissedNotebookRead !== state.activeProfileId) && iconButton(X, 'close', () => { if (error) setError(''); else if (state) setDismissedNotebookRead(state.activeProfileId); })}</div>}
+      {(error || state?.storageReadError || state?.storageError || (state?.desktopReadError && dismissedNotebookRead !== state.activeProfileId) || state?.desktopLocked || state?.desktopStorageError) && <div className="shell-status" role="alert"><span>{error || t(state?.desktopLocked ? 'DESKTOP_LOCKED' : state?.desktopReadError && dismissedNotebookRead !== state.activeProfileId ? 'notebookReadFailed' : state?.desktopStorageError ? 'DESKTOP_STORAGE_FAILED' : state?.storageReadError ? 'storageReadError' : 'storageError')}</span>{state?.desktopLocked && <button className="text-button" type="button" onClick={() => { void retryNotebookStorage(); }}>{t('retry')}</button>}{(error || state?.desktopReadError && !state.desktopLocked && dismissedNotebookRead !== state.activeProfileId) && iconButton(X, 'close', () => { if (error) setError(''); else if (state) setDismissedNotebookRead(state.activeProfileId); })}</div>}
       <div className={`loading-line${active?.loading ? ' loading' : ''}`} aria-hidden="true" />
     </header>
     {notebookMode === 'capture' && state && <CaptureOverlay state={state} language={language} header={headerRef} onClose={closeNotebooks} onSave={saveNotebookCapture} onRetryStorage={retryNotebookStorage} />}
@@ -588,8 +588,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
         }),
       ])}
     </Menu>}
-    <main id="content" className={active?.settings ? 'settings-content-area' : active?.notebook ? 'notebook-content' : activeUrl ? 'web-content' : 'start-content'} tabIndex={-1}>
-      {active?.settings && state ? <Settings key={state.activeProfileId} state={state} section={active.settings} language={language} onOpen={openSettings} openClearDialog={clearDialogRequested} onClearDialogOpened={() => setClearDialogRequested(false)} /> : active?.notebook && state ? <NotebookView key={`${state.activeProfileId}:${active.notebook}`} id={active.notebook} selected={active.notebookItem} version={state.notebooksVersion} language={language} edits={edits} readOnly={notebookLeaving} locked={state.notebookLocked} run={run} onOpen={openNotebook} onDelete={deleteNotebookEntry} /> : active?.error && failure ? <section className="error-page" role="alert"><ErrorIcon aria-hidden="true" /><h1>{t(failure.heading)}</h1><p>{t(failure.sentence)}</p><div className="error-details"><p>{active.url}</p><p>{active.error}</p></div><button className="text-button" type="button" onClick={() => { void run({ type: 'reload' }); }}>{t('retry')}</button></section> : activeUrl ? (snapshot && <img className={`web-snapshot${active?.fullscreen ? ' fullscreen-snapshot' : ''}`} ref={snapshotRef} src={snapshot.url} alt="" aria-hidden="true" />) : !state ? <p role="status">{t('loading')}</p> : <div className="start-page">
+    <main id="content" className={active?.settings ? 'settings-content-area' : active?.desktop ? 'notebook-content' : activeUrl ? 'web-content' : 'start-content'} tabIndex={-1}>
+      {active?.settings && state ? <Settings key={state.activeProfileId} state={state} section={active.settings} language={language} onOpen={openSettings} openClearDialog={clearDialogRequested} onClearDialogOpened={() => setClearDialogRequested(false)} /> : active?.desktop && state ? <NotebookView key={`${state.activeProfileId}:${active.desktop}`} id={active.desktop} selected={active.desktopItem} version={state.desktopVersion} language={language} edits={edits} readOnly={notebookLeaving} locked={state.desktopLocked} run={run} onOpen={openNotebook} onDelete={deleteNotebookEntry} /> : active?.error && failure ? <section className="error-page" role="alert"><ErrorIcon aria-hidden="true" /><h1>{t(failure.heading)}</h1><p>{t(failure.sentence)}</p><div className="error-details"><p>{active.url}</p><p>{active.error}</p></div><button className="text-button" type="button" onClick={() => { void run({ type: 'reload' }); }}>{t('retry')}</button></section> : activeUrl ? (snapshot && <img className={`web-snapshot${active?.fullscreen ? ' fullscreen-snapshot' : ''}`} ref={snapshotRef} src={snapshot.url} alt="" aria-hidden="true" />) : !state ? <p role="status">{t('loading')}</p> : <div className="start-page">
         <div className="start-sky"><div className="start-browsing">
           <h1>{t('product')}</h1>
           <form className="search-field start-search" onSubmit={event => { event.preventDefault(); navigate(startSearch); }}><Search aria-hidden="true" /><input spellCheck={false} autoComplete="off" aria-label={t('search')} placeholder={t('search')} value={startSearch} maxLength={8192} onChange={event => setStartSearch(event.target.value)} /><Sparkles className="accent" aria-hidden="true" /></form>
