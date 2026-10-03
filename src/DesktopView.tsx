@@ -15,6 +15,7 @@ type DesktopProps = {
   onDelete: (command: BrowserCommand, message: CopyKey) => Promise<void>;
   onModalChange: (open: boolean) => void;
   onDropped: (project: string, item: string) => void;
+  onRejected?: (message: string) => void;
   addedItem?: { profile: string; project: string; id: string } | null;
 };
 function Feedback({ error, language, onRetry }: { error: string; language: Language; onRetry: () => void }) {

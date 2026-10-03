@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { popupPosition } from './shared/popup-position';
 
 export function PopupAnchor({ opener, children, portalHost, anchor }: { opener: RefObject<HTMLElement | null>; children: ReactNode; portalHost?: RefObject<HTMLElement | null>; anchor?: RefObject<HTMLElement | null> }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -12,16 +13,19 @@ export function PopupAnchor({ opener, children, portalHost, anchor }: { opener: 
       if (!trigger) return;
       const gap = Number.parseFloat(getComputedStyle(popup).getPropertyValue('--toolbar-popup-gap'));
       if (anchor?.current) popup.style.setProperty('width', `${trigger.width}px`);
-      const { width } = popup.getBoundingClientRect();
+      // Measure without the previous limit so a clipped menu can choose the roomier side.
+      popup.style.setProperty('--popup-available-height', 'none');
+      popup.style.setProperty('max-height', 'none');
+      const { width, height } = popup.getBoundingClientRect();
+      const { top, availableHeight } = popupPosition(trigger, innerHeight, height, gap);
       const panel = opener.current?.closest<HTMLElement>('.desktop-panel-body');
       const area = panel?.getBoundingClientRect(), padding = panel ? Number.parseFloat(getComputedStyle(panel).paddingInlineEnd) : gap;
       const start = area ? area.left + padding : gap, end = area ? area.right - padding : innerWidth - gap;
       // Capture choosers stay inside the panel, clear of the native page view.
       popup.style.setProperty('left', `${Math.max(start, Math.min(trigger.right - width, end - width))}px`);
-      popup.style.setProperty('top', `${trigger.bottom + gap}px`);
-      popup.style.setProperty('--popup-available-height', `${Math.max(0, innerHeight - trigger.bottom - gap)}px`);
-      // Long lists scroll below their opener rather than moving above it.
-      popup.style.setProperty('max-height', `${Math.max(0, innerHeight - trigger.bottom - gap)}px`);
+      popup.style.setProperty('top', `${top}px`);
+      popup.style.setProperty('--popup-available-height', `${availableHeight}px`);
+      popup.style.setProperty('max-height', `${availableHeight}px`);
     };
     const observer = new ResizeObserver(position);
     observer.observe(popup); if (opener.current) observer.observe(opener.current); if (anchor?.current) observer.observe(anchor.current);

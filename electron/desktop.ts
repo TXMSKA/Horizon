@@ -7,8 +7,9 @@ import { isProfileId } from './profiles';
 import { encryptedStore, readStoreFile, writeStoreFile } from './store';
 import type { StoreCipher, StoreReadStatus } from './store';
 import { desktopText, desktopInputText, desktopTitle } from '../src/shared/desktop-input';
+import { desktopAddress } from '../src/shared/desktop-address';
 export { desktopText, desktopInputText, desktopTitle } from '../src/shared/desktop-input';
-export { desktopAddress } from '../src/shared/desktop-address';
+export { desktopAddress };
 
 export const PROJECT_LIMIT = 200;
 export const PROJECT_ITEM_LIMIT = 2000;
@@ -107,29 +108,39 @@ export function writeDesktopStore(path: string, store: DesktopStore, cipher?: St
   if (!validateDesktopStore(store)) throw new Error('DESKTOP_ITEM_INVALID');
   writeStoreFile(path, store, cipher);
 }
-export function readDesktopStore(path: string, cipher?: StoreCipher, status: StoreReadStatus = { readError: false, memoryOnly: false }): DesktopStore {
+interface DesktopReadStatus extends StoreReadStatus { unread?: boolean }
+export function readDesktopStore(path: string, cipher?: StoreCipher, status: DesktopReadStatus = { readError: false, memoryOnly: false }): DesktopStore {
   const empty: DesktopStore = { version: 2, key: randomBytes(32).toString('base64'), inUse: null, projects: [], captures: [] };
+  let originalPresent = true;
   try {
-    if (!existsSync(path)) { writeDesktopStore(path, empty, cipher); return empty; }
     let store: DesktopStore;
     let encrypted: boolean;
-    let migrated = false;
+    let migrated = false, read = false;
     try {
       encrypted = encryptedStore(path);
       if (encrypted && !cipher?.isEncryptionAvailable()) { status.readError = true; status.memoryOnly = true; return empty; }
-      const value = readStoreFile(path, cipher);
+      const value = readStoreFile(path, cipher, () => { read = true; });
       const upgrade = migrateDesktopStore(value);
       if (upgrade) { store = upgrade; migrated = true; }
       else { if (!validateDesktopStore(value)) throw new Error('DESKTOP_ITEM_INVALID'); store = value; }
-    } catch {
+    } catch (error: unknown) {
+      if (!read) {
+        if (typeof error === 'object' && error !== null && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+          originalPresent = false;
+          writeDesktopStore(path, empty, cipher); return empty;
+        }
+        // An unread file may still contain the only usable store and capture key.
+        status.readError = true; status.unread = true; return empty;
+      }
       status.readError = true;
-      renameSync(path, `${path}.corrupt-${randomUUID()}`); writeDesktopStore(path, empty, cipher); return empty;
+      renameSync(path, `${path}.corrupt-${randomUUID()}`); originalPresent = false;
+      writeDesktopStore(path, empty, cipher); return empty;
     }
     if (migrated || !encrypted && cipher?.isEncryptionAvailable()) {
       try { writeDesktopStore(path, store, cipher); } catch { /* A valid plain store remains usable if its upgrade fails. */ }
     }
     return store;
-  } catch { status.readError = true; }
+  } catch { status.readError = true; status.unread = originalPresent; }
   return empty;
 }
 
@@ -191,12 +202,13 @@ export function writeCaptureFile(directory: string, key: string, id: string, byt
 }
 
 export function createDesktop(path: string, cipher: StoreCipher, changed: () => void) {
-  const status = { readError: false, memoryOnly: false }, store = readDesktopStore(path, cipher, status);
+  const status = { readError: false, memoryOnly: false, unread: false }, store = readDesktopStore(path, cipher, status);
   const directory = resolve(dirname(path), 'captures');
   let storageError = false, version = 0, disposed = false;
   let pendingWrite: ReturnType<typeof setTimeout> | undefined, restoreTimeout: ReturnType<typeof setTimeout> | undefined;
   let kept: { project: Project; index: number; inUse: boolean } | { projectId: string | null; item: DesktopItem; index: number }
     | { projectId: string; folder: ProjectFolder; index: number; items: string[] } | undefined;
+  let keptWritten = false;
   // The recovery copy retains the only key and references for its captures,
   // including after the replacement store reads successfully on a later launch.
   if (!status.readError && !status.memoryOnly) try {
@@ -206,19 +218,23 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
   const flush = () => {
     if (pendingWrite === undefined) return;
     clearTimeout(pendingWrite); pendingWrite = undefined;
-    try { writeDesktopStore(path, store, cipher); storageError = false; } catch { storageError = true; }
+    if (status.unread || status.memoryOnly) return;
+    try { writeDesktopStore(path, store, cipher); storageError = false; if (kept) keptWritten = true; }
+    catch { storageError = true; if (kept && !keptWritten) rollbackDelete(); }
     changed();
   };
   const persist = () => {
     version++;
-    if (!disposed && !status.memoryOnly && pendingWrite === undefined) pendingWrite = setTimeout(flush, 500);
+    if (!disposed && !status.memoryOnly && !status.unread && pendingWrite === undefined) pendingWrite = setTimeout(flush, 500);
   };
   const assertUnlocked = () => {
+    if (status.unread) throw new Error('DESKTOP_STORAGE_FAILED');
     if (!status.memoryOnly) return;
     if (!cipher.isEncryptionAvailable()) throw new Error('DESKTOP_LOCKED');
-    const nextStatus = { readError: false, memoryOnly: false };
+    const nextStatus = { readError: false, memoryOnly: false, unread: false };
     const reopened = readDesktopStore(path, cipher, nextStatus);
     if (nextStatus.memoryOnly) throw new Error('DESKTOP_LOCKED');
+    if (nextStatus.unread) throw new Error('DESKTOP_STORAGE_FAILED');
     Object.assign(store, reopened); Object.assign(status, nextStatus); version++; changed();
   };
   const get = (id: string) => {
@@ -235,18 +251,35 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
   const removeFiles = (items: DesktopItem[]) => {
     for (const entry of items) if (entry.image) { const file = regularCapture(directory, entry.image.filename); if (file) unlinkSync(file); }
   };
+  const rollbackDelete = () => {
+    if (!kept) return;
+    if ('project' in kept) {
+      store.projects.splice(kept.index, 0, kept.project); if (kept.inUse && store.inUse === null) store.inUse = kept.project.id;
+    } else if ('folder' in kept) {
+      const project = get(kept.projectId); project.folders.splice(kept.index, 0, kept.folder);
+      for (const item of project.items) if (kept.items.includes(item.id) && item.folder === null) item.folder = kept.folder.id;
+    } else collection(kept.projectId).splice(kept.index, 0, kept.item);
+    clearTimeout(restoreTimeout); restoreTimeout = undefined; kept = undefined; keptWritten = false; version++;
+  };
   const forget = () => {
     clearTimeout(restoreTimeout); restoreTimeout = undefined;
-    const previous = kept; kept = undefined;
-    if (previous && !('folder' in previous)) try { removeFiles('project' in previous ? previous.project.items : [previous.item]); } catch { storageError = true; changed(); }
+    // A later delete or expired undo must not discard a capture still referenced on disk.
+    if (kept && !keptWritten) flush();
+    const previous = kept, written = keptWritten; kept = undefined; keptWritten = false;
+    if (previous && written && !('folder' in previous)) try { removeFiles('project' in previous ? previous.project.items : [previous.item]); } catch { storageError = true; changed(); }
   };
-  const keep = (value: NonNullable<typeof kept>) => { forget(); kept = value; restoreTimeout = setTimeout(forget, 8000); };
+  const keep = (value: NonNullable<typeof kept>) => { kept = value; keptWritten = false; restoreTimeout = setTimeout(forget, 8000); };
   const uniqueName = (value: string, id?: string) => {
     const name = projectName(value);
     if (store.projects.some(project => project.id !== id && project.name.toLowerCase() === name.toLowerCase())) throw new Error('PROJECT_NAME_DUPLICATE');
     return name;
   };
-  const use = (id: string) => { const project = get(id); project.usedAt = Date.now(); store.inUse = id; persist(); };
+  const uniqueAddress = (name: string, id?: string) => {
+    const address = desktopAddress(name);
+    if (address === 'horizon://desktop/captures' || store.projects.some(project => project.id !== id && desktopAddress(project.name) === address)) throw new Error('PROJECT_ADDRESS_CONFLICT');
+    return name;
+  };
+  const use = (id: string) => { assertUnlocked(); const project = get(id); project.usedAt = Date.now(); store.inUse = id; persist(); };
   const folder = (project: string, id: string) => {
     const entry = get(project).folders.find(folder => folder.id === id);
     if (!entry) throw new Error('FOLDER_NOT_FOUND');
@@ -276,6 +309,11 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
   return {
     get, item, folder, use, forget, flush, assertUnlocked, list: () => store.projects, captureList: () => store.captures,
     retry: () => {
+      if (status.unread) {
+        const nextStatus = { readError: false, memoryOnly: false, unread: false }, reopened = readDesktopStore(path, cipher, nextStatus);
+        if (nextStatus.unread) throw new Error('DESKTOP_STORAGE_FAILED');
+        Object.assign(store, reopened); Object.assign(status, nextStatus); version++; changed();
+      }
       assertUnlocked();
       persist(); flush();
       if (storageError) throw new Error('DESKTOP_STORAGE_FAILED');
@@ -298,14 +336,14 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
     image: (project: string | null, id: string) => readCaptureFile(directory, store.key, item(project, id)),
     create: (value: string) => {
       assertUnlocked();
-      const name = uniqueName(value);
+      const name = uniqueAddress(uniqueName(value));
       if (store.projects.length >= PROJECT_LIMIT) throw new Error('PROJECT_LIMIT');
       const now = Date.now(), project: Project = { id: randomUUID(), name, createdAt: now, updatedAt: now, usedAt: now, folders: [], items: [] };
       store.projects.push(project); use(project.id); return project;
     },
-    rename: (id: string, value: string) => { assertUnlocked(); const project = get(id); project.name = uniqueName(value, id); project.updatedAt = Date.now(); persist(); },
+    rename: (id: string, value: string) => { assertUnlocked(); const project = get(id); project.name = uniqueAddress(uniqueName(value, id), id); project.updatedAt = Date.now(); persist(); },
     delete: (id: string) => {
-      assertUnlocked();
+      assertUnlocked(); forget();
       const project = get(id); keep({ project, index: store.projects.indexOf(project), inUse: store.inUse === id });
       store.projects.splice(store.projects.indexOf(project), 1); if (store.inUse === id) store.inUse = null; persist();
     },
@@ -316,7 +354,7 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
     },
     renameFolder: (project: string, id: string, value: string) => { assertUnlocked(); const entry = folder(project, id); entry.name = uniqueFolder(project, value, id); touch(project); },
     deleteFolder: (project: string, id: string) => {
-      assertUnlocked(); const parent = get(project), entry = folder(project, id);
+      assertUnlocked(); forget(); const parent = get(project), entry = folder(project, id);
       keep({ projectId: project, folder: entry, index: parent.folders.indexOf(entry), items: parent.items.filter(item => item.folder === id).map(item => item.id) });
       parent.folders.splice(parent.folders.indexOf(entry), 1); for (const item of parent.items) if (item.folder === id) item.folder = null; touch(project);
     },
@@ -370,7 +408,7 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
       Object.assign(entry, next); touch(project);
     },
     deleteItem: (projectId: string | null, id: string) => {
-      assertUnlocked(); const entries = collection(projectId), entry = item(projectId, id); keep({ projectId, item: entry, index: entries.indexOf(entry) });
+      assertUnlocked(); forget(); const entries = collection(projectId), entry = item(projectId, id); keep({ projectId, item: entry, index: entries.indexOf(entry) });
       entries.splice(entries.indexOf(entry), 1); touch(projectId);
     },
     restore: () => {
@@ -399,8 +437,9 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
     dispose: (discard = false) => {
       disposed = true;
       // Pending deletions become orphans after quit; never let a deleted profile's timer recreate its folder.
-      clearTimeout(restoreTimeout); restoreTimeout = undefined; kept = undefined;
+      clearTimeout(restoreTimeout); restoreTimeout = undefined;
       if (discard) { clearTimeout(pendingWrite); pendingWrite = undefined; } else flush();
+      kept = undefined; keptWritten = false;
     },
   };
 }

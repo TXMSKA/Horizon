@@ -109,9 +109,10 @@ export function writeStoreFile(path: string, store: unknown, cipher?: StoreCiphe
   }
 }
 
-export function readStoreFile(path: string, cipher?: StoreCipher): unknown {
+export function readStoreFile(path: string, cipher?: StoreCipher, read?: () => void): unknown {
   if (statSync(path).size > STORE_LIMIT) throw new Error('Browser store exceeds size limit');
   const bytes = readFileSync(path);
+  read?.();
   const encrypted = bytes.subarray(0, encryptedHeader.length).equals(encryptedHeader);
   return JSON.parse(encrypted ? cipher!.decryptString(bytes.subarray(encryptedHeader.length)) : bytes.toString('utf8'));
 }

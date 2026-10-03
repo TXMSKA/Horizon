@@ -630,6 +630,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .desktop-capture-card { position: relative; width: var(--width-desktop-capture); display: flex; flex-direction: column; gap: var(--space-8); }
 .desktop-capture-caption .desktop-small-link { text-align: start; height: var(--space-20); }
 .desktop-capture-caption { display: flex; flex-direction: column; gap: var(--space-2); }
+.desktop-capture-caption > .desktop-dropdown { display: flex; }
 .desktop-capture-caption > strong { font-size: var(--type-label); line-height: var(--line-label); font-weight: normal; color: var(--text-title); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .desktop-tab { display: flex; height: 100%; min-height: 0; }
 .desktop-rail { display: flex; flex-direction: column; gap: var(--space-8); width: var(--width-desktop-rail); padding: var(--space-20); flex: none; overflow-y: auto; background: var(--surface-raised); border-inline-end: var(--border-width) solid var(--divider); }

@@ -16,6 +16,58 @@ const { randomUUID, createCipheriv, createDecipheriv } = require('node:crypto');
 const { contextMenuGroups, PageMenuSession } = require('../dist/electron/context-menu.js');
 const { PermissionQueue, defaultPermissions, requestedPermissions, setPermission, setBlocking, setSiteDark, siteSettings, stripCookieHeaders, cookieSite, secureOrigin, SITE_SETTINGS_LIMIT } = require('../dist/electron/site-settings.js');
 const testTemporaryRoot = resolve(process.env.HORIZON_TEST_TEMP ?? '.runtime');
+require('./desktop-recovery.test.cjs');
+require('./popup-position.test.cjs');
+
+test('Desktop paste uses drop validation and saves a link or text in the chosen project folder', t => {
+  const { readDesktopTransfer } = require('../dist/src/shared/desktop-drag.js');
+  const { createDesktop } = require('../dist/electron/desktop.js');
+  const path = join(temporaryDirectory(t, 'desktop-paste'), 'notebooks.json');
+  const desktop = createDesktop(path, plainCipher, () => {}), project = desktop.create('Pasted project');
+  t.after(() => desktop.dispose());
+  const folder = desktop.createFolder(project.id, 'Links').id;
+  const state = { activeProfileId: 'profile', tabs: [] };
+  const transfer = (values, types = Object.keys(values)) => ({ types, getData(type) {
+    assert.notEqual(type, 'text/html'); return values[type] ?? '';
+  } });
+  for (const value of ['https://example.com/pasted', 'Budget: accommodation and car\nSecond line']) {
+    const item = readDesktopTransfer(transfer({ 'text/plain': value }, ['text/plain', 'text/html']), state, null, undefined, true);
+    const command = item.kind === 'link' ? { type: 'add-link', project: project.id, folder, address: item.address, title: item.title }
+      : { type: 'add-text', project: project.id, folder, text: item.text, source: item.source };
+    assert.deepEqual(validateCommand(command, undefined, desktop.list()), command);
+    if (item.kind === 'link') desktop.addLink(project.id, folder, item.address, item.title);
+    else { assert.equal(item.source, null); desktop.addText(project.id, folder, item.text, item.source); }
+  }
+  for (const values of [
+    { 'text/plain': 'javascript:alert(1)' }, { 'text/plain': 'https://user:password@example.com/' },
+    { 'text/plain': 'x'.repeat(100001) }, { 'text/plain': 'control\u0001' },
+    { 'text/uri-list': 'https://example.com/\nhttps://example.org/' }, { 'text/html': '<a href="https://example.com/">HTML only</a>' },
+  ]) {
+    const errors = [];
+    assert.equal(readDesktopTransfer(transfer(values), state, null, reason => errors.push(reason), true), null);
+    assert.equal(errors.length, 1);
+  }
+  assert.equal(readDesktopTransfer(transfer({ 'text/plain': 'image.png' }, ['Files', 'text/plain']), state, null, undefined, true), null);
+  desktop.flush();
+  const reopened = createDesktop(path, plainCipher, () => {}); t.after(() => reopened.dispose());
+  assert.deepEqual(reopened.get(project.id).items.map(item => [item.kind, item.folder]), [['link', folder], ['text', folder]]);
+});
+
+test('Desktop transfer rejection explains the refusal and paste instructions stay bilingual', () => {
+  const { parseDesktopDrag } = require('../dist/src/shared/desktop-drag.js');
+  const { copy } = interfaceModule('src/copy.ts');
+  for (const [data, expected] of [
+    [{ uriList: 'https://example.com/\nhttps://example.org/' }, 'DESKTOP_DROP_MULTIPLE_LINKS'],
+    [{ text: 'file:///private' }, 'DESKTOP_DROP_LINK_INVALID'],
+    [{ text: 'x'.repeat(100001) }, 'DESKTOP_DROP_TEXT_INVALID'],
+    [{ text: '' }, 'DESKTOP_DROP_UNSUPPORTED'],
+  ]) {
+    const errors = []; assert.equal(parseDesktopDrag(data, error => errors.push(error)), null); assert.deepEqual(errors, [expected]);
+  }
+  for (const key of ['desktopPasteHint', 'PROJECT_ADDRESS_CONFLICT', 'DESKTOP_DROP_LINK_INVALID', 'DESKTOP_DROP_TEXT_INVALID', 'DESKTOP_DROP_MULTIPLE_LINKS', 'DESKTOP_DROP_UNSUPPORTED', 'DESKTOP_DROP_TAB_INVALID']) {
+    for (const language of ['en', 'es']) assert.ok(copy[key][language].trim());
+  }
+});
 
 test('Desktop drag parser keeps links, tabs and image addresses using only plain data', () => {
   const { parseDesktopDrag } = require('../dist/src/shared/desktop-drag.js');
@@ -3544,7 +3596,7 @@ test('notebook tabs are chrome pages, remain consistent across editing and never
 
 test('capture commands save all three kinds to the current profile and image IPC exposes bytes without paths', async t => {
   const browser = notebookBrowser(t), { state, command, notebook, image, handlers, event, window } = browser;
-  command({ type: 'create-project', name: 'Captures' }); const id = state().projectInUse;
+  command({ type: 'create-project', name: 'Screenshots' }); const id = state().projectInUse;
   await assert.rejects(command({ type: 'save-capture', project: id, kind: 'area', rect: { x: 0, y: 0, width: 20, height: 20 } }), /CAPTURE_UNAVAILABLE/);
   browser.navigate(); const view = browser.views[0]; window.webContents.zoom = 1.5; browser.area(true);
   await command({ type: 'save-capture', project: id, kind: 'text' });
@@ -4054,7 +4106,7 @@ test('notebook storage Retry writes existing contents without another capture an
   assert.equal(runtime.state().desktopStorageError, true); assert.throws(() => runtime.retry(), /DESKTOP_STORAGE_FAILED/);
   require('node:fs').unlinkSync(blocked); runtime.retry(); assert.equal(runtime.state().desktopStorageError, false);
   const saved = readDesktopStore(join(blocked, 'notebooks.json')); assert.equal(saved.projects[0].items.length, 1); assert.equal(saved.projects[0].items[0].text, 'Keep this text'); runtime.dispose();
-  const browser = notebookBrowser(t); browser.command({ type: 'create-project', name: 'Captures' }); browser.navigate();
+  const browser = notebookBrowser(t); browser.command({ type: 'create-project', name: 'Screenshots' }); browser.navigate();
   const id = browser.state().projectInUse;
   return browser.command({ type: 'save-capture', project: id, kind: 'text' }).then(() => {
     const before = browser.notebook(id); browser.command({ type: 'retry-desktop-storage' }); assert.deepEqual(browser.notebook(id).items, before.items); browser.close();
@@ -4637,20 +4689,21 @@ test('address bar project suggestions use the exact public Desktop addresses', t
 });
 
 
-test('Desktop menus stay six pixels under their control inside the panel and resize without stale bounds', () => {
+test('Desktop menus choose the roomier side inside the panel and resize without stale bounds', () => {
   const hooks = notebookTestHooks(), positioned = new Map(), callbacks = new Map(); let resize;
-  const panel = { getBoundingClientRect: () => ({ left: 1040, right: 1440 }) }, trigger = { right: 1234, bottom: 410 };
+  const panel = { getBoundingClientRect: () => ({ left: 1040, right: 1440 }) }, trigger = { right: 1234, top: 378, bottom: 410 };
   const opener = { current: { getBoundingClientRect: () => trigger, closest: () => panel } };
-  const { PopupAnchor } = interfaceModule('src/PopupAnchor.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node } }, {
+  const { PopupAnchor } = interfaceModule('src/PopupAnchor.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, './shared/popup-position': require('../dist/src/shared/popup-position.js') }, {
     document: { body: {} }, innerWidth: 1440, innerHeight: 900,
     getComputedStyle: element => element === panel ? { paddingInlineEnd: '20px' } : { getPropertyValue: () => '6px' },
     window: { addEventListener: (name, callback) => callbacks.set(name, callback), removeEventListener: name => callbacks.delete(name) },
     ResizeObserver: class { constructor(callback) { resize = callback; } observe() {} disconnect() {} },
   });
   const tree = hooks.render(() => PopupAnchor({ opener, children: 'menu' }));
-  tree.props.ref.current = { getBoundingClientRect: () => ({ width: 360 }), style: { setProperty: (key, value) => positioned.set(key, value) } };
+  tree.props.ref.current = { getBoundingClientRect: () => ({ width: 360, height: 200 }), style: { setProperty: (key, value) => positioned.set(key, value) } };
   hooks.flush(); assert.equal(positioned.get('left'), '1060px'); assert.equal(positioned.get('top'), '416px'); assert.equal(positioned.get('max-height'), '484px');
-  trigger.bottom = 80; resize(); assert.equal(positioned.get('max-height'), '814px'); hooks.dispose(); assert.equal(callbacks.size, 0);
+  trigger.top = 800; trigger.bottom = 832; resize(); assert.equal(positioned.get('top'), '594px'); assert.equal(positioned.get('max-height'), '794px');
+  trigger.top = 48; trigger.bottom = 80; resize(); assert.equal(positioned.get('top'), '86px'); assert.equal(positioned.get('max-height'), '814px'); hooks.dispose(); assert.equal(callbacks.size, 0);
 });
 
 test('deleting Desktop items returns to their collection and exposes Undo only after success', async () => {
@@ -4736,15 +4789,15 @@ test('link and action chooser openers keep menus without field decorations', () 
 });
 
 test('capture chooser follows the whole bar width and opens six pixels below it', () => {
-  const hooks = notebookTestHooks(), positioned = new Map(); let resize, bounds = { left: 507, right: 948, bottom: 170, width: 441 };
+  const hooks = notebookTestHooks(), positioned = new Map(); let resize, bounds = { left: 507, right: 948, top: 138, bottom: 170, width: 441 };
   const anchor = { current: { getBoundingClientRect: () => bounds } }, opener = { current: { closest: () => null } };
-  const { PopupAnchor } = interfaceModule('src/PopupAnchor.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node } }, {
+  const { PopupAnchor } = interfaceModule('src/PopupAnchor.tsx', { react: hooks.react, 'react-dom': { createPortal: node => node }, './shared/popup-position': require('../dist/src/shared/popup-position.js') }, {
     document: { body: {} }, innerWidth: 1455, innerHeight: 900, getComputedStyle: () => ({ getPropertyValue: () => '6px' }),
     window: { addEventListener() {}, removeEventListener() {} }, ResizeObserver: class { constructor(callback) { resize = callback; } observe() {} disconnect() {} },
   });
   const tree = hooks.render(() => PopupAnchor({ opener, anchor, children: 'chooser' }));
-  tree.props.ref.current = { style: { setProperty: (key, value) => positioned.set(key, value) }, getBoundingClientRect: () => ({ width: Number.parseFloat(positioned.get('width')) }) };
+  tree.props.ref.current = { style: { setProperty: (key, value) => positioned.set(key, value) }, getBoundingClientRect: () => ({ width: Number.parseFloat(positioned.get('width')), height: 200 }) };
   hooks.flush(); assert.equal(positioned.get('width'), '441px'); assert.equal(positioned.get('left'), '507px'); assert.equal(positioned.get('top'), '176px');
-  bounds = { left: 480, right: 980, bottom: 180, width: 500 }; resize();
+  bounds = { left: 480, right: 980, top: 148, bottom: 180, width: 500 }; resize();
   assert.equal(positioned.get('width'), '500px'); assert.equal(positioned.get('left'), '480px'); assert.equal(positioned.get('top'), '186px'); hooks.dispose();
 });

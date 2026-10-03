@@ -514,7 +514,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const closeDesktopNotice = useCallback(() => setDesktopNotice(null), []);
   const [addedItem, setAddedItem] = useState<{ profile: string; project: string; id: string } | null>(null);
   useEffect(() => { if (addedItem) { const timer = window.setTimeout(() => setAddedItem(null), 8000); return () => window.clearTimeout(timer); } }, [addedItem]);
-  const desktopProps = state ? { state, language, edits, readOnly: desktopLeaving, run, onPage: openDesktopPanel, onDelete: deleteDesktopEntry, onModalChange: setDesktopModalOpen, addedItem, onDropped: (project: string, id: string) => setAddedItem({ profile: state.activeProfileId, project, id }) } : null;
+  const desktopProps = state ? { state, language, edits, readOnly: desktopLeaving, run, onPage: openDesktopPanel, onDelete: deleteDesktopEntry, onModalChange: setDesktopModalOpen, addedItem, onDropped: (project: string, id: string) => setAddedItem({ profile: state.activeProfileId, project, id }), onRejected: (message: string) => setDesktopNotice({ message, failure: true }) } : null;
 
   return <>
     <div className="visually-hidden" role="status" aria-live="polite">{announcement}</div>
