@@ -39,9 +39,12 @@ export function Menu({ id, label, keyboard, point, opener, onDismiss, children, 
   }, [opener]);
   return <div id={id} className={`browser-menu${point ? ' page-context-menu' : ''} ${className}`} ref={ref} role="menu" tabIndex={-1} aria-label={label} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss.current('escape'); return; }
+    if ((event.target as HTMLElement)?.tagName === 'INPUT' && !['ArrowDown', 'ArrowUp', 'Tab'].includes(event.key)) return;
     if (event.key === 'Tab') { dismiss.current('tab'); return; }
     const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('[role^=menuitem]:not(:disabled), [role=switch]:not(:disabled)') ?? [])];
     const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    const filter = ref.current?.querySelector<HTMLInputElement>('input:not(:disabled)');
+    if (filter && (event.key === 'ArrowUp' && index === 0 || event.key === 'ArrowDown' && index === items.length - 1)) { event.preventDefault(); filter.focus(); return; }
     const next = event.key === 'ArrowDown' ? (index + 1) % items.length : event.key === 'ArrowUp' ? index < 0 ? items.length - 1 : (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : -1;
     if (next < 0 || !items.length) return;
     event.preventDefault(); items[next]?.focus();

@@ -27,6 +27,7 @@
   --palette-amber-cyan: #8dbec5;
   --palette-amber-info: #a3b2dc;
   --palette-amber-overlay: rgba(0, 0, 0, 0.6);
+  --palette-amber-capture-veil: rgba(0, 0, 0, 0.45);
   --palette-amber-shadow: #000000;
   --palette-amber-cover-from: #46403c;
   --palette-amber-cover-to: #121110;
@@ -68,6 +69,7 @@
   --palette-daylight-cyan: #3f686e;
   --palette-daylight-info: #3e5082;
   --palette-daylight-overlay: rgba(59, 54, 49, 0.24);
+  --palette-daylight-capture-veil: rgba(59, 54, 49, 0.28);
   --palette-daylight-shadow: #cdc8c3;
   --palette-daylight-cover-from: #e1dedb;
   --palette-daylight-cover-to: #f4f2f0;
@@ -110,6 +112,7 @@
   --palette-contrast-dark-cyan: #88dfeb;
   --palette-contrast-dark-info: #b3c7ff;
   --palette-contrast-dark-overlay: rgba(0, 0, 0, 0.8);
+  --palette-contrast-dark-capture-veil: rgba(0, 0, 0, 0.6);
   --palette-contrast-dark-shadow: #000000;
   --palette-contrast-dark-cover-from: #262626;
   --palette-contrast-dark-cover-to: #000000;
@@ -152,6 +155,7 @@
   --palette-contrast-light-cyan: #00535f;
   --palette-contrast-light-info: #1d4592;
   --palette-contrast-light-overlay: rgba(0, 0, 0, 0.4);
+  --palette-contrast-light-capture-veil: rgba(0, 0, 0, 0.35);
   --palette-contrast-light-shadow: #000000;
   --palette-contrast-light-cover-from: #f0f0f0;
   --palette-contrast-light-cover-to: #ffffff;
@@ -220,16 +224,30 @@
   --color-transparent: transparent;
 }
 
-:root[data-theme="amber"] { color-scheme: dark; }
+:root[data-theme="amber"] { color-scheme: dark; --surface-capture-veil: var(--palette-amber-capture-veil); }
 :root[data-theme="daylight"] { color-scheme: only light; }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="daylight"]):not([data-theme="amber"]) { color-scheme: dark; }
+  :root:not([data-theme="daylight"]):not([data-theme="amber"]) { color-scheme: dark; --surface-capture-veil: var(--palette-amber-capture-veil); }
+  :root[data-contrast="high"]:not([data-theme="daylight"]):not([data-theme="amber"]) { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }
 }
 
 :root {
   color-scheme: only light;
   --surface-page: light-dark(var(--palette-daylight-page), var(--palette-amber-page));
+  /* Scene translucency is not an opaque control/text contrast surface. */
+  --surface-capture-veil: var(--palette-daylight-capture-veil);
+  --surface-capture-selection: color-mix(in srgb, var(--accent) 8%, var(--color-transparent));
+  --height-capture-bar: 3rem;
+  --capture-bar-offset: 18.125rem;
+  --notebook-anchor-gap: 4px;
+  --width-notebook-list: 22.5rem;
+  --padding-notebook-block: 1.75rem;
+  --padding-notebook-inline: 3rem;
+  --type-notebook-title: 1.375rem;
+  --height-notebook-text: 18.75rem;
+  --height-notebook-annotation: 6.25rem;
+  --width-notebook-toast: 36rem;
   --surface-chrome: light-dark(var(--palette-daylight-chrome), var(--palette-amber-chrome));
   --surface-raised: light-dark(var(--palette-daylight-surface), var(--palette-amber-surface));
   --surface-sunken: light-dark(var(--palette-daylight-surface-2), var(--palette-amber-surface-2));
@@ -356,6 +374,7 @@
   --type-caption: var(--font-12);
   --type-label: var(--font-14);
   --type-body: var(--font-16);
+  --type-name-field: var(--font-16);
   --type-display: var(--size-30);
   --weight-label: var(--weight-500);
   --line-caption: 1.0625rem;
@@ -399,6 +418,7 @@
 }
 
 :root[data-contrast="high"] {
+  --surface-capture-veil: var(--palette-contrast-light-capture-veil);
   --profile-amber: light-dark(var(--palette-contrast-light-primary), var(--palette-contrast-dark-primary));
   --profile-blue: light-dark(var(--palette-contrast-light-info), var(--palette-contrast-dark-info));
   --profile-green: light-dark(var(--palette-contrast-light-success), var(--palette-contrast-dark-success));
@@ -440,3 +460,5 @@
   --on-accent: light-dark(var(--palette-contrast-light-on-primary), var(--palette-contrast-dark-on-primary));
   --switch-edge: light-dark(var(--palette-contrast-light-line-strong), var(--palette-contrast-dark-line-strong));
 }
+
+:root[data-contrast="high"][data-theme="amber"] { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }

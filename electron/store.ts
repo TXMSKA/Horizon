@@ -30,7 +30,7 @@ export interface StoreCipher { isEncryptionAvailable(): boolean; encryptString(v
 export interface StoreReadStatus { readError: boolean; memoryOnly: boolean }
 const encryptedHeader = Buffer.from('HORIZON-STORE-1\n');
 const STORE_LIMIT = 64 * 1024 * 1024;
-function encryptedStore(path: string): boolean {
+export function encryptedStore(path: string): boolean {
   const file = openSync(path, 'r');
   try {
     const header = Buffer.alloc(encryptedHeader.length);
@@ -83,6 +83,10 @@ export function validateStore(value: unknown): value is BrowserStore {
 
 export function writeStore(path: string, store: BrowserStore, cipher?: StoreCipher): void {
   if (!validateStore(store)) throw new Error('Invalid browser store');
+  writeStoreFile(path, store, cipher);
+}
+
+export function writeStoreFile(path: string, store: unknown, cipher?: StoreCipher): void {
   const encryption = Boolean(cipher?.isEncryptionAvailable());
   if (!encryption && existsSync(path) && encryptedStore(path)) {
     throw new Error('Store encryption is unavailable');
@@ -100,6 +104,13 @@ export function writeStore(path: string, store: BrowserStore, cipher?: StoreCiph
   }
 }
 
+export function readStoreFile(path: string, cipher?: StoreCipher): unknown {
+  if (statSync(path).size > STORE_LIMIT) throw new Error('Browser store exceeds size limit');
+  const bytes = readFileSync(path);
+  const encrypted = bytes.subarray(0, encryptedHeader.length).equals(encryptedHeader);
+  return JSON.parse(encrypted ? cipher!.decryptString(bytes.subarray(encryptedHeader.length)) : bytes.toString('utf8'));
+}
+
 export function readStore(path: string, cipher?: StoreCipher, status: StoreReadStatus = { readError: false, memoryOnly: false }): BrowserStore {
   const empty: BrowserStore = { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } };
   try {
@@ -114,11 +125,8 @@ export function readStore(path: string, cipher?: StoreCipher, status: StoreReadS
         status.readError = true; status.memoryOnly = true;
         return empty;
       }
-      if (statSync(path).size > STORE_LIMIT) throw new Error('Browser store exceeds size limit');
-      const bytes = readFileSync(path);
-      const encrypted = bytes.subarray(0, encryptedHeader.length).equals(encryptedHeader);
-      const json = encrypted ? cipher!.decryptString(bytes.subarray(encryptedHeader.length)) : bytes.toString('utf8');
-      const value: unknown = JSON.parse(json);
+      const encrypted = encryptedStore(path);
+      const value = readStoreFile(path, cipher);
       if (legacyStore(value)) {
         store = { ...value, version: 3, siteSettings: { blocking: [], dark: [], permissions: [] } }; upgrade = true;
       } else if (legacySiteStore(value)) {

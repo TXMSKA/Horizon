@@ -10,7 +10,9 @@ Amber and Daylight are app-wide themes. Choose either one or System, with
 an optional high-contrast palette. Language follows the system locale:
 Spanish or English, with English for other locales.
 
-Notebooks and Lyra are still previews.
+Notebooks keep personal notes, selected text, area captures and whole-page
+captures locally, with encrypted capture images. Resume a notebook from the
+start page or find it through the address bar. Lyra is still a preview.
 
 ## Run
 

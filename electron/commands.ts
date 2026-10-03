@@ -1,9 +1,10 @@
-import type { BrowserCommand, ContentArea } from '../src/shared/api';
+import type { BrowserCommand, ContentArea, Notebook } from '../src/shared/api';
 import { isWebURL } from './browsing';
 import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission } from './site-settings';
+import { notebookName, notebookText } from './notebooks';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid browser argument');
@@ -15,11 +16,43 @@ function string(value: unknown, maximum: number, empty = false): value is string
 function keys(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected browser argument');
 }
-export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>): BrowserCommand {
+export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, notebooks: readonly Notebook[] = []): BrowserCommand {
   const command = object(value);
   const type = command.type;
   let valid = false;
+  const notebook = (id: unknown) => isProfileId(id) && notebooks.some(notebook => notebook.id === id);
+  const item = (id: unknown, item: unknown) => notebook(id) && isProfileId(item) && notebooks.some(notebook => notebook.id === id && notebook.items.some(entry => entry.id === item));
   switch (type) {
+    case 'retry-notebook-storage': keys(command, ['type']); valid = Object.keys(command).length === 1 && Object.hasOwn(command, 'type'); break;
+    case 'create-notebook': case 'rename-notebook':
+      keys(command, type === 'create-notebook' ? ['type', 'name'] : ['type', 'id', 'name']); notebookName(command.name);
+      valid = Object.keys(command).length === (type === 'create-notebook' ? 2 : 3) && (type === 'create-notebook' || notebook(command.id)); break;
+    case 'delete-notebook': case 'set-notebook':
+      keys(command, ['type', 'id']); valid = Object.keys(command).length === 2 && notebook(command.id); break;
+    case 'open-notebook':
+      keys(command, ['type', 'id', 'item']); valid = Object.hasOwn(command, 'id') && Object.keys(command).length === (Object.hasOwn(command, 'item') ? 3 : 2)
+        && notebook(command.id) && (!Object.hasOwn(command, 'item') || item(command.id, command.item)); break;
+    case 'add-note':
+      keys(command, ['type', 'notebook', 'title', 'text']); valid = Object.keys(command).length === 4 && notebook(command.notebook)
+        && notebookText(command.title, 200) && notebookText(command.text, 100000); break;
+    case 'update-notebook-item':
+      keys(command, ['type', 'notebook', 'id', 'title', 'text', 'note']);
+      valid = Object.hasOwn(command, 'notebook') && Object.hasOwn(command, 'id') && item(command.notebook, command.id) && ['title', 'text', 'note'].some(key => Object.hasOwn(command, key))
+        && (!Object.hasOwn(command, 'title') || notebookText(command.title, 200))
+        && (!Object.hasOwn(command, 'text') || notebookText(command.text, 100000))
+        && (!Object.hasOwn(command, 'note') || notebookText(command.note, 20000)); break;
+    case 'delete-notebook-item':
+      keys(command, ['type', 'notebook', 'id']); valid = Object.keys(command).length === 3 && item(command.notebook, command.id); break;
+    case 'save-capture': {
+      keys(command, command.kind === 'area' ? ['type', 'notebook', 'kind', 'rect'] : ['type', 'notebook', 'kind']);
+      valid = Object.keys(command).length === (command.kind === 'area' ? 4 : 3) && notebook(command.notebook) && (command.kind === 'text' || command.kind === 'page' || command.kind === 'area');
+      if (command.kind === 'area') {
+        const rect = object(command.rect); keys(rect, ['x', 'y', 'width', 'height']);
+        valid &&= Object.keys(rect).length === 4 && ['x', 'y', 'width', 'height'].every(key => typeof rect[key] === 'number' && Number.isFinite(rect[key]) && Math.abs(rect[key] as number) <= 100000)
+          && (rect.width as number) > 0 && (rect.height as number) > 0;
+      }
+      break;
+    }
     case 'set-blocking': case 'set-site-dark': keys(command, ['type', 'enabled']); valid = Object.keys(command).length === 2 && typeof command.enabled === 'boolean'; break;
     case 'set-site-permission':
       keys(command, ['type', 'permission', 'decision']); valid = Object.keys(command).length === 3 && isSitePermission(command.permission) && isPermissionDecision(command.decision); break;
@@ -55,7 +88,7 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
       keys(command, ['type', 'url', 'title']); valid = isWebURL(command.url) && string(command.title, 1024); break;
     case 'delete-history': case 'delete-bookmark': keys(command, ['type', 'url']); valid = isWebURL(command.url); break;
     case 'restore':
-      keys(command, ['type', 'kind']); valid = command.kind === 'history' || command.kind === 'bookmarks' || command.kind === 'downloads'; break;
+      keys(command, ['type', 'kind']); valid = command.kind === 'history' || command.kind === 'bookmarks' || command.kind === 'downloads' || command.kind === 'notebooks'; break;
     case 'back': case 'forward': case 'reload': case 'stop': case 'bookmark': case 'focus-page': case 'stop-find': case 'clear-history': case 'open-downloads-folder':
       keys(command, ['type']); valid = true; break;
   }
