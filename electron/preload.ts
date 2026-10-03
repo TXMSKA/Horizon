@@ -18,7 +18,7 @@ const api: HorizonAPI = Object.freeze({
   getFavicon: (id: string, hash: string) => ipcRenderer.invoke('horizon:favicon', id, hash) as Promise<Uint8Array | null>,
   getNotebook: (id: string) => ipcRenderer.invoke('horizon:notebook', id) as Promise<NotebookContent>,
   getCaptureImage: (notebook: string, item: string) => ipcRenderer.invoke('horizon:capture-image', notebook, item) as Promise<Uint8Array | null>,
-  command: (command: BrowserCommand) => ipcRenderer.invoke('horizon:command', command) as Promise<void>,
+  command: ((command: BrowserCommand) => ipcRenderer.invoke('horizon:command', command)) as HorizonAPI['command'],
   setContentArea: (area: ContentArea) => ipcRenderer.invoke('horizon:content-area', area) as Promise<void>,
   onState: (callback: (state: BrowserState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, state: BrowserState) => callback(state);

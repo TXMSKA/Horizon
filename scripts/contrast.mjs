@@ -51,6 +51,7 @@ for (const [theme, variables, light] of [['amber', standard, false], ['daylight'
     if (minimum < Infinity) console.log(`${theme}: ${role} minimum ${minimum.toFixed(2)}:1 (required ${threshold}:1)`);
   }
   check('on-accent', 'accent', 4.5);
+  for (const colour of roles.filter(key => key.startsWith('profile-'))) check('on-accent', colour, 4.5);
 }
 if (failed) process.exit(1);
 console.log(`${checks} contrast pairs passed across four palettes.`);

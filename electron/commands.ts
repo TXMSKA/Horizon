@@ -1,9 +1,9 @@
 import type { BrowserCommand, ContentArea, Notebook } from '../src/shared/api';
 import { isWebURL } from './browsing';
-import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme } from './settings';
+import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
-import { isPermissionDecision, isSitePermission } from './site-settings';
+import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
 import { notebookName, notebookText } from './notebooks';
 
 function object(value: unknown): Record<string, unknown> {
@@ -19,6 +19,22 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
 export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, notebooks: readonly Notebook[] = []): BrowserCommand {
   const command = object(value);
   const type = command.type;
+  const settingsCommands = ['open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'register-default-browser'];
+  if (settingsCommands.includes(type as string)) {
+    let allowed: string[] = ['type'];
+    let valid = false;
+    switch (type) {
+      case 'open-settings': allowed.push('section'); valid = ['general', 'appearance', 'privacy', 'privacy/sites', 'profiles'].includes(command.section as string); break;
+      case 'set-search-engine': allowed.push('value'); valid = isSearchEngine(command.value); break;
+      case 'set-language': allowed.push('value'); valid = isLanguageSetting(command.value); break;
+      case 'set-ask-where-to-save': case 'set-block-ads': case 'set-block-third-party-cookies': case 'set-clear-history-on-close': case 'set-clear-cache-on-close': allowed.push('value'); valid = typeof command.value === 'boolean'; break;
+      case 'reset-site': allowed.push('host'); valid = validHost(command.host); break;
+      case 'clear-browsing-data': allowed = ['type', 'history', 'cookies', 'cache']; valid = ['history', 'cookies', 'cache'].every(key => typeof command[key] === 'boolean') && (command.history === true || command.cookies === true || command.cache === true); break;
+      default: valid = true;
+    }
+    if (!valid || Object.keys(command).length !== allowed.length || !allowed.every(key => Object.hasOwn(command, key))) throw new Error('SETTINGS_COMMAND_INVALID');
+    return value as BrowserCommand;
+  }
   let valid = false;
   const notebook = (id: unknown) => isProfileId(id) && notebooks.some(notebook => notebook.id === id);
   const item = (id: unknown, item: unknown) => notebook(id) && isProfileId(item) && notebooks.some(notebook => notebook.id === id && notebook.items.some(entry => entry.id === item));

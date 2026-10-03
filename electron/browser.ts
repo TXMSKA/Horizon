@@ -1,22 +1,26 @@
-import { app, clipboard, ipcMain, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
+import { app, clipboard, dialog, ipcMain, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
 import type { BrowserWindow, DownloadItem, Session, WebContents, WebPreferences } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { IPC } from '../src/shared/api';
-import type { BrowserCommand, BrowserState, BrowserStore, ContentArea, NotebookItem, Profile, TabState } from '../src/shared/api';
+import { IPC, SEARCH_ENGINES } from '../src/shared/api';
+import type { BrowserCommand, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, NotebookItem, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserShortcut } from '../src/shared/shortcuts';
-import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName } from './browsing';
+import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName, settingsAddress, settingsSection } from './browsing';
 import { readStore, reserveDownloadPath, writeStore } from './store';
 import { validateSender } from './security';
 import { validateCommand, validateContentArea } from './commands';
 import { fetchFavicon } from './favicon';
 import type { ThemeSettings } from './settings';
+import { resolvedDownloadsFolder, resolveLanguage } from './settings';
+import { createDefaultBrowser } from './default-browser';
+import { isLocalHTMLURL } from './launch';
+import { clearBeforeDeadline } from './browsing-data';
 import { PageMenuSession } from './context-menu';
 import { cleanupPartitions, isProfileId, makeProfile, migrateStore, PROFILE_LIMIT, profileName, profileStorePath, readRegistry, removeProfileDirectory, writeRegistry } from './profiles';
 import type { ProfileRegistry } from './profiles';
 import { createBlockingEngine } from './blocking';
-import { PermissionQueue, requestedPermissions, secureOrigin, setBlocking, setPermission, setSiteDark, siteSettings, stripCookieHeaders } from './site-settings';
+import { listSites, PermissionQueue, requestedPermissions, resetSite, secureOrigin, setBlocking, setPermission, setSiteDark, siteHost, siteSettings, stripCookieHeaders } from './site-settings';
 import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages';
 import { createNotebooks } from './notebooks';
 import { captureRectangle, captureSelection, captureWholePage, pngSize } from './captures';
@@ -26,10 +30,12 @@ interface Tab { state: TabState; view?: WebContentsView; findRequest?: number; n
 
 const profileSessions = new Set<Session>();
 export const isProfileSession = (target: Session): boolean => profileSessions.has(target);
+const launchURLs = new WeakMap<WebContents, string>();
+export const isLaunchNavigation = (contents: WebContents, url: string): boolean => launchURLs.get(contents) === url && isLocalHTMLURL(url);
 
-export function createBrowser(window: BrowserWindow, userData: string, downloads: string, settings: ThemeSettings, initialRegistry?: ProfileRegistry) {
+export function createBrowser(window: BrowserWindow, userData: string, downloads: string, settings: ThemeSettings, initialRegistry?: ProfileRegistry, defaultBrowserOverride?: ReturnType<typeof createDefaultBrowser>) {
   const registryPath = resolve(userData, 'profiles.json');
-  const language = app.getLocale().toLowerCase().split('-')[0] === 'es' ? 'es' : 'en';
+  const language = resolveLanguage(settings.language, app.getLocale());
   let registry = initialRegistry ?? cleanupPartitions(app.getPath('sessionData'), registryPath, readRegistry(registryPath, language), userData);
   let registryError = false;
   const storageFailure = (error: unknown) => { registryError = true; console.error('Profile storage error', error); };
@@ -38,6 +44,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   let darkActive = darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors);
   let closing = false;
   let deleting = false;
+  let clearingBrowsingData = false;
   let area: ContentArea = { top: 96, hidden: true };
   const pageMenu = new PageMenuSession();
   const invalidateMenu = (tabId?: string) => {
@@ -49,6 +56,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
+    searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
+    ...resolvedDownloadsFolder(settings, downloads), askWhereToSave: settings.askWhereToSave,
+    blockAds: settings.blockAds, blockThirdPartyCookies: settings.blockThirdPartyCookies, clearingBrowsingData, defaultBrowser: defaultBrowser.status,
   });
   const publish = () => {
     if (!current() || closing || window.isDestroyed() || window.webContents.isDestroyed()) return;
@@ -57,6 +67,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     window.webContents.send(IPC.stateChanged, state());
   };
   const blocker = createBlockingEngine(userData, publish);
+  const defaultBrowser = defaultBrowserOverride ?? createDefaultBrowser({ platform: process.platform, isPackaged: app.isPackaged, execPath: process.execPath, openExternal: url => shell.openExternal(url), changed: publish });
+  const refreshDefaultBrowser = () => { void defaultBrowser.refresh().then(publish); };
+  window.on('focus', refreshDefaultBrowser);
   const layout = () => { for (const runtime of runtimes.values()) runtime.layout(); };
   const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); registry = next; };
   const runtimeFor = (profile: Profile) => {
@@ -88,6 +101,27 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   nativeTheme.on('updated', systemDarkPages);
   const run = (command: BrowserCommand) => {
     switch (command.type) {
+      case 'register-default-browser': return defaultBrowser.register().then(publish);
+      case 'set-search-engine': settings.setSearchEngine(command.value); publish(); return;
+      case 'set-language': settings.setLanguage(command.value); publish(); return;
+      case 'set-ask-where-to-save': settings.setAskWhereToSave(command.value); publish(); return;
+      case 'reset-downloads-folder': settings.setDownloadsFolder(null); publish(); return;
+      case 'choose-downloads-folder': return (async () => {
+        let choice: Electron.OpenDialogReturnValue;
+        try { choice = await dialog.showOpenDialog(window, { properties: ['openDirectory'], defaultPath: resolvedDownloadsFolder(settings, downloads).downloadsFolder }); }
+        catch { throw new Error('DOWNLOADS_FOLDER_PICK_FAILED'); }
+        if (!choice.canceled) { settings.setDownloadsFolder(choice.filePaths[0] ?? ''); publish(); }
+      })();
+      case 'set-block-ads':
+        settings.setBlockAds(command.value);
+        for (const runtime of runtimes.values()) { runtime.resetCounts(); if (!command.value) runtime.replaceViews(); else for (const tab of runtime.tabs) runtime.page(tab.view)?.reloadIgnoringCache(); }
+        layout(); publish(); return;
+      case 'set-block-third-party-cookies': settings.setBlockThirdPartyCookies(command.value); for (const runtime of runtimes.values()) runtime.resetCookies(); publish(); return;
+      case 'clear-browsing-data': {
+        if (clearingBrowsingData) throw new Error('CLEAR_IN_PROGRESS');
+        const target = current(); clearingBrowsingData = true; publish();
+        return target.clearData(command).finally(() => { clearingBrowsingData = false; publish(); });
+      }
       case 'dark-pages': settings.setDarkPages(command.value); updateDarkPages(); return;
       case 'dark-strength': settings.setDarkStrength(command.value); updateDarkPages(); return;
       case 'dark-tone': settings.setDarkTone(command.value); updateDarkPages(); return;
@@ -147,6 +181,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let storageError = false;
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
+    let clearingData = false;
     let captureGeneration = 0;
     const captureRequests = new Set<AbortController>();
     const invalidateCaptures = () => { captureGeneration++; for (const request of captureRequests) request.abort(); captureRequests.clear(); };
@@ -163,6 +198,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       restoreTimeout = setTimeout(forget, 8000);
     };
     const items = new Map<string, DownloadItem>();
+    const trustedDownloads = new Map(store.downloads.filter(entry => basename(entry.path) === entry.filename && !/[\x00-\x1f\x7f-\x9f]/.test(entry.path)).map(entry => [entry.id, entry.path]));
     const reserved = new Set<string>();
     const webPreferences: WebPreferences = {
       partition: profile.partition, sandbox: true, contextIsolation: true, nodeIntegration: false,
@@ -208,12 +244,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     webSession.webRequest.onBeforeRequest((details, callback) => {
       const scheme = new URL(details.url).protocol;
-      const cancel = details.resourceType === 'mainFrame' ? !isAllowedURL(details.url)
+      const tab = details.webContentsId === undefined ? undefined : tabs.find(tab => tab.view?.webContents.id === details.webContentsId);
+      const cancel = details.resourceType === 'mainFrame' ? !(isAllowedURL(details.url) || !!tab?.view && isLaunchNavigation(tab.view.webContents, details.url))
         : details.resourceType === 'subFrame' ? !isAllowedSubframeURL(details.url)
         : !['http:', 'https:', 'data:', 'blob:', 'ws:', 'wss:'].includes(scheme);
-      if (cancel || disposed || closing) { callback({ cancel: true }); return; }
+      if (cancel || disposed || closing || clearingData) { callback({ cancel: true }); return; }
       const context = requestContext(details);
-      const enabled = context && siteSettings(store.siteSettings, context.topURL)?.blocking;
+      const enabled = settings.blockAds && context && siteSettings(store.siteSettings, context.topURL)?.blocking;
       const match = enabled ? blocker.match(details.url, details.resourceType, context.topURL) : undefined;
       if (!match) { callback({ cancel: false }); return; }
       if (context!.pageLoad === context!.tab.pageLoad) { context!.tab.state.blocked[match.kind]++; publish(); }
@@ -223,14 +260,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     webSession.webRequest.onBeforeSendHeaders((details, callback) => {
       const context = requestContext(details);
       const headers = context ? stripCookieHeaders(details.requestHeaders, false, details.url, context.topURL,
-        siteSettings(store.siteSettings, context.topURL)?.blocking ?? true, context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : details.requestHeaders;
+        settings.blockThirdPartyCookies && (siteSettings(store.siteSettings, context.topURL)?.blocking ?? true), context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : details.requestHeaders;
       if (context && context.pageLoad === context.tab.pageLoad && context.tab.state.blocked.cookies !== context.tab.refusedCookies.size) { context.tab.state.blocked.cookies = context.tab.refusedCookies.size; publish(); }
       callback({ requestHeaders: headers });
     });
     webSession.webRequest.onHeadersReceived((details, callback) => {
       const context = requestContext(details);
       const headers = context ? stripCookieHeaders(details.responseHeaders ?? {}, true, details.url, context.topURL,
-        siteSettings(store.siteSettings, context.topURL)?.blocking ?? true, context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : details.responseHeaders;
+        settings.blockThirdPartyCookies && (siteSettings(store.siteSettings, context.topURL)?.blocking ?? true), context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : details.responseHeaders;
       if (context && context.pageLoad === context.tab.pageLoad && context.tab.state.blocked.cookies !== context.tab.refusedCookies.size) { context.tab.state.blocked.cookies = context.tab.refusedCookies.size; publish(); }
       callback({ responseHeaders: headers });
     });
@@ -238,7 +275,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     webSession.webRequest.onErrorOccurred(details => { requests.delete(details.id); });
 
     const state = () => ({ ...notebooks.state(), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, storageError, storageReadError: readStatus.readError,
-      blockingReady: blocker.ready, siteSettings: siteSettings(store.siteSettings, active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: permissions.prompt(activeId) });
+      clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
+      blockingReady: blocker.ready, siteSettings: active()?.state.settings ? null : siteSettings(store.siteSettings, active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: permissions.prompt(activeId) });
     const flush = () => {
       if (pendingWrite === undefined) return;
       clearTimeout(pendingWrite); pendingWrite = undefined;
@@ -249,6 +287,36 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const persist = () => {
       if (!disposed && !readStatus.memoryOnly && pendingWrite === undefined) pendingWrite = setTimeout(flush, 500);
     };
+    const saveNow = () => {
+      clearTimeout(pendingWrite); pendingWrite = undefined;
+      if (readStatus.memoryOnly) { storageError = true; throw new Error('PROFILE_SETTINGS_SAVE_FAILED'); }
+      try { writeStore(storePath, store, safeStorage); storageError = false; }
+      catch { storageError = true; throw new Error('PROFILE_SETTINGS_SAVE_FAILED'); }
+    };
+    const stopForClear = () => { for (const tab of tabs) page(tab.view)?.stop(); for (const item of items.values()) item.cancel(); requests.clear(); };
+    const clearData = async (choice: ClearedBrowsingData): Promise<ClearedBrowsingData> => {
+      clearingData = true;
+      try {
+      for (const tab of tabs) page(tab.view)?.stop(); requests.clear();
+      if (choice.history) {
+        forget(); const previous = store.history; store.history = [];
+        try { saveNow(); } catch { store.history = previous; throw new Error('CLEAR_HISTORY_FAILED'); }
+      }
+      if (choice.cookies) try { await webSession.clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }); } catch { throw new Error('CLEAR_SITE_DATA_FAILED'); }
+      if (choice.cache) try { await webSession.clearCache(); } catch { throw new Error('CLEAR_CACHE_FAILED'); }
+      publish(); return { history: choice.history, cookies: choice.cookies, cache: choice.cache };
+      } finally { clearingData = false; }
+    };
+    let closeClear: Promise<void> | undefined;
+    const clearOnClose = () => {
+      if (closeClear) return closeClear;
+      stopForClear(); forget();
+      if (store.clearHistoryOnClose) { const previous = store.history; store.history = []; try { saveNow(); } catch { store.history = previous; storageError = true; } }
+      closeClear = store.clearCacheOnClose ? Promise.resolve().then(() => webSession.clearCache()).catch(() => { storageError = true; }) : Promise.resolve();
+      return closeClear;
+    };
+    const resetCookies = () => { for (const tab of tabs) { tab.refusedCookies.clear(); tab.state.blocked.cookies = 0; } };
+    const resetCounts = () => { resetCookies(); for (const tab of tabs) tab.state.blocked = { ads: 0, trackers: 0, cookies: 0 }; };
     const active = () => tabs.find(tab => tab.state.id === activeId);
     // A WebContentsView drops its webContents once the page is destroyed, so every access goes through here.
     const page = (view?: WebContentsView) => {
@@ -330,7 +398,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       tab.state.title = page(tab.view)?.getTitle().slice(0, 1024) || url;
       tab.state.find = { active: 0, total: 0 };
       tab.findRequest = undefined;
-      if (isWebURL(url)) {
+      if (isWebURL(url) && !clearingData && !closing && !disposed) {
         const existing = store.history.find(entry => entry.url === url);
         if (existing) { existing.lastVisit = Date.now(); existing.visitCount++; existing.title = tab.state.title; }
         else store.history.push({ url, title: tab.state.title, lastVisit: Date.now(), visitCount: 1 });
@@ -349,15 +417,16 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       leaveFullscreen(tab);
       refresh(tab); update();
     };
-    const load = (tab: Tab, url: string) => {
-      if (!isAllowedURL(url)) throw new Error('Invalid navigation URL');
-      tab.state.notebook = null; tab.state.notebookItem = null;
+    const load = (tab: Tab, url: string, launch = false) => {
+      if (!isAllowedURL(url) && !(launch && isLocalHTMLURL(url))) throw new Error('Invalid navigation URL');
+      tab.state.notebook = null; tab.state.notebookItem = null; tab.state.settings = null;
       if (active() === tab) invalidateCaptures();
       invalidateMenu(tab.state.id);
       permissions.drop(tab.state.id);
       tab.navigating = true;
       clearFavicon(tab, url);
       ensureView(tab);
+      if (launch && isLocalHTMLURL(url)) launchURLs.set(tab.view!.webContents, url);
       tab.state.url = url;
       tab.state.title = url;
       tab.state.error = null;
@@ -371,17 +440,27 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (!disposed && tabs.includes(tab) && tab.navigation === navigation) fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
       });
     };
-    const newTab = (url?: string, foreground = true, contents?: WebContents) => {
+    const newTab = (url?: string, foreground = true, contents?: WebContents, launch = false) => {
       if (disposed || closing) throw new Error('Profile is closed');
       if (tabs.length >= 200) throw new Error('Tab limit reached');
-      const tab: Tab = { pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), notebook: null, notebookItem: null, url: url ?? '', title: url ?? '', favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
+      const tab: Tab = { pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), settings: null, notebook: null, notebookItem: null, url: url ?? '', title: url ?? '', favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
       clearFavicon(tab, url);
       tabs.push(tab);
       if (foreground || !activeId) activate(tab);
       if (contents) { ensureView(tab, contents); tab.state.loading = contents.isLoading(); }
-      else if (url) load(tab, url);
+      else if (url) load(tab, url, launch);
       update();
       return tab;
+    };
+    const openSettings = (section: SettingsSection) => {
+      let target = tabs.find(tab => tab.state.settings !== null);
+      if (!target) {
+        if (tabs.length >= 200) throw new Error('SETTINGS_TAB_LIMIT');
+        const index = tabs.findIndex(tab => tab.state.id === activeId);
+        target = newTab(); tabs.splice(tabs.indexOf(target), 1); tabs.splice(index + 1, 0, target);
+      }
+      target.state.settings = section; target.state.url = settingsAddress(section); target.state.title = 'Settings';
+      activate(target); update(); return target;
     };
     const closeTab = (tab: Tab) => {
       const index = tabs.indexOf(tab);
@@ -409,6 +488,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const contents = page(view);
         const entries = contents?.navigationHistory.getAllEntries() ?? [], index = contents?.navigationHistory.getActiveIndex() ?? -1;
         const url = tab.committedURL ?? entries[index]?.url ?? tab.state.url;
+        const originalLaunch = contents && launchURLs.get(contents);
+        const trustedLaunch = originalLaunch === url && isLocalHTMLURL(url);
         contents?.stopFindInPage('clearSelection');
         tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; clearFavicon(tab);
         view.setVisible(false);
@@ -419,6 +500,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         ensureView(tab);
         tab.state.error = null;
         const next = page(tab.view)!;
+        if (originalLaunch && isLocalHTMLURL(originalLaunch)) launchURLs.set(next, originalLaunch);
         if (entries.length && index >= 0 && index < entries.length) {
           tab.state.url = entries[index]!.url; tab.state.loading = true; tab.navigating = true;
           const navigation = tab.navigation;
@@ -426,7 +508,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
             if (error instanceof Error && error.message.includes('ERR_ABORTED')) return;
             if (!disposed && tabs.includes(tab) && page(tab.view) === next && tab.navigation === navigation) fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
           });
-        } else if (isAllowedURL(url)) load(tab, url);
+        } else if (isAllowedURL(url) || trustedLaunch) load(tab, url, trustedLaunch);
         refresh(tab);
       }
     };
@@ -494,7 +576,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           tab.pageLoad++; tab.topURL = url; tab.refusedCookies = new Set(); tab.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
           pendingNavigation = tab.pageLoad;
           navigations.push({ generation: tab.pageLoad, urls: new Set([url]) });
-          tab.cosmeticPending = blocker.ready && !!siteSettings(store.siteSettings, url)?.blocking;
+          tab.cosmeticPending = settings.blockAds && blocker.ready && !!siteSettings(store.siteSettings, url)?.blocking;
           clearFavicon(tab, url); tab.state.error = null; tab.state.find = { active: 0, total: 0 }; tab.findRequest = undefined; update();
         }
       });
@@ -503,7 +585,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       });
       contents.on('will-redirect', (event) => {
         if (tab.view !== view) return;
-        if (event.isMainFrame && !isAllowedURL(event.url)) fail(tab, 'ERR_UNSAFE_REDIRECT');
+        if (event.isMainFrame && !isAllowedURL(event.url) && !isLaunchNavigation(contents, event.url)) fail(tab, 'ERR_UNSAFE_REDIRECT');
       });
       contents.on('did-navigate', (_event, url) => {
         if (tab.view !== view) return;
@@ -511,7 +593,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         permissions.drop(tab.state.id); tab.navigating = false;
         tab.topURL = url;
         const generation = tab.pageLoad;
-        const css = siteSettings(store.siteSettings, url)?.blocking ? blocker.cosmeticCSS(url) : '';
+        const css = settings.blockAds && siteSettings(store.siteSettings, url)?.blocking ? blocker.cosmeticCSS(url) : '';
         // Keep the view hidden until styles are installed, so the new document cannot flash unhidden ads.
         if (css) {
           tab.cosmeticPending = true;
@@ -540,7 +622,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (tab.view !== view) return;
         tab.state.title = title.slice(0, 1024);
         const entry = store.history.find(entry => entry.url === tab.state.url);
-        if (entry) { entry.title = tab.state.title; persist(); }
+        if (entry && !clearingData && !closing && !disposed) { entry.title = tab.state.title; persist(); }
         publish();
       });
       contents.on('did-fail-load', (_event, code, description, url, mainFrame) => {
@@ -582,12 +664,17 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const url = isWebURL(item.getURL()) ? item.getURL() : tab.state.url;
       if (!isWebURL(url)) { event.preventDefault(); return; }
       try {
-        mkdirSync(downloads, { recursive: true });
-        const path = reserveDownloadPath(downloads, item.getFilename(), new Set([...reserved, ...[...runtimes.values()].flatMap(runtime => [...runtime.reserved])]));
+        const folder = resolvedDownloadsFolder(settings, downloads).downloadsFolder;
+        mkdirSync(folder, { recursive: true });
+        const proposed = reserveDownloadPath(folder, item.getFilename(), new Set([...reserved, ...[...runtimes.values()].flatMap(runtime => [...runtime.reserved])]));
+        const selected = settings.askWhereToSave ? dialog.showSaveDialogSync(window, { defaultPath: proposed }) : proposed;
+        if (!selected) { event.preventDefault(); item.cancel(); return; }
+        const path = selected;
         reserved.add(path);
         item.setSavePath(path);
         const entry = { id: randomUUID(), url, filename: basename(path), path, received: 0, total: item.getTotalBytes(), status: 'progressing' as const, startedAt: Date.now() };
         store.downloads.unshift(entry);
+        trustedDownloads.set(entry.id, entry.path);
         store.downloads.splice(10000);
         items.set(entry.id, item); persist(); publish();
         let lastUpdate = 0;
@@ -653,6 +740,26 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!tab) return;
       const contents = page(tab.view);
       switch (command.type) {
+        case 'open-settings': openSettings(command.section); break;
+        case 'set-clear-history-on-close': case 'set-clear-cache-on-close': {
+          if (readStatus.memoryOnly) throw new Error('PROFILE_SETTINGS_SAVE_FAILED');
+          const field = command.type === 'set-clear-history-on-close' ? 'clearHistoryOnClose' : 'clearCacheOnClose';
+          const previous = store[field]; store[field] = command.value;
+          try { saveNow(); } catch { store[field] = previous; throw new Error('PROFILE_SETTINGS_SAVE_FAILED'); }
+          break;
+        }
+        case 'reset-site': {
+          if (readStatus.memoryOnly) throw new Error('SITE_SETTINGS_SAVE_FAILED');
+          const previous = structuredClone(store.siteSettings);
+          resetSite(store.siteSettings, command.host);
+          try { saveNow(); } catch { store.siteSettings.blocking = previous.blocking; store.siteSettings.dark = previous.dark; store.siteSettings.permissions = previous.permissions; throw new Error('SITE_SETTINGS_SAVE_FAILED'); }
+          for (const target of tabs) if (siteHost(target.topURL ?? target.state.url) === command.host) {
+            permissions.drop(target.state.id); applyDarkCSS(target);
+            target.refusedCookies.clear(); target.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
+            if (settings.blockAds) page(target.view)?.reloadIgnoringCache();
+          }
+          break;
+        }
         case 'retry-notebook-storage': notebooks.retry(); break;
         case 'create-notebook': notebooks.create(command.name); break;
         case 'rename-notebook':
@@ -669,7 +776,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'open-notebook': {
           const notebook = notebooks.get(command.id);
           if (command.item) notebooks.item(command.id, command.item);
-          const target = tabs.find(tab => tab.state.notebook === command.id) ?? (!tab.state.url && !tab.state.notebook ? tab : newTab());
+          const target = tabs.find(tab => tab.state.notebook === command.id) ?? (!tab.state.url && !tab.state.notebook && !tab.state.settings ? tab : newTab());
           target.state.notebook = command.id; target.state.notebookItem = command.item ?? null;
           target.state.url = notebookAddress(notebook.name); target.state.title = notebook.name;
           activate(target); notebooks.use(command.id); break;
@@ -711,7 +818,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'answer-permission': permissions.answer(tab.state.id, command.id, command.answer); break;
         case 'theme': case 'migrate-theme': settings.setTheme(command.value, command.type === 'migrate-theme'); break;
         case 'contrast': settings.setContrast(command.value); break;
-        case 'new-tab': newTab(command.input ? classifyInput(command.input) : undefined, !command.background); break;
+        case 'new-tab': {
+          const section = command.input ? settingsSection(command.input) : null;
+          if (section) openSettings(section); else newTab(command.input ? classifyInput(command.input, settings.searchEngine) : undefined, !command.background); break;
+        }
         case 'dismiss-context-menu': pageMenu.dismiss(command.id); window.webContents.send(IPC.contextMenu, null); break;
         case 'context-menu': {
           if (!contents) throw new Error('Page is unavailable');
@@ -731,7 +841,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
             case 'copy-image': if (isWebURL(params.srcURL)) contents.copyImageAt(params.x, params.y); break;
             case 'copy-image-address': if (isWebURL(params.srcURL)) clipboard.writeText(params.srcURL); break;
             case 'search-selection': {
-              const prefix = 'https://duckduckgo.com/?q=';
+              const prefix = SEARCH_ENGINES[settings.searchEngine].searchPrefix;
               let query = '';
               // The same URL boundary applies even when a page selects an entire document.
               for (const character of params.selectionText.trim()) {
@@ -756,8 +866,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           break;
         }
         case 'open-downloads-folder':
-          mkdirSync(downloads, { recursive: true });
-          return shell.openPath(downloads).then(error => { if (error) throw new Error('Downloads folder is unavailable'); });
+          mkdirSync(resolvedDownloadsFolder(settings, downloads).downloadsFolder, { recursive: true });
+          return shell.openPath(resolvedDownloadsFolder(settings, downloads).downloadsFolder).then(error => { if (error) throw new Error('Downloads folder is unavailable'); });
         case 'activate-tab': {
           const target = tabs.find(tab => tab.state.id === command.id);
           if (!target) throw new Error('Unknown tab');
@@ -770,7 +880,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (!target) throw new Error('Unknown tab');
           closeTab(target); break;
         }
-        case 'navigate': load(tab, classifyInput(command.input)); break;
+        case 'navigate': {
+          const section = settingsSection(command.input);
+          if (section) openSettings(section); else load(tab, classifyInput(command.input, settings.searchEngine)); break;
+        }
         case 'back': if (contents?.navigationHistory.canGoBack()) contents.navigationHistory.goBack(); break;
         case 'forward': if (contents?.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break;
         case 'reload': if (contents) { tab.state.error = null; contents.reload(); } else if (isAllowedURL(tab.state.url)) load(tab, tab.state.url); break;
@@ -810,7 +923,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'show-download': {
           const entry = store.downloads.find(entry => entry.id === command.id);
           // A stored path is never accepted as an IPC argument or executed.
-          if (!entry || resolve(entry.path) !== resolve(downloads, entry.filename) || dirname(resolve(entry.path)) !== resolve(downloads)) throw new Error('Invalid download path');
+          if (!entry || trustedDownloads.get(entry.id) !== entry.path || basename(entry.path) !== entry.filename || /[\x00-\x1f\x7f-\x9f]/.test(entry.path)) throw new Error('Invalid download path');
           shell.showItemInFolder(entry.path); break;
         }
         case 'remove-download':
@@ -852,8 +965,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       attempt(() => webSession.removeListener('will-download', downloadHandler));
       profileSessions.delete(webSession);
       requests.clear();
+      if (!discard && (store.clearHistoryOnClose || store.clearCacheOnClose)) return clearBeforeDeadline([clearOnClose]);
     };
-    return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS, notebooks };
+    return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS, notebooks, resetCounts, resetCookies, clearData, clearOnClose, stopForClear };
 
   }
   ipcMain.handle(IPC.state, (event, ...args: unknown[]) => {
@@ -916,17 +1030,42 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (covering && window.isFocused()) window.webContents.focus();
   });
   const flush = () => { for (const runtime of runtimes.values()) { runtime.flush(); runtime.notebooks.flush(); } };
+  let quitting: Promise<void> | undefined;
+  let quitCleared = false;
+  const needsClearOnClose = () => registry.profiles.some(profile => {
+    const runtime = runtimes.get(profile.id);
+    const store = runtime?.state().store ?? readStore(profileStorePath(userData, profile.id), safeStorage);
+    return store.clearHistoryOnClose || store.clearCacheOnClose;
+  });
+  const finishClearing = () => {
+    if (!quitting) {
+      closing = true; blocker.stop();
+      const all = registry.profiles.map(runtimeFor);
+      for (const runtime of all) runtime.stopForClear();
+      quitting = clearBeforeDeadline(all.map(runtime => runtime.clearOnClose)).then(() => { quitCleared = true; });
+    }
+    return quitting;
+  };
+  const beforeQuit = (event?: Electron.Event) => {
+    flush();
+    if (!quitCleared && needsClearOnClose()) { event?.preventDefault(); void finishClearing().then(() => app.quit()); }
+  };
+  window.on('close', (event: Electron.Event) => {
+    if (!quitCleared && needsClearOnClose()) { event.preventDefault(); void finishClearing().then(() => window.close()); }
+  });
   window.on('closed', () => {
     closing = true; invalidateMenu();
     blocker.stop();
     nativeTheme.removeListener('updated', systemDarkPages);
     for (const runtime of runtimes.values()) runtime.dispose();
-    app.removeListener('before-quit', flush);
+    app.removeListener('before-quit', beforeQuit);
+    window.removeListener('focus', refreshDefaultBrowser);
     for (const channel of [IPC.state, IPC.capture, IPC.favicon, IPC.notebook, IPC.captureImage, IPC.command, IPC.contentArea]) ipcMain.removeHandler(channel);
   });
-  app.on('before-quit', flush);
+  app.on('before-quit', beforeQuit);
   const initial = runtimeFor(registry.profiles.find(profile => profile.id === registry.activeId)!);
   initial.persist(); initial.newTab();
   void blocker.start();
-  return { layout };
+  refreshDefaultBrowser();
+  return { layout, openLaunch: (url: string) => { if (isWebURL(url) || isLocalHTMLURL(url)) current().newTab(url, true, undefined, true); } };
 }

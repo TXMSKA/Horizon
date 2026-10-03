@@ -52,7 +52,7 @@ function browsingEntries(value: Record<string, unknown>): boolean {
       && typeof entry.status === 'string' && ['progressing', 'completed', 'failed', 'cancelled'].includes(entry.status));
 }
 
-function legacyStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings'> & { version: 1 } {
+function legacyStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings' | 'clearHistoryOnClose' | 'clearCacheOnClose'> & { version: 1 } {
   return object(value, ['version', 'history', 'bookmarks', 'downloads']) && value.version === 1 && browsingEntries(value);
 }
 function hostChoices(value: unknown): boolean {
@@ -72,12 +72,17 @@ function siteEntries(settings: Record<string, unknown>): boolean {
     origins.add(entry.origin); return true;
   });
 }
-function legacySiteStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings'> & { version: 2; siteSettings: Omit<BrowserStore['siteSettings'], 'dark'> } {
+function legacySiteStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings' | 'clearHistoryOnClose' | 'clearCacheOnClose'> & { version: 2; siteSettings: Omit<BrowserStore['siteSettings'], 'dark'> } {
   return object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings']) && value.version === 2 && browsingEntries(value)
     && object(value.siteSettings, ['blocking', 'permissions']) && siteEntries(value.siteSettings);
 }
-export function validateStore(value: unknown): value is BrowserStore {
+function legacyDarkStore(value: unknown): value is Omit<BrowserStore, 'version' | 'clearHistoryOnClose' | 'clearCacheOnClose'> & { version: 3 } {
   return object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings']) && value.version === 3 && browsingEntries(value)
+    && object(value.siteSettings, ['blocking', 'dark', 'permissions']) && siteEntries(value.siteSettings) && hostChoices(value.siteSettings.dark);
+}
+export function validateStore(value: unknown): value is BrowserStore {
+  return object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings', 'clearHistoryOnClose', 'clearCacheOnClose']) && value.version === 4 && browsingEntries(value)
+    && typeof value.clearHistoryOnClose === 'boolean' && typeof value.clearCacheOnClose === 'boolean'
     && object(value.siteSettings, ['blocking', 'dark', 'permissions']) && siteEntries(value.siteSettings) && hostChoices(value.siteSettings.dark);
 }
 
@@ -112,7 +117,7 @@ export function readStoreFile(path: string, cipher?: StoreCipher): unknown {
 }
 
 export function readStore(path: string, cipher?: StoreCipher, status: StoreReadStatus = { readError: false, memoryOnly: false }): BrowserStore {
-  const empty: BrowserStore = { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } };
+  const empty: BrowserStore = { version: 4, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] }, clearHistoryOnClose: false, clearCacheOnClose: false };
   try {
     if (!existsSync(path)) {
       writeStore(path, empty, cipher);
@@ -128,9 +133,11 @@ export function readStore(path: string, cipher?: StoreCipher, status: StoreReadS
       const encrypted = encryptedStore(path);
       const value = readStoreFile(path, cipher);
       if (legacyStore(value)) {
-        store = { ...value, version: 3, siteSettings: { blocking: [], dark: [], permissions: [] } }; upgrade = true;
+        store = { ...empty, ...value, version: 4, siteSettings: { blocking: [], dark: [], permissions: [] } }; upgrade = true;
       } else if (legacySiteStore(value)) {
-        store = { ...value, version: 3, siteSettings: { ...value.siteSettings, dark: [] } }; upgrade = true;
+        store = { ...empty, ...value, version: 4, siteSettings: { ...value.siteSettings, dark: [] } }; upgrade = true;
+      } else if (legacyDarkStore(value)) {
+        store = { ...empty, ...value, version: 4 }; upgrade = true;
       } else {
         if (!validateStore(value)) throw new Error('Invalid browser store');
         store = value;

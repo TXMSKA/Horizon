@@ -398,3 +398,105 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .skeleton-line:last-child { width: 70%; }
 .notebook-loading:has(.notebook-placeholder) { padding: 0; }
 .notebook-placeholder { width: 100%; height: 100%; }
+
+.settings-content-area { padding: 0; overflow: hidden; }
+.settings-page { display: flex; height: 100%; min-height: 0; }
+.settings-rail { flex: none; width: var(--width-settings-rail); padding: var(--space-32) var(--space-20) var(--space-20); border-inline-end: var(--border-width) solid var(--divider); background: var(--surface-chrome); overflow-y: auto; }
+.settings-rail-heading { display: flex; align-items: center; gap: var(--space-12); height: var(--height-settings-heading); padding-inline: var(--space-8); margin-bottom: var(--space-16); color: var(--text-title); font-size: var(--space-20); font-weight: var(--weight-heading); line-height: var(--height-settings-heading); }
+.settings-rail-heading .horizon-mark { width: auto; height: var(--size-28); }
+.settings-rail nav { display: flex; flex-direction: column; gap: var(--space-2); }
+.settings-rail-row { display: flex; align-items: center; gap: var(--space-10); width: 100%; height: var(--height-settings-nav-row); padding: 0 var(--space-10); border-radius: var(--radius-small); color: var(--text-title); font-size: var(--type-label); line-height: var(--line-label); text-align: start; }
+.settings-rail-row svg { width: var(--icon-control); height: var(--icon-control); color: var(--text-secondary); }
+.settings-rail-row + .settings-rail-row { margin-top: var(--space-2); }
+.settings-rail-row[aria-current=page], .settings-rail-row[aria-current=page]:hover { background: var(--surface-selected); font-weight: var(--weight-emphasis); }
+.settings-rail-row[aria-current=page] svg { color: var(--accent); }
+.settings-content { flex: 1; min-width: 0; overflow-y: auto; padding: var(--space-32) var(--padding-settings-inline); }
+.settings-column { display: flex; flex-direction: column; gap: var(--space-24); width: 100%; max-width: var(--width-settings-column); }
+.settings-column h1 { outline: none; font-size: var(--size-28); font-weight: var(--weight-heading); line-height: var(--height-settings-heading); letter-spacing: 0; overflow-wrap: anywhere; }
+.settings-group { display: flex; flex-direction: column; gap: var(--space-8); }
+.settings-group > h2 { font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--line-caption); color: var(--text-secondary); }
+.settings-card { padding-inline: var(--space-20); border: var(--border-width) solid var(--divider); border-radius: var(--radius-panel); background: var(--surface-raised); }
+.setting-row { display: flex; align-items: center; gap: var(--space-24); padding-block: var(--space-16); }
+.setting-row + .setting-row { border-top: var(--border-width) solid var(--divider); }
+.setting-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--space-4); }
+.setting-copy > strong { color: var(--text-title); font-size: var(--type-label); font-weight: var(--weight-emphasis); line-height: var(--line-label); overflow-wrap: anywhere; }
+.setting-hint, .settings-note { color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); overflow-wrap: anywhere; }
+.setting-controls { display: flex; flex: none; align-items: center; gap: var(--space-10); }
+.settings-button { display: inline-flex; flex: none; align-items: center; justify-content: center; gap: var(--space-6); height: var(--size-32); padding-inline: var(--space-14); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--surface-sunken); color: var(--text-title); font-size: var(--type-label); font-weight: var(--weight-emphasis); line-height: var(--line-label); }
+.settings-button.quiet { background: var(--surface-transparent); border-color: var(--surface-transparent); }
+.settings-button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.settings-button.primary:not(:disabled):hover { background: var(--accent-hover); }
+.settings-button.primary:not(:disabled):active { background: var(--accent-pressed); }
+.settings-button.primary:disabled { color: var(--on-accent); }
+.settings-button svg { width: var(--icon-control); height: var(--icon-control); }
+.settings-segmented { display: flex; flex: none; align-items: stretch; gap: var(--space-2); height: var(--size-32); padding: var(--padding-segment); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--surface-canvas); }
+.settings-segmented > button { flex: none; min-height: 0; padding: 0 var(--space-10); border: var(--border-width) solid var(--surface-transparent); border-radius: var(--radius-small); color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); font-weight: var(--weight-label); white-space: nowrap; }
+.settings-segmented > button[aria-checked=true] { border-color: var(--border-control); background: var(--surface-pressed); color: var(--text-title); font-weight: var(--weight-emphasis); }
+.settings-dropdown { flex: none; width: var(--width-settings-dropdown); }
+.settings-dropdown-button { display: flex; align-items: center; width: 100%; height: var(--size-32); padding: 0; border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--surface-field); color: var(--text-title); font-size: var(--type-label); line-height: var(--line-label); text-align: start; }
+.settings-dropdown-button > span:first-child { flex: 1; min-width: 0; padding-inline: var(--space-10); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.settings-dropdown-chevron { display: grid; place-items: center; flex: none; width: var(--size-32); align-self: stretch; border-inline-start: var(--border-width) solid var(--divider); color: var(--text-secondary); }
+.settings-dropdown-chevron svg { width: var(--icon-control); height: var(--icon-control); }
+.settings-dropdown-menu { position: static; margin: 0; width: var(--width-settings-dropdown); }
+.settings-dropdown-menu > button[aria-checked=true] { background: var(--surface-selected); font-weight: var(--weight-emphasis); }
+.settings-feedback { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); }
+.settings-feedback:empty { display: none; }
+.settings-feedback.error { color: var(--text-error); }
+.settings-feedback .settings-button { height: auto; min-height: var(--target-minimum); padding-inline: var(--space-8); font-size: var(--type-caption); }
+.settings-page-heading { display: flex; flex-direction: column; gap: var(--space-4); }
+.settings-back { display: inline-flex; align-items: center; align-self: flex-start; gap: var(--space-6); min-height: var(--target-minimum); margin-block: calc((var(--space-20) - var(--target-minimum)) / 2); padding: 0; color: var(--text-title); font-size: var(--type-label); font-weight: var(--weight-emphasis); border-radius: var(--radius-small); }
+.settings-back svg { width: var(--icon-control); height: var(--icon-control); }
+.settings-sites, .settings-profile-list { margin: 0; padding: 0; list-style: none; }
+.settings-site { display: flex; align-items: center; gap: var(--space-12); padding-block: var(--space-12); }
+.settings-site + .settings-site, .settings-profile-list > li + li { border-top: var(--border-width) solid var(--divider); }
+.settings-site .site-badge { display: grid; place-items: center; flex: none; width: var(--space-24); height: var(--space-24); border-radius: var(--radius-small); background: var(--profile-color); color: var(--on-accent); font-size: var(--type-caption); font-weight: var(--weight-emphasis); }
+.settings-site .setting-copy { gap: var(--space-2); }
+.settings-empty { display: flex; flex-direction: column; gap: var(--space-4); padding-block: var(--space-24); font-size: var(--type-label); color: var(--text-title); }
+.settings-empty p { color: var(--text-secondary); font-size: var(--type-caption); }
+.settings-dialog { width: min(var(--width-settings-dialog), calc(100vw - var(--space-32))); max-height: calc(100vh - var(--space-32)); padding: var(--space-24); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--text-primary); }
+.settings-dialog::backdrop { background: light-dark(var(--palette-daylight-overlay), var(--palette-amber-overlay)); }
+:root[data-contrast=high] .settings-dialog::backdrop { background: light-dark(var(--palette-contrast-light-overlay), var(--palette-contrast-dark-overlay)); }
+.settings-dialog h2 { color: var(--text-title); font-size: var(--type-panel-heading); line-height: var(--line-body); font-weight: var(--weight-heading); }
+.settings-dialog-heading { display: flex; flex-direction: column; gap: var(--space-4); }
+.settings-dialog p { font-size: var(--type-label); }
+.settings-dialog > * + * { margin-top: var(--space-18); }
+.settings-dialog .setting-hint { font-size: var(--type-caption); }
+.settings-clear-options { display: flex; flex-direction: column; gap: var(--space-12); }
+.settings-checkbox { position: relative; display: flex; align-items: center; gap: var(--space-10); color: var(--text-title); font-size: var(--type-label); line-height: var(--line-label); cursor: pointer; }
+.settings-checkbox input { position: absolute; inset: 0; width: 100%; min-height: 0; height: 100%; margin: 0; opacity: 0; cursor: inherit; }
+.settings-checkbox > span:first-of-type { display: grid; place-items: center; flex: none; width: var(--size-18); height: var(--size-18); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-badge); background: var(--surface-field); }
+.settings-checkbox input:not(:checked) + span svg { visibility: hidden; }
+.settings-checkbox input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.settings-checkbox input:focus-visible + span { outline: var(--focus-width) solid var(--focus); outline-offset: var(--focus-offset); }
+.settings-checkbox svg { width: var(--size-14); height: var(--size-14); }
+.settings-dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-10); }
+.settings-profiles { display: flex; flex-direction: column; gap: var(--space-24); }
+.settings-folder-unavailable { display: block; color: var(--text-error); }
+.settings-profile-row { display: flex; align-items: center; gap: var(--space-12); padding-block: var(--space-12); }
+.settings-profile-colour-slot { display: grid; place-items: center; flex: none; width: var(--space-24); height: var(--space-24); }
+.settings-profile-row .setting-copy { gap: var(--space-2); }
+.settings-profile-actions { display: flex; align-items: center; flex: none; gap: var(--space-8); }
+.settings-profile-actions .icon-button { width: var(--size-32); height: var(--size-32); }
+.settings-profile-list .managed-profile > .profile-form, .settings-profile-new .profile-form { width: 100%; padding: 0 0 var(--space-16) var(--size-36); border: 0; border-radius: 0; background: var(--surface-transparent); gap: var(--space-16); }
+.settings-profile-list .profile-form > input, .settings-profile-new .profile-form > input { margin-top: calc(var(--space-6) - var(--space-16)); height: var(--size-36); font-size: var(--type-label); background: var(--surface-field); }
+.settings-profile-list .profile-swatches, .settings-profile-new .profile-swatches { margin-top: calc(var(--space-6) - var(--space-16)); }
+.settings-profile-list .profile-disabled-reason, .settings-profile-list .profile-delete-confirmation { padding: 0 0 var(--space-12) var(--size-36); }
+.settings-profile-new { display: flex; flex-direction: column; gap: var(--space-16); align-items: flex-start; }
+.settings-profile-new > .profile-form { padding-bottom: 0; }
+@media (width < 900px) {
+  .settings-rail { width: var(--width-settings-rail-compact); padding-inline: var(--space-8); }
+  .settings-rail-heading { justify-content: center; padding: 0; }
+  .settings-rail-heading > span, .settings-rail-row > span { display: none; }
+  .settings-rail-row { justify-content: center; padding: 0; }
+}
+@media (max-width: 640px) {
+  .settings-content { padding-inline: var(--space-20); }
+  .setting-row { flex-wrap: wrap; gap: var(--space-12); }
+  .setting-copy { flex-basis: 100%; }
+  .setting-controls { flex-wrap: wrap; max-width: 100%; }
+  .settings-profile-row { flex-wrap: wrap; }
+  .settings-profile-row .setting-copy { flex-basis: calc(100% - var(--size-36)); }
+  .settings-profile-actions { margin-inline-start: var(--size-36); }
+  .settings-site .setting-copy { flex-basis: auto; }
+  .settings-dropdown { max-width: 100%; }
+}

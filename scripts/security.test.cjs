@@ -250,6 +250,179 @@ function interfaceChildren(node) {
   return [node.props.children].flat(Infinity).filter(child => child && typeof child === 'object');
 }
 
+test('settings copy and each named settings failure are available in both languages', () => {
+  const ts = require('typescript'), { copy } = interfaceModule('src/copy.ts');
+  const api = ts.createSourceFile('api.ts', readFileSync('src/shared/api.ts', 'utf8'), ts.ScriptTarget.Latest, true);
+  const failures = api.statements.find(node => ts.isTypeAliasDeclaration(node) && node.name.text === 'SettingsError');
+  const keys = new Set(['settings', 'general', 'appearance', 'privacy', 'profiles']);
+  for (const key of Object.keys(copy)) keys.add(key);
+  for (const failure of failures.type.types) keys.add(failure.literal.text);
+  for (const filename of ['src/Settings.tsx', 'src/Profiles.tsx']) {
+    const source = ts.createSourceFile(filename, readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const visit = node => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && ['t', 'text'].includes(node.expression.text) && ts.isStringLiteral(node.arguments[0])) keys.add(node.arguments[0].text);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  for (const key of keys) for (const language of ['en', 'es']) assert.ok(typeof copy[key]?.[language] === 'string' && copy[key][language].trim(), `${key}: ${language}`);
+});
+
+test('settings fixes keep the approved hints and history failure in both languages', () => {
+  const { copy } = interfaceModule('src/copy.ts');
+  const expected = {
+    sitesOwnSettingsNone: ['None yet', 'Ninguno todavía'],
+    blockingOffSettings: ['Off for every site in Settings', 'Desactivado para todos los sitios en Configuración'],
+    defaultBrowserDevelopment: ['Horizon is not your default browser. This works in the installed app.', 'Horizon no es tu navegador predeterminado. Funciona en la aplicación instalada.'],
+    CLEAR_HISTORY_FAILED: ['Browsing history could not be cleared. Try again.', 'No se pudo borrar el historial de navegación. Probá de nuevo.'],
+  };
+  for (const [key, [en, es]] of Object.entries(expected)) assert.deepEqual(copy[key], { en, es });
+});
+
+test('profile drafts survive editor remounts, lock during save and clear on Cancel or successful Save', async () => {
+  let hooks = notebookTestHooks(), finish, cancelled = 0;
+  const react = Object.fromEntries(Object.keys(hooks.react).map(key => [key, (...args) => hooks.react[key](...args)]));
+  const sent = [], profile = { id: 'draft-profile', name: 'Work', color: 'blue' };
+  const module = interfaceModule('src/Profiles.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './Menu': {} },
+    { window: { horizon: { command: command => { sent.push(command); return new Promise(resolve => { finish = resolve; }); } } } });
+  const render = () => hooks.render(() => module.ProfileForm({ language: 'en', profiles: [profile], profile, onCancel: () => { cancelled++; }, onSuccess() {} }));
+  const input = tree => notebookNodes(tree, node => node.type === 'input')[0];
+  const radios = tree => notebookNodes(tree, node => node.props.role === 'radio');
+  let tree = render(); input(tree).props.onChange({ target: { value: 'Draft' } });
+  tree = render(); radios(tree).find(node => node.props['data-profile-color'] === 'green').props.onClick();
+  hooks = notebookTestHooks(); tree = render();
+  assert.equal(input(tree).props.value, 'Draft');
+  assert.equal(radios(tree).find(node => node.props['aria-checked']).props['data-profile-color'], 'green');
+  tree.props.onSubmit({ preventDefault() {} }); tree = render();
+  assert.equal(input(tree).props.readOnly, true); assert.ok(radios(tree).every(node => node.props.disabled));
+  input(tree).props.onChange({ target: { value: 'Lost edit' } }); radios(tree)[0].props.onClick(); tree.props.onSubmit({ preventDefault() {} });
+  assert.equal(sent.length, 1); assert.equal(input(render()).props.value, 'Draft');
+  finish(); for (let index = 0; index < 5; index++) await Promise.resolve();
+  hooks = notebookTestHooks(); tree = render(); assert.equal(input(tree).props.value, 'Work');
+  input(tree).props.onChange({ target: { value: 'Discard' } }); tree = render();
+  notebookNodes(tree, node => node.props.className === 'profile-action quiet')[0].props.onClick();
+  hooks = notebookTestHooks(); tree = render(); assert.equal(input(tree).props.value, 'Work'); assert.equal(cancelled, 1);
+});
+
+test('history clear refuses memory-only and failed stores without losing history or changing disk', async t => {
+  for (const memoryOnly of [false, true]) {
+    let path;
+    const options = { prepare(directory) {
+      const registry = readRegistry(join(directory, 'profiles.json'), 'en');
+      path = profileStorePath(directory, registry.activeId);
+      writeStore(path, sampleStore(directory), memoryOnly ? authenticatedCipher() : plainCipher);
+    } };
+    const browser = notebookBrowser(t, plainCipher, options);
+    browser.navigate();
+    const history = structuredClone(browser.state().store.history), disk = readFileSync(path);
+    options.failStore = !memoryOnly;
+    await assert.rejects(browser.command({ type: 'clear-browsing-data', history: true, cookies: false, cache: false }), /CLEAR_HISTORY_FAILED/);
+    assert.deepEqual(browser.state().store.history, history);
+    assert.deepEqual(readFileSync(path), disk);
+    assert.equal(browser.state().storageError, true);
+    assert.equal(browser.state().clearingBrowsingData, false);
+    browser.close();
+  }
+});
+
+test('close records failed history storage, retains history and still clears cache and other profiles', async t => {
+  const options = {}, browser = notebookBrowser(t, plainCipher, options);
+  browser.navigate();
+  browser.command({ type: 'set-clear-history-on-close', value: true });
+  browser.command({ type: 'set-clear-cache-on-close', value: true });
+  const history = structuredClone(browser.state().store.history);
+  const other = browser.state().profiles.find(profile => profile.id !== browser.state().activeProfileId);
+  const store = sampleStore(browser.directory); store.clearHistoryOnClose = true; store.clearCacheOnClose = true;
+  writeStore(profileStorePath(browser.directory, other.id), store);
+  options.failStore = true;
+  browser.app.emit('before-quit', { preventDefault() {} });
+  for (let index = 0; index < 10; index++) await Promise.resolve();
+  assert.deepEqual(browser.state().store.history, history);
+  assert.equal(browser.state().storageError, true);
+  assert.equal(browser.sessions.size, 2);
+  for (const session of browser.sessions.values()) assert.ok(session.cleared.some(([name]) => name === 'clearCache'));
+  browser.close();
+});
+
+test('registry runner always receives the absolute SystemRoot path or the Windows fallback', async t => {
+  const { createDefaultBrowser } = require('../dist/electron/default-browser.js');
+  const original = process.env.SystemRoot;
+  t.after(() => { if (original === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = original; });
+  for (const root of ['D:\\Windows', undefined]) {
+    if (root === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = root;
+    const calls = [];
+    const service = createDefaultBrowser({ platform: 'win32', isPackaged: true, execPath: 'C:\\Horizon.exe', runner: async (command, args) => { calls.push([command, args]); return ''; }, openExternal: async () => {} });
+    await service.refresh(); await service.register();
+    assert.ok(calls.some(([, args]) => args[0] === 'query'));
+    assert.ok(calls.some(([, args]) => args[0] === 'add'));
+    for (const [command] of calls) assert.equal(command, `${root ?? 'C:\\Windows'}\\System32\\reg.exe`);
+  }
+});
+
+test('settings sections and their public addresses map one to one', () => {
+  const ts = require('typescript'), { settingsAddress, settingsSection } = require('../dist/electron/browsing.js');
+  const source = ts.createSourceFile('api.ts', readFileSync('src/shared/api.ts', 'utf8'), ts.ScriptTarget.Latest, true);
+  const type = source.statements.find(node => ts.isTypeAliasDeclaration(node) && node.name.text === 'SettingsSection');
+  const sections = type.type.types.map(node => node.literal.text);
+  const expected = { general: 'horizon://settings', appearance: 'horizon://settings/appearance', privacy: 'horizon://settings/privacy', 'privacy/sites': 'horizon://settings/privacy/sites', profiles: 'horizon://settings/profiles' };
+  assert.deepEqual(sections.sort(), Object.keys(expected).sort());
+  assert.equal(new Set(sections.map(settingsAddress)).size, sections.length);
+  for (const [section, address] of Object.entries(expected)) {
+    assert.equal(settingsAddress(section), address); assert.equal(settingsSection(address), section);
+    assert.equal(settingsSection(address + '/'), null); assert.equal(settingsSection(address + '?section=profiles'), null);
+  }
+  assert.equal(settingsSection('horizon://settings/general'), null);
+  const page = ts.createSourceFile('Settings.tsx', readFileSync('src/Settings.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const rail = page.statements.filter(ts.isVariableStatement).flatMap(node => [...node.declarationList.declarations]).find(node => node.name.getText(page) === 'SETTINGS_SECTIONS');
+  const entries = rail.initializer.expression.elements;
+  const destinations = entries.map(entry => entry.properties.find(property => property.name.getText(page) === 'section').initializer.text);
+  assert.deepEqual(destinations, ['general', 'appearance', 'privacy', 'profiles']);
+  for (const section of destinations) assert.equal(settingsSection(settingsAddress(section)), section);
+});
+
+test('profiles are managed in settings and the profiles panel route is removed', () => {
+  const app = readFileSync('src/App.tsx', 'utf8'), profiles = readFileSync('src/Profiles.tsx', 'utf8'), settings = readFileSync('src/Settings.tsx', 'utf8');
+  assert.doesNotMatch(app + profiles, /ProfilesPanel/);
+  assert.doesNotMatch(app, /openPanel\('profiles'\)|panel === 'profiles'|panel !== 'profiles'/);
+  assert.match(app, /onManage=\{\(\) => openSettings\('profiles'\)\}/);
+  assert.match(app, /openSettings\('general'\)/);
+  assert.match(settings, /ProfilesSettings/);
+});
+
+function settingsInterface(react = {}) {
+  return interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './HorizonMark': {}, './Menu': {}, './Notebooks': {}, './Profiles': {}, './Switch': {} });
+}
+
+test('settings failures use the complete named code and never expose command messages', () => {
+  const { settingsError } = settingsInterface(), { copy } = interfaceModule('src/copy.ts');
+  for (const key of Object.keys(copy).filter(key => /^[A-Z][A-Z_]+$/.test(key))) for (const language of ['en', 'es']) {
+    assert.equal(settingsError(new Error(`Error invoking remote method: ${key}`), language), copy[key][language]);
+  }
+  assert.equal(settingsError(new Error('an unrecognised internal detail'), 'en'), copy.browserError.en);
+});
+
+test('settings sites count each host once and preserve permissions from every origin', () => {
+  const react = { useState: value => [value, () => {}], useRef: current => ({ current }) };
+  const { groupSiteSettings, Settings } = settingsInterface(react);
+  const permissions = { camera: 'ask', microphone: 'ask', location: 'ask', notifications: 'ask' };
+  const sites = [
+    { host: 'example.com', origin: 'https://example.com', blocking: false, dark: true, permissions: { ...permissions, location: 'allow' } },
+    { host: 'example.com', origin: 'http://example.com:8080', blocking: false, dark: true, permissions: { ...permissions, location: 'block' } },
+    { host: 'other.example', origin: 'https://other.example', blocking: null, dark: false, permissions },
+  ];
+  const groups = groupSiteSettings(sites);
+  assert.deepEqual(groups.map(group => group.map(site => site.origin)), [['https://example.com', 'http://example.com:8080'], ['https://other.example']]);
+  assert.deepEqual(groupSiteSettings([]), []);
+  for (const language of ['en', 'es']) {
+    const page = Settings({ state: { sites }, section: 'privacy/sites', language, onOpen() {} });
+    const component = notebookNodes(page, node => node.type?.name === 'SitesSettings')[0];
+    const rows = notebookNodes(component.type(component.props), node => node.type?.name === 'SettingsSite');
+    assert.equal(rows.length, 2); assert.notEqual(rows[0].props.sites, rows[1].props.sites);
+    const rendered = rows[0].type(rows[0].props), hint = notebookNodes(rendered, node => node.props.className === 'setting-hint')[0];
+    assert.match(hint.props.children, /https:\/\/example\.com/); assert.match(hint.props.children, /http:\/\/example\.com:8080/);
+  }
+});
+
 test('dark page copy includes the approved English and Rioplatense Spanish labels, hints and announcements', () => {
   const { copy, text } = interfaceModule('src/copy.ts');
   const expected = {
@@ -281,9 +454,9 @@ test('dark page menu rows are labelled radio groups with immediate commands and 
   visit(source); assert.ok(menu);
   const compiled = ts.transpileModule(`export function render(state, t, run) { return ${menu.getText(source)}; }`, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exported = {}, jsx = (type, props) => ({ type, props });
-  compileFunction(compiled, ['exports', 'require', 'Menu', 'Plus', 'History', 'Star', 'Download', 'Search', 'Switch', 'menuByKeyboard', 'menuButtonRef', 'activeUrl', 'active', 'window'])(exported,
+  compileFunction(compiled, ['exports', 'require', 'Menu', 'Plus', 'History', 'Star', 'Download', 'Search', 'Switch', 'Settings2', 'menuByKeyboard', 'menuButtonRef', 'activeUrl', 'active', 'window'])(exported,
     name => { assert.equal(name, 'react/jsx-runtime'); return { jsx, jsxs: jsx, Fragment: 'fragment' }; },
-    'menu', 'plus', 'history', 'star', 'download', 'search', 'switch', { current: false }, { current: null }, '', undefined, { horizon: { initialTheme: 'system', initialContrast: 'standard' } });
+    'menu', 'plus', 'history', 'star', 'download', 'search', 'switch', 'settings', { current: false }, { current: null }, '', undefined, { horizon: { initialTheme: 'system', initialContrast: 'standard' } });
   for (const language of ['en', 'es']) for (const mode of [undefined, 'off', 'on', 'system']) for (const strength of ['soft', 'standard', 'deep']) for (const tone of ['neutral', 'warm']) {
     const commands = [], state = mode ? { darkPages: { mode, strength, tone } } : null;
     const rendered = exported.render(state, key => text(key, language), command => commands.push(command));
@@ -313,7 +486,7 @@ test('site dark switches preserve row order, accessible hints and focus while re
   for (const language of ['en', 'es']) for (const [mode, active] of [['off', false], ['system', false], ['system', true], ['on', true]]) for (const dark of [false, true]) {
     const commands = []; let finish;
     const popover = ShieldPopover({ site: { host: 'example.com', blocking: true, dark, permissions: { camera: 'ask', microphone: 'ask', location: 'ask', notifications: 'ask' } },
-      counts: { ads: 0, trackers: 0, cookies: 0 }, ready: true, darkPages: { mode, active, strength: 'standard', tone: 'neutral' }, language, initial: 'E', opener: { current: null }, onDismiss() {}, onTabOut() {},
+      counts: { ads: 0, trackers: 0, cookies: 0 }, ready: true, blockAds: true, darkPages: { mode, active, strength: 'standard', tone: 'neutral' }, language, initial: 'E', opener: { current: null }, onDismiss() {}, onTabOut() {},
       run: command => { commands.push(command); return new Promise(done => { finish = done; }); } });
     const rows = interfaceChildren(popover), blockingIndex = rows.findIndex(row => row.props.className === 'site-blocking-row'), darkRow = rows[blockingIndex + 1];
     assert.equal(darkRow.props.className, active ? 'site-dark-row' : 'site-dark-row with-hint'); assert.equal(rows[blockingIndex + 2].type, 'hr');
@@ -420,7 +593,7 @@ function temporaryDirectory(t, prefix) {
 
 function sampleStore(directory) {
   return {
-    version: 3,
+    version: 4, clearHistoryOnClose: false, clearCacheOnClose: false,
     siteSettings: { blocking: [], dark: [], permissions: [] },
     history: [{ url: 'https://example.com/', title: 'Example', lastVisit: 1, visitCount: 2 }],
     bookmarks: [{ url: 'https://example.com/', title: 'Example', createdAt: 1 }],
@@ -431,7 +604,7 @@ function sampleStore(directory) {
 test('store schema rejects unsafe URLs, shapes, statuses, paths, and unbounded fields', (t) => {
   const directory = temporaryDirectory(t, 'schema');
   assert.equal(validateStore(sampleStore(directory)), true);
-  assert.equal(validateStore({ version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } }), true);
+  assert.equal(validateStore({ version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } }), true);
   for (const invalid of [null, [], {}, { version: 2, history: [], bookmarks: [], downloads: [] }]) assert.equal(validateStore(invalid), false);
   const mutations = [
     store => { store.extra = true; },
@@ -469,17 +642,17 @@ test('store schema rejects unsafe URLs, shapes, statuses, paths, and unbounded f
 test('store writes atomically, recovers invalid files, and preserves corrupt originals', (t) => {
   const directory = temporaryDirectory(t, 'store');
   const path = join(directory, 'profile', 'browser.json');
-  assert.deepEqual(readStore(path), { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
+  assert.deepEqual(readStore(path), { version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
   assert.ok(existsSync(path));
   const store = sampleStore(directory);
   writeStore(path, store);
   assert.deepEqual(readStore(path), store);
   assert.equal(readdirSync(join(directory, 'profile')).some(name => name.endsWith('.tmp')), false);
-  assert.throws(() => writeStore(path, { ...store, version: 4 }));
+  assert.throws(() => writeStore(path, { ...store, version: 5 }));
   assert.deepEqual(readStore(path), store);
-  for (const corrupt of ['{broken json', JSON.stringify({ ...store, version: 4 })]) {
+  for (const corrupt of ['{broken json', JSON.stringify({ ...store, version: 5 })]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readStore(path), { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
+    assert.deepEqual(readStore(path), { version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
     const backups = readdirSync(join(directory, 'profile')).filter(name => name.startsWith('browser.json.corrupt-'));
     assert.ok(backups.some(name => readFileSync(join(directory, 'profile', name), 'utf8') === corrupt));
     assert.equal(validateStore(JSON.parse(readFileSync(path, 'utf8'))), true);
@@ -1341,7 +1514,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.throws(() => menuAction(oldMenu, 'reload'));
   assert.equal(state().activeProfileId, work.id);
   assert.equal(readRegistry(join(directory, 'profiles.json'), 'en').activeId, work.id);
-  assert.deepEqual(state().store, { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
+  assert.deepEqual(state().store, { version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
   assert.equal(state().tabs.length, 1);
   assert.equal(view.visible, false); assert.equal(view.webContents.destroyed, false);
   assert.equal(sessions.size, 2);
@@ -1520,14 +1693,14 @@ test('settings validate themes, write atomically and preserve corrupt or oversiz
   assert.equal(settings.theme, 'system');
   assert.equal(createSettings(path, () => {}).migrationAllowed, false);
   assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
-  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 2, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' }), true);
+  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 3, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true }), true);
   for (const value of [null, [], {}, { version: 2, theme: 'system' }, { version: 1, theme: 'dark' }, { version: 1, theme: 'amber', extra: true }, { version: 1, theme: 'amber' }, { version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', contrast: null }, { version: 1, theme: 'amber', contrast: 'high', extra: true }]) {
     assert.equal(validateSettings(value), false);
     assert.throws(() => writeSettings(path, value));
   }
   for (const corrupt of ['{broken', JSON.stringify({ version: 2, theme: 'amber' }), ' '.repeat(4097)]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readSettings(path), { version: 2, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
+    assert.deepEqual(readSettings(path), { version: 3, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
     assert.ok(readdirSync(directory).filter(name => name.startsWith('settings.json.corrupt-')).some(name => readFileSync(join(directory, name), 'utf8') === corrupt));
   }
   const existing = createSettings(path, () => {});
@@ -1688,7 +1861,7 @@ test('dark page flips replace views in every profile without closing tabs and si
 
 test('dark page settings validate exact values, migrate version 1 and retain valid data when migration cannot be saved', t => {
   const directory = temporaryDirectory(t, 'dark-settings'), path = join(directory, 'settings.json');
-  const defaults = { version: 2, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' };
+  const defaults = { version: 3, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true };
   assert.deepEqual(readSettings(path), defaults);
   for (const darkPages of ['off', 'on', 'system']) for (const darkStrength of ['soft', 'standard', 'deep']) for (const darkTone of ['neutral', 'warm']) {
     const valid = { ...defaults, darkPages, darkStrength, darkTone };
@@ -1863,25 +2036,25 @@ test('contrast defaults follow the OS only on first run and legacy settings migr
   const directory = temporaryDirectory(t, 'contrast');
   const first = join(directory, 'first.json');
   const settings = createSettings(first, () => {}, true);
-  assert.deepEqual(readSettings(first), { version: 2, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
+  assert.deepEqual(readSettings(first), { version: 3, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
   settings.setTheme('amber', true);
   assert.equal(settings.contrast, 'high');
   settings.setContrast('standard');
   assert.equal(settings.theme, 'amber');
-  assert.deepEqual(readSettings(first, true), { version: 2, theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
+  assert.deepEqual(readSettings(first, true), { version: 3, theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
   assert.throws(() => settings.setContrast('invalid'));
   assert.equal(settings.contrast, 'standard');
   for (const theme of ['system', 'amber', 'daylight']) {
     const legacy = join(directory, theme + '.json');
     writeFileSync(legacy, JSON.stringify({ version: 1, theme }));
-    assert.deepEqual(readSettings(legacy, true), { version: 2, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
-    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 2, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
+    assert.deepEqual(readSettings(legacy, true), { version: 3, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
+    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 3, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
     assert.equal(createSettings(legacy, () => {}, true).migrationAllowed, false);
   }
   assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
   const blocked = join(directory, 'blocked');
   writeFileSync(blocked, 'file');
-  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 2, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' });
+  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 3, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true });
   const unavailable = createSettings(join(blocked, 'settings.json'), () => {}, true);
   assert.throws(() => unavailable.setContrast('standard'));
   assert.equal(unavailable.contrast, 'high');
@@ -1925,6 +2098,7 @@ test('main paints the resolved palette and passes both settings before loading c
     const switchCalls = [];
     app.commandLine = { appendSwitch(...args) { switchCalls.push(['append', ...args]); }, removeSwitch(...args) { switchCalls.push(['remove', ...args]); } };
     app.isPackaged = true;
+    app.requestSingleInstanceLock = () => true;
     app.enableSandbox = () => {};
     app.whenReady = () => Promise.resolve();
     app.getPath = () => directory;
@@ -1958,7 +2132,7 @@ test('main paints the resolved palette and passes both settings before loading c
     let changed;
     compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])( {}, name => {
       if (name === 'electron') return electron;
-      if (name === './settings') return { createSettings(path, callback, high) { assert.equal(path, join(directory, 'settings.json')); assert.equal(high, true); changed = callback; return settings; } };
+      if (name === './settings') return { ...localRequire(name), createSettings(path, callback, high) { assert.equal(path, join(directory, 'settings.json')); assert.equal(high, true); changed = callback; return settings; } };
       if (name === './security') return { START_URL: 'horizon://app/', secureSession() {} };
       if (name === './protocol') return { serveHorizon: async () => {} };
       if (name === './browser') return { createBrowser: () => ({ layout() {} }) };
@@ -2080,10 +2254,10 @@ test('profile stores encrypt through an injected cipher and retain tampered or i
   const tampered = Buffer.from(encrypted); tampered[tampered.length - 1] ^= 1;
   writeFileSync(path, tampered);
   const readStatus = { readError: false, memoryOnly: false };
-  assert.deepEqual(readStore(path, cipher, readStatus), { version: 3, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
+  assert.deepEqual(readStore(path, cipher, readStatus), { version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
   assert.deepEqual(readStatus, { readError: true, memoryOnly: false });
   assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(tampered)));
-  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 4 }))]);
+  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 5 }))]);
   writeFileSync(path, invalid);
   assert.equal(readStore(path, cipher).history.length, 0);
   assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(invalid)));
@@ -2194,8 +2368,9 @@ test('site settings migrate strict version 1 and 2 stores to version 3 and valid
   const cipher = authenticatedCipher(), encryptedLegacy = join(directory, 'encrypted.json');
   writeFileSync(encryptedLegacy, Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify(legacy))]));
   assert.deepEqual(readStore(encryptedLegacy, cipher), sample);
-  const second = { ...sample, version: 2, siteSettings: { blocking: [{ host: 'example.com', enabled: false }], permissions: [{ origin: 'https://example.com', ...defaultPermissions(), camera: 'allow' }] } };
-  const expected = { ...second, version: 3, siteSettings: { ...second.siteSettings, dark: [] } };
+  const legacySample = { ...sample }; delete legacySample.clearHistoryOnClose; delete legacySample.clearCacheOnClose;
+  const second = { ...legacySample, version: 2, siteSettings: { blocking: [{ host: 'example.com', enabled: false }], permissions: [{ origin: 'https://example.com', ...defaultPermissions(), camera: 'allow' }] } };
+  const expected = { ...second, version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, siteSettings: { ...second.siteSettings, dark: [] } };
   writeFileSync(path, JSON.stringify(second)); assert.deepEqual(readStore(path), expected);
   assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), expected);
   writeFileSync(encryptedLegacy, Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify(second))]));
@@ -2734,14 +2909,15 @@ test('either page protocol call exceeding its deadline detaches without acceptin
     finish({ data: faviconPNG.toString('base64') }); await Promise.resolve(); await Promise.resolve(); assert.equal(detached, 1); assert.equal(timers.size, 0);
   }
 });
-function notebookBrowser(t, cipher = plainCipher) {
+function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
   let close = () => {}; t.after(() => close());
   const directory = temporaryDirectory(t, 'notebook-browser'), handlers = new Map(), views = [], timers = new Map(), sessions = new Map();
   const notebookModule = timedModule('notebooks', timers), captureModule = timedModule('captures', timers);
+  let contentsId = 0;
   class Contents extends EventEmitter {
     constructor(targetSession) {
-      super(); this.session = targetSession; this.zoom = 1; this.mainFrame = { url: 'horizon://app/' }; this.sent = []; this.protocol = [];
+      super(); this.id = ++contentsId; this.session = targetSession; this.zoom = 1; this.mainFrame = { url: 'horizon://app/' }; this.sent = []; this.protocol = [];
       this.navigationHistory = { canGoBack: () => false, canGoForward: () => false, getAllEntries: () => [], getActiveIndex: () => -1 };
       this.debugger = { attach: () => { this.attached = true; }, detach: () => { this.attached = false; this.detached = (this.detached || 0) + 1; }, sendCommand: async (name, args) => {
         this.protocol.push([name, args]); return name === 'Page.getLayoutMetrics' ? { cssLayoutViewport: { clientWidth: 800 }, cssContentSize: { height: 600 } } : { data: faviconPNG.toString('base64') };
@@ -2772,14 +2948,16 @@ function notebookBrowser(t, cipher = plainCipher) {
     getVisible() { return this.visible; }
   }
   const app = Object.assign(new EventEmitter(), { getLocale: () => 'en', getPath: () => directory, commandLine: { appendSwitch() {}, removeSwitch() {} } });
+  app.quit = () => { app.quits = (app.quits || 0) + 1; };
   const electron = { app, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), safeStorage: cipher, WebContentsView: View,
     screen: { getDisplayMatching: () => ({ scaleFactor: 2 }) },
     ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
     session: { fromPartition(partition) {
       if (!sessions.has(partition)) {
-        const target = new EventEmitter(); target.setPermissionRequestHandler = () => {}; target.setPermissionCheckHandler = () => {}; target.setDevicePermissionHandler = () => {};
-        target.webRequest = Object.fromEntries(['onBeforeRequest', 'onBeforeSendHeaders', 'onHeadersReceived', 'onCompleted', 'onErrorOccurred'].map(name => [name, () => {}]));
-        for (const name of ['clearStorageData', 'closeAllConnections', 'clearCache', 'clearAuthCache', 'clearCodeCaches']) target[name] = async () => {};
+        const target = new EventEmitter(); target.setPermissionRequestHandler = fn => { target.request = fn; }; target.setPermissionCheckHandler = fn => { target.check = fn; }; target.setDevicePermissionHandler = () => {};
+        target.webRequest = Object.fromEntries(['onBeforeRequest', 'onBeforeSendHeaders', 'onHeadersReceived', 'onCompleted', 'onErrorOccurred'].map(name => [name, fn => { target[name] = fn; }]));
+        target.cleared = [];
+        for (const name of ['clearStorageData', 'closeAllConnections', 'clearCache', 'clearAuthCache', 'clearCodeCaches']) target[name] = async args => { target.cleared.push([name, args]); if (options.clear) return options.clear(name, target); };
         sessions.set(partition, target);
       }
       return sessions.get(partition);
@@ -2788,17 +2966,24 @@ function notebookBrowser(t, cipher = plainCipher) {
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
-    name === 'electron' ? electron : name === './notebooks' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { createBlockingEngine: () => ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
+    name === 'electron' ? electron : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './notebooks' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, contentView: { addChildView() {}, removeChildView() {} } });
-  exported.createBrowser(window, directory, join(directory, 'downloads'), createSettings(join(directory, 'settings.json'), () => {}));
+  electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; return options.saveChoice; } };
+  electron.shell = { openExternal: async () => assert.fail('System settings must stay mocked'), showItemInFolder: path => { options.shownPath = path; }, openPath: async () => '' };
+  Contents.prototype.stop = function () { this.stops = (this.stops || 0) + 1; };
+  Contents.prototype.reload = function () { this.reloads = (this.reloads || 0) + 1; };
+  Contents.prototype.reloadIgnoringCache = function () { this.bypassedCache = (this.bypassedCache || 0) + 1; };
+  options.prepare?.(directory);
+  const settings = createSettings(join(directory, 'settings.json'), () => {});
+  const browser = exported.createBrowser(window, directory, join(directory, 'downloads'), settings, undefined, { status: 'developmentBuild', refresh: async () => {}, register: async () => {} });
   let closed = false; close = () => { if (!closed) { closed = true; window.emit('closed'); } };
   const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
   const state = () => handlers.get('horizon:state')(event), command = value => handlers.get('horizon:command')(event, value);
   const notebook = (...args) => handlers.get('horizon:notebook')(event, ...args), image = (...args) => handlers.get('horizon:capture-image')(event, ...args);
   const area = hidden => handlers.get('horizon:content-area')(event, { top: 100, hidden });
   const navigate = (url = 'https://example.com/') => { command({ type: 'navigate', input: url }); views.at(-1).webContents.emit('did-navigate', {}, url); };
-  return { directory, handlers, views, timers, window, app, close, event, state, command, notebook, image, area, navigate };
+  return { directory, handlers, views, timers, sessions, window, app, close, event, state, command, notebook, image, area, navigate, settings, openLaunch: browser.openLaunch, isLaunchNavigation: exported.isLaunchNavigation };
 }
 
 test('notebook tabs are chrome pages, remain consistent across editing and never enter history or a web view', async t => {
@@ -3402,4 +3587,378 @@ test('run D: locked creation and capture explain refusal in place before sending
   tree = captureRender(); notebookNodes(tree, node => node.props.className === 'profile-action primary capture-save')[0].props.onClick(); tree = captureRender();
   assert.equal(commands, 0); assert.equal(notebookNodes(tree, node => node.type === 'picker').length, 0);
   assert.equal(notebookNodes(tree, node => node.props.role === 'alert')[0].props.children[0].props.children, copy.text('NOTEBOOK_LOCKED', 'en'));
+});
+test('settings v3 validates every new field and migrates v2 without losing appearance', t => {
+  const directory = temporaryDirectory(t, 'settings-v3'), path = join(directory, 'settings.json');
+  const defaults = readSettings(path);
+  assert.equal(defaults.version, 3);
+  for (const [key, bad] of [['searchEngine', 'unknown'], ['language', 'fr'], ['downloadsFolder', 'relative'], ['askWhereToSave', 1], ['blockAds', null], ['blockThirdPartyCookies', 'false']]) {
+    assert.equal(validateSettings({ ...defaults, [key]: bad }), false);
+    const missing = { ...defaults }; delete missing[key]; assert.equal(validateSettings(missing), false);
+  }
+  const legacy = { version: 2, theme: 'daylight', contrast: 'high', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' };
+  writeFileSync(path, JSON.stringify(legacy));
+  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 3 });
+  assert.equal(JSON.parse(readFileSync(path)).version, 3);
+  const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
+  writeFileSync(path, JSON.stringify(legacy));
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...require(name), renameSync() { throw new Error('Read-only'); } } : localRequire(name));
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 3 });
+  assert.equal(JSON.parse(readFileSync(path)).version, 2);
+});
+
+test('downloads folder validation refuses relative, linked, controlled and unavailable choices while preserving settings', t => {
+  const directory = temporaryDirectory(t, 'settings-folder'), path = join(directory, 'settings.json'), chosen = join(directory, 'chosen');
+  mkdirSync(chosen);
+  const { isDownloadsFolder, resolvedDownloadsFolder } = require('../dist/electron/settings.js');
+  const settings = createSettings(path, () => {});
+  settings.setTheme('amber', false); settings.setDownloadsFolder(chosen);
+  assert.equal(isDownloadsFolder(chosen), true);
+  const link = join(directory, 'linked'); symlinkSync(chosen, link, process.platform === 'win32' ? 'junction' : 'dir');
+  for (const value of ['relative', 'C:relative', '\\root-relative', chosen + '\n', chosen + '\u0085', chosen + 'x'.repeat(1025), join(directory, 'missing'), link]) {
+    assert.equal(isDownloadsFolder(value), false);
+    assert.throws(() => settings.setDownloadsFolder(value), /DOWNLOADS_FOLDER_INVALID/);
+    assert.equal(validateSettings({ ...readSettings(path), downloadsFolder: value }), false);
+    assert.throws(() => writeSettings(path, { ...readSettings(path), downloadsFolder: value }));
+  }
+  require('node:fs').rmdirSync(chosen);
+  assert.deepEqual(resolvedDownloadsFolder(settings, directory), { downloadsFolder: directory, downloadsFolderDefault: true, downloadsFolderUnavailable: true });
+  const original = readFileSync(path), reopened = createSettings(path, () => {});
+  assert.equal(reopened.theme, 'amber'); assert.equal(reopened.downloadsFolder, null); assert.equal(reopened.downloadsFolderUnavailable, true);
+  assert.deepEqual(readFileSync(path), original); assert.equal(readdirSync(directory).some(name => name.includes('corrupt')), false);
+  settings.setSearchEngine('brave'); assert.equal(settings.downloadsFolder, null); assert.equal(settings.downloadsFolderUnavailable, true);
+  reopened.setDownloadsFolder(null); assert.equal(reopened.downloadsFolderUnavailable, false);
+});
+
+test('settings commands have exact shapes, named failures and all engine prefixes and language resolutions', () => {
+  const { SEARCH_ENGINES } = require('../dist/src/shared/api.js'), { resolveLanguage } = require('../dist/electron/settings.js');
+  const { settingsAddress, settingsSection } = require('../dist/electron/browsing.js');
+  for (const section of ['general', 'appearance', 'privacy', 'privacy/sites', 'profiles']) assert.equal(settingsSection(settingsAddress(section)), section);
+  const commands = [
+    ...['general', 'appearance', 'privacy', 'privacy/sites', 'profiles'].map(section => ({ type: 'open-settings', section })),
+    ...Object.keys(SEARCH_ENGINES).map(value => ({ type: 'set-search-engine', value })),
+    ...['system', 'en', 'es'].map(value => ({ type: 'set-language', value })),
+    ...['set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].flatMap(type => [true, false].map(value => ({ type, value }))),
+    ...['choose-downloads-folder', 'reset-downloads-folder', 'register-default-browser'].map(type => ({ type })),
+    { type: 'reset-site', host: 'example.com' }, { type: 'clear-browsing-data', history: true, cookies: false, cache: false },
+  ];
+  for (const command of commands) {
+    assert.deepEqual(validateCommand(command), command);
+    assert.throws(() => validateCommand({ ...command, extra: 1 }), /SETTINGS_COMMAND_INVALID/);
+    for (const key of Object.keys(command).filter(key => key !== 'type')) {
+      const missing = { ...command }; delete missing[key]; assert.throws(() => validateCommand(missing), /SETTINGS_COMMAND_INVALID/);
+      assert.throws(() => validateCommand({ ...command, [key]: null }), /SETTINGS_COMMAND_INVALID/);
+    }
+  }
+  for (const command of [{ type: 'open-settings', section: 'privacy/' }, { type: 'set-search-engine', value: '__proto__' }, { type: 'set-language', value: 'EN' }, { type: 'clear-browsing-data', history: false, cookies: false, cache: false }, { type: 'reset-site', host: 'EXAMPLE.com' }, { type: 'reset-site', host: 'example.com:443' }]) assert.throws(() => validateCommand(command), /SETTINGS_COMMAND_INVALID/);
+  const prefixes = { duckduckgo: 'https://duckduckgo.com/?q=', startpage: 'https://www.startpage.com/sp/search?query=', brave: 'https://search.brave.com/search?q=', ecosia: 'https://www.ecosia.org/search?q=', bing: 'https://www.bing.com/search?q=', google: 'https://www.google.com/search?q=' };
+  for (const [engine, prefix] of Object.entries(prefixes)) assert.equal(classifyInput('bread & butter', engine), prefix + 'bread%20%26%20butter');
+  assert.equal(resolveLanguage('system', 'es-AR'), 'es'); assert.equal(resolveLanguage('system', 'fr-FR'), 'en');
+  assert.equal(resolveLanguage('en', 'es-AR'), 'en'); assert.equal(resolveLanguage('es', 'en-US'), 'es');
+});
+
+test('store v4 strictly validates profile close flags and preserves version 3 data on migration', t => {
+  const directory = temporaryDirectory(t, 'store-v4'), path = join(directory, 'store.json'), sample = sampleStore(directory);
+  for (const flag of ['clearHistoryOnClose', 'clearCacheOnClose']) {
+    for (const value of [null, 1, 'false', undefined]) assert.equal(validateStore({ ...sample, [flag]: value }), false);
+    const missing = { ...sample }; delete missing[flag]; assert.equal(validateStore(missing), false);
+  }
+  const legacy = { ...sample, version: 3 }; delete legacy.clearHistoryOnClose; delete legacy.clearCacheOnClose;
+  writeFileSync(path, JSON.stringify(legacy));
+  assert.deepEqual(readStore(path), sample); assert.equal(JSON.parse(readFileSync(path)).version, 4);
+});
+
+test('sites list preserves explicit dark choices and per-origin permissions; reset clears every host origin', () => {
+  const { listSites, resetSite } = require('../dist/electron/site-settings.js');
+  const store = { blocking: [{ host: 'example.com', enabled: false }, { host: 'normal.com', enabled: true }], dark: [{ host: 'example.com', enabled: true }, { host: 'dark.com', enabled: false }],
+    permissions: [{ origin: 'https://example.com:8443', ...defaultPermissions(), camera: 'allow' }, { origin: 'http://example.com', ...defaultPermissions(), notifications: 'block' }, { origin: 'https://normal.com', ...defaultPermissions() }] };
+  const sites = listSites(store);
+  assert.equal(sites.length, 3);
+  assert.deepEqual(sites.find(entry => entry.host === 'dark.com'), { host: 'dark.com', origin: 'https://dark.com', blocking: null, dark: false, permissions: defaultPermissions() });
+  assert.equal(sites.filter(entry => entry.host === 'example.com').every(entry => entry.dark === true && entry.blocking === false), true);
+  resetSite(store, 'example.com');
+  assert.deepEqual(store.blocking, [{ host: 'normal.com', enabled: true }]); assert.deepEqual(store.permissions, [{ origin: 'https://normal.com', ...defaultPermissions() }]);
+  assert.deepEqual(listSites(store).map(entry => entry.host), ['dark.com']);
+});
+
+test('settings tabs reuse one tab after the active page, retain profile memory and refuse address variants', t => {
+  const browser = notebookBrowser(t), { command, state, views } = browser;
+  browser.navigate(); const original = state().activeId;
+  command({ type: 'new-tab' }); const blank = state().activeId; command({ type: 'activate-tab', id: original });
+  command({ type: 'open-settings', section: 'general' }); const settings = state().activeId;
+  assert.deepEqual(state().tabs.map(tab => tab.id), [original, settings, blank]); assert.equal(views.length, 1);
+  assert.equal(state().tabs[1].url, 'horizon://settings'); assert.equal(state().tabs[1].settings, 'general'); assert.equal(state().siteSettings, null);
+  assert.equal(state().tabs[1].favicon, null); assert.deepEqual(state().tabs[1].blocked, { ads: 0, trackers: 0, cookies: 0 });
+  command({ type: 'navigate', input: 'horizon://settings/privacy/sites' }); assert.equal(state().activeId, settings); assert.equal(state().tabs[1].settings, 'privacy/sites');
+  for (const input of ['horizon://settings/', 'horizon://settings/general', 'horizon://settings?x', 'horizon://settings/privacy#x', 'horizon://other']) assert.throws(() => command({ type: 'navigate', input }));
+  assert.equal(state().store.history.length, 1);
+  const profile = state().activeProfileId, other = state().profiles.find(entry => entry.id !== profile);
+  command({ type: 'switch-profile', id: other.id }); command({ type: 'open-settings', section: 'profiles' }); assert.notEqual(state().activeId, settings);
+  command({ type: 'switch-profile', id: profile }); assert.equal(state().activeId, settings);
+  command({ type: 'navigate', input: 'example.org' }); assert.equal(state().tabs.find(tab => tab.id === settings).settings, null); assert.equal(views.length, 2);
+  command({ type: 'open-settings', section: 'appearance' });
+  for (let index = state().tabs.length; index < 200; index++) command({ type: 'new-tab' });
+  const settingsTab = state().tabs.find(tab => tab.settings); command({ type: 'close-tab', id: settingsTab.id }); command({ type: 'new-tab' });
+  assert.throws(() => command({ type: 'open-settings', section: 'general' }), /SETTINGS_TAB_LIMIT/);
+});
+
+test('app settings publish immediately and folder chooser is parented, canceled safely and reports picker errors', async t => {
+  const options = {}, browser = notebookBrowser(t, plainCipher, options), { command, state } = browser;
+  command({ type: 'set-search-engine', value: 'brave' }); command({ type: 'navigate', input: 'bread recipes' });
+  assert.equal(state().tabs[0].url, 'https://search.brave.com/search?q=bread%20recipes');
+  command({ type: 'set-language', value: 'es' }); assert.equal(state().languageSetting, 'es'); assert.equal(state().language, 'es');
+  await command({ type: 'choose-downloads-folder' }); assert.equal(state().downloadsFolderDefault, true);
+  const chosen = join(browser.directory, 'chosen'); mkdirSync(chosen); options.folderChoice = { canceled: false, filePaths: [chosen] };
+  await command({ type: 'choose-downloads-folder' }); assert.equal(options.folderArgs[0], browser.window); assert.deepEqual(options.folderArgs[1].properties, ['openDirectory']); assert.equal(state().downloadsFolder, chosen);
+  options.folderError = true; await assert.rejects(command({ type: 'choose-downloads-folder' }), /DOWNLOADS_FOLDER_PICK_FAILED/); assert.equal(state().downloadsFolder, chosen);
+  command({ type: 'reset-downloads-folder' }); assert.equal(state().downloadsFolderDefault, true);
+  options.failStore = true;
+  assert.throws(() => command({ type: 'set-clear-history-on-close', value: true }), /PROFILE_SETTINGS_SAVE_FAILED/); assert.equal(state().clearHistoryOnClose, false);
+  options.failStore = false; command({ type: 'set-clear-history-on-close', value: true }); assert.equal(state().clearHistoryOnClose, true);
+  const settingsPath = join(browser.directory, 'settings.json'); rmSync(settingsPath); mkdirSync(settingsPath);
+  assert.throws(() => command({ type: 'set-language', value: 'en' }), /SETTINGS_SAVE_FAILED/); assert.equal(state().language, 'es');
+});
+
+test('clear commands affect only captured profile, return selected flags, forget undo and refuse overlap', async t => {
+  let finish;
+  const options = { clear: name => name === 'clearCache' ? new Promise(resolve => { finish = resolve; }) : undefined };
+  const browser = notebookBrowser(t, plainCipher, options), { command, state } = browser;
+  browser.navigate(); const first = state().activeProfileId, other = state().profiles.find(entry => entry.id !== first);
+  command({ type: 'clear-history' }); assert.equal(state().store.history.length, 0); command({ type: 'restore', kind: 'history' }); assert.equal(state().store.history.length, 1);
+  command({ type: 'clear-history' });
+  const work = command({ type: 'clear-browsing-data', history: true, cookies: true, cache: true });
+  assert.equal(state().clearingBrowsingData, true); assert.throws(() => command({ type: 'clear-browsing-data', history: true, cookies: false, cache: false }), /CLEAR_IN_PROGRESS/);
+  command({ type: 'switch-profile', id: other.id }); browser.navigate('https://other.example/');
+  const contents = browser.views.at(-1).webContents, target = browser.sessions.get(contents.session === undefined ? 'none' : state().profiles.find(entry => entry.id === other.id)?.partition) ?? contents.session;
+  target.onBeforeRequest({ id: 1, url: 'https://other.example/', resourceType: 'mainFrame', webContentsId: contents.id }, result => assert.equal(result.cancel, false));
+  assert.equal(state().store.history.length, 1);
+  await Promise.resolve(); finish(); assert.deepEqual(await work, { history: true, cookies: true, cache: true }); assert.equal(state().clearingBrowsingData, false);
+  assert.equal(state().store.history.length, 1);
+  command({ type: 'switch-profile', id: first }); command({ type: 'restore', kind: 'history' }); assert.deepEqual(state().store.history, []);
+  const firstSession = browser.views[0].webContents.session;
+  assert.deepEqual(firstSession.cleared, [['clearStorageData', { storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }], ['clearCache', undefined]]);
+});
+
+test('clear failures report each selected kind and profile reset rolls back a failed synchronous save', async t => {
+  for (const [field, method, error] of [['cookies', 'clearStorageData', 'CLEAR_SITE_DATA_FAILED'], ['cache', 'clearCache', 'CLEAR_CACHE_FAILED']]) {
+    const options = { clear: name => { if (name === method) throw new Error('Native detail'); } }, browser = notebookBrowser(t, plainCipher, options);
+    await assert.rejects(browser.command({ type: 'clear-browsing-data', history: false, cookies: false, cache: false, [field]: true }), new RegExp(error));
+    assert.equal(browser.state().clearingBrowsingData, false); browser.close();
+  }
+  const options = {}, browser = notebookBrowser(t, plainCipher, options); browser.navigate();
+  browser.command({ type: 'set-blocking', enabled: false }); browser.command({ type: 'set-site-dark', enabled: true });
+  options.failStore = true;
+  await assert.rejects(browser.command({ type: 'clear-browsing-data', history: true, cookies: false, cache: false }), /CLEAR_HISTORY_FAILED/);
+  assert.equal(browser.state().store.history.length, 1);
+  assert.throws(() => browser.command({ type: 'reset-site', host: 'example.com' }), /SITE_SETTINGS_SAVE_FAILED/);
+  assert.equal(browser.state().sites[0].blocking, false); options.failStore = false;
+  browser.command({ type: 'reset-site', host: 'example.com' }); assert.deepEqual(browser.state().sites, []); assert.equal(browser.views[0].webContents.bypassedCache, 1);
+});
+
+test('global ads off avoids network matches and cosmetics, keeps exceptions and counts refused cookies independently', t => {
+  let matches = 0, cosmetics = 0;
+  const blocker = { ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => { cosmetics++; return ''; }, match: () => { matches++; return { kind: 'ads' }; } };
+  const browser = notebookBrowser(t, plainCipher, { blocker }), { state, command } = browser; browser.navigate();
+  command({ type: 'set-blocking', enabled: false }); const exception = structuredClone(state().store.siteSettings.blocking);
+  command({ type: 'set-block-ads', value: false }); browser.navigate('https://other.example/');
+  const contents = browser.views.at(-1).webContents, target = contents.session;
+  target.onBeforeRequest({ id: 1, url: 'https://ads.example/blocked', resourceType: 'script', webContentsId: contents.id }, result => assert.equal(result.cancel, false));
+  let headers;
+  target.onBeforeSendHeaders({ id: 1, url: 'https://ads.example/blocked', resourceType: 'script', requestHeaders: { Cookie: 'a=1' }, webContentsId: contents.id }, result => { headers = result.requestHeaders; });
+  assert.deepEqual(headers, {}); assert.equal(matches, 0); assert.equal(cosmetics, 1);
+  assert.deepEqual(state().store.siteSettings.blocking, exception); assert.deepEqual(state().tabs[0].blocked, { ads: 0, trackers: 0, cookies: 1 }); assert.deepEqual(target.cleared, []);
+  target.onHeadersReceived({ id: 1, url: 'https://ads.example/blocked', resourceType: 'script', responseHeaders: { 'Set-Cookie': ['a=2', 'b=1'] }, webContentsId: contents.id }, result => assert.deepEqual(result.responseHeaders, {}));
+  assert.equal(state().tabs[0].blocked.cookies, 2);
+  command({ type: 'set-block-third-party-cookies', value: false });
+  target.onBeforeSendHeaders({ id: 2, url: 'https://ads.example/', resourceType: 'script', requestHeaders: { Cookie: 'a=1' }, webContentsId: contents.id }, result => assert.deepEqual(result.requestHeaders, { Cookie: 'a=1' }));
+  target.onHeadersReceived({ id: 2, url: 'https://ads.example/', resourceType: 'script', responseHeaders: { 'Set-Cookie': ['a=1; SameSite=None; Secure'] }, webContentsId: contents.id }, result => assert.deepEqual(result.responseHeaders, { 'Set-Cookie': ['a=1; SameSite=None; Secure'] }));
+  command({ type: 'set-block-ads', value: true }); assert.equal(contents.bypassedCache, 1);
+});
+
+test('downloads ask dialog is parented, cancellation leaves ledger empty and trusted custom paths remain scoped', async t => {
+  const options = {}, browser = notebookBrowser(t, plainCipher, options); browser.navigate();
+  const contents = browser.views[0].webContents, target = contents.session;
+  const { EventEmitter } = require('node:events');
+  const item = () => Object.assign(new EventEmitter(), { getURL: () => 'https://example.com/download', getFilename: () => '../CON.txt', getTotalBytes: () => 10, getReceivedBytes: () => 0, setSavePath(path) { this.path = path; }, cancel() { this.cancelled = true; } });
+  const first = item(); target.emit('will-download', { preventDefault() { assert.fail('Regular download refused'); } }, first, contents);
+  assert.equal(first.path, join(browser.directory, 'downloads', '_CON.txt')); assert.equal(options.saveArgs, undefined);
+  const live = browser.state().store.downloads[0]; await browser.command({ type: 'clear-browsing-data', history: true, cookies: false, cache: false }); assert.equal(first.cancelled, undefined); assert.equal(browser.state().store.downloads[0], live);
+  await browser.command({ type: 'clear-browsing-data', history: false, cookies: false, cache: true }); assert.equal(first.cancelled, undefined); assert.equal(browser.state().store.downloads[0], live);
+  browser.command({ type: 'set-ask-where-to-save', value: true });
+  let prevented = false; const second = item(); target.emit('will-download', { preventDefault() { prevented = true; } }, second, contents);
+  assert.equal(prevented, true); assert.equal(second.cancelled, true); assert.equal(browser.state().store.downloads.length, 1); assert.equal(options.saveArgs[0], browser.window);
+  const otherFolder = join(browser.directory, 'other'); mkdirSync(otherFolder); options.saveChoice = join(otherFolder, 'chosen.txt');
+  const third = item(); target.emit('will-download', { preventDefault() { assert.fail('Chosen download refused'); } }, third, contents);
+  const entry = browser.state().store.downloads[0]; assert.equal(entry.path, options.saveChoice);
+  browser.command({ type: 'show-download', id: entry.id }); assert.equal(options.shownPath, entry.path);
+  entry.path = join(otherFolder, 'changed.txt'); assert.throws(() => browser.command({ type: 'show-download', id: entry.id }), /Invalid download path/);
+  const chosenFolder = join(browser.directory, 'chosen-folder'); mkdirSync(chosenFolder); options.folderChoice = { canceled: false, filePaths: [chosenFolder] };
+  await browser.command({ type: 'choose-downloads-folder' }); browser.command({ type: 'set-ask-where-to-save', value: false });
+  const fourth = item(); target.emit('will-download', { preventDefault() { assert.fail('Chosen folder refused'); } }, fourth, contents); assert.equal(require('node:path').dirname(fourth.path), chosenFolder);
+  require('node:fs').rmdirSync(chosenFolder);
+  const fifth = item(); target.emit('will-download', { preventDefault() { assert.fail('Fallback folder refused'); } }, fifth, contents); assert.equal(require('node:path').dirname(fifth.path), join(browser.directory, 'downloads')); assert.equal(browser.state().downloadsFolderUnavailable, true); assert.equal(browser.state().downloadsFolderDefault, true);
+});
+
+test('quit clears flagged unopened profiles under one five-second deadline and keeps unflagged profile history', async t => {
+  const options = { clear: name => name === 'clearCache' ? new Promise(() => {}) : undefined }, browser = notebookBrowser(t, plainCipher, options);
+  browser.navigate(); const active = browser.state().activeProfileId, unopened = browser.state().profiles.find(profile => profile.id !== active);
+  const unopenedStore = sampleStore(browser.directory); unopenedStore.clearHistoryOnClose = true; unopenedStore.clearCacheOnClose = true;
+  writeStore(profileStorePath(browser.directory, unopened.id), unopenedStore);
+  let prevented = 0; browser.app.emit('before-quit', { preventDefault() { prevented++; } });
+  assert.equal(prevented, 1);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(readStore(profileStorePath(browser.directory, unopened.id)).history.length, 0);
+  assert.equal(readStore(profileStorePath(browser.directory, active)).history.length, 1);
+  assert.equal([...browser.timers.values()].filter(timer => timer.delay === 5000).length, 1);
+  fireTimers(browser.timers, 5000); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(browser.app.quits, 1);
+});
+test('default browser registers exact current-user arrays, opens fixed settings URI and refreshes status', async () => {
+  const { createDefaultBrowser } = require('../dist/electron/default-browser.js');
+  const calls = [], opened = [], changes = [], exe = 'C:\\Program Files\\Horizon\\Horizon.exe';
+  const service = createDefaultBrowser({ platform: 'win32', isPackaged: true, execPath: exe, runner: async (name, args) => { calls.push([name, args]); return '    ProgId    REG_SZ    HorizonURL\r\n'; }, openExternal: async url => { opened.push(url); }, changed: status => changes.push(status) });
+  await service.register();
+  const registryPath = require('node:path').win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe');
+  const icon = '"' + exe + '",0', command = '"' + exe + '" "%1"';
+  assert.deepEqual(calls, [
+    [registryPath, ['add', 'HKCU\\Software\\Classes\\HorizonURL', '/ve', '/t', 'REG_SZ', '/d', 'Horizon URL', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Classes\\HorizonURL', '/v', 'URL Protocol', '/t', 'REG_SZ', '/d', '', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Classes\\HorizonURL\\DefaultIcon', '/ve', '/t', 'REG_SZ', '/d', icon, '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Classes\\HorizonURL\\shell\\open\\command', '/ve', '/t', 'REG_SZ', '/d', command, '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Classes\\HorizonHTML', '/ve', '/t', 'REG_SZ', '/d', 'Horizon HTML Document', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Classes\\HorizonHTML\\DefaultIcon', '/ve', '/t', 'REG_SZ', '/d', icon, '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Classes\\HorizonHTML\\shell\\open\\command', '/ve', '/t', 'REG_SZ', '/d', command, '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon', '/ve', '/t', 'REG_SZ', '/d', 'Horizon', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\DefaultIcon', '/ve', '/t', 'REG_SZ', '/d', icon, '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\shell\\open\\command', '/ve', '/t', 'REG_SZ', '/d', command, '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\Capabilities', '/v', 'ApplicationName', '/t', 'REG_SZ', '/d', 'Horizon', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\Capabilities', '/v', 'ApplicationDescription', '/t', 'REG_SZ', '/d', 'Browse the web with Horizon', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\Capabilities', '/v', 'ApplicationIcon', '/t', 'REG_SZ', '/d', icon, '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\Capabilities\\URLAssociations', '/v', 'http', '/t', 'REG_SZ', '/d', 'HorizonURL', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\Capabilities\\URLAssociations', '/v', 'https', '/t', 'REG_SZ', '/d', 'HorizonURL', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\Capabilities\\FileAssociations', '/v', '.htm', '/t', 'REG_SZ', '/d', 'HorizonHTML', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\Clients\\StartMenuInternet\\Horizon\\Capabilities\\FileAssociations', '/v', '.html', '/t', 'REG_SZ', '/d', 'HorizonHTML', '/f']],
+    [registryPath, ['add', 'HKCU\\Software\\RegisteredApplications', '/v', 'Horizon', '/t', 'REG_SZ', '/d', 'Software\\Clients\\StartMenuInternet\\Horizon\\Capabilities', '/f']],
+    [registryPath, ['query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice', '/v', 'ProgId']],
+  ]);
+  assert.deepEqual(opened, ['ms-settings:defaultapps?registeredAppUser=Horizon']); assert.equal(service.status, 'default'); assert.deepEqual(changes, ['default']);
+});
+
+test('default browser refuses development and unsupported builds without any runner; failures remain named', async () => {
+  const { createDefaultBrowser } = require('../dist/electron/default-browser.js');
+  for (const [platform, packaged, status, error] of [['linux', false, 'unsupported', 'UNSUPPORTED'], ['linux', true, 'unsupported', 'UNSUPPORTED'], ['win32', false, 'developmentBuild', 'DEVELOPMENT_BUILD']]) {
+    const service = createDefaultBrowser({ platform, isPackaged: packaged, execPath: 'Horizon.exe', runner: async () => assert.fail('Runner must not execute'), openExternal: async () => assert.fail('Settings must not open') });
+    await service.refresh(); assert.equal(service.status, status); await assert.rejects(service.register(), new RegExp('DEFAULT_BROWSER_' + error));
+  }
+  let output = 'ProgId REG_SZ OtherBrowser', failQuery = false, failWrite = false, failOpen = false;
+  const service = createDefaultBrowser({ platform: 'win32', isPackaged: true, execPath: 'C:\\Horizon.exe', runner: async (_command, args) => { if (args[0] === 'query' && failQuery || args[0] === 'add' && failWrite) throw new Error('Native detail'); return output; }, openExternal: async () => { if (failOpen) throw new Error('Native detail'); } });
+  await service.refresh(); assert.equal(service.status, 'notDefault'); output = 'ProgId REG_SZ HorizonURL'; await service.refresh(); assert.equal(service.status, 'default');
+  failQuery = true; await service.refresh(); assert.equal(service.status, 'notDefault'); failWrite = true; await assert.rejects(service.register(), /DEFAULT_BROWSER_REGISTRATION_FAILED/);
+  failWrite = false; failOpen = true; await assert.rejects(service.register(), /DEFAULT_BROWSER_SETTINGS_FAILED/);
+});
+
+test('launch parser accepts last bounded URL or regular HTML path and rejects unsafe input', t => {
+  const { launchAddress, isLocalHTMLURL } = require('../dist/electron/launch.js'), { pathToFileURL } = require('node:url');
+  const directory = temporaryDirectory(t, 'launch'), html = join(directory, 'page.HTML'), other = join(directory, 'other.html'); writeFileSync(html, '<html></html>'); writeFileSync(other, '<html></html>');
+  const fileURL = pathToFileURL(html).href;
+  assert.equal(launchAddress(['Horizon.exe', '--flag', 'page.HTML'], directory), fileURL);
+  assert.equal(launchAddress([html, 'https://example.com/']), 'https://example.com/'); assert.equal(launchAddress(['https://example.com/', html]), fileURL);
+  for (const value of ['--https://example.com/', '-page.html', 'https://user:pass@example.com/', 'javascript:alert(1)', 'file:///private.html', 'horizon://settings', 'https://example.com/\n', 'https://example.com/\u0085', 'https://example.com/' + 'x'.repeat(8192), join(directory, 'missing.html')]) assert.equal(launchAddress([value]), null);
+  mkdirSync(join(directory, 'directory.html')); assert.equal(launchAddress([join(directory, 'directory.html')]), null);
+  assert.equal(isLocalHTMLURL(fileURL), true);
+  for (const value of [fileURL + '?x', fileURL + '#x', fileURL.replace('file:///', 'file://remote/'), 'file:' + html, fileURL + '\u0085', fileURL.replace('page.HTML', 'missing.html')]) assert.equal(isLocalHTMLURL(value), false);
+});
+
+test('local HTML launch authorizes only its exact tab main-frame URL and survives view replacement', t => {
+  const browser = notebookBrowser(t), { pathToFileURL } = require('node:url'), html = join(browser.directory, 'launch.html'), other = join(browser.directory, 'other.html'); writeFileSync(html, '<html></html>'); writeFileSync(other, '<html></html>');
+  const url = pathToFileURL(html).href, unrelated = pathToFileURL(other).href;
+  browser.openLaunch(url); const first = browser.views.at(-1).webContents, target = first.session;
+  assert.equal(browser.isLaunchNavigation(first, url), true); assert.equal(browser.isLaunchNavigation(first, unrelated), false);
+  for (const [address, type, allowed] of [[url, 'mainFrame', true], [unrelated, 'mainFrame', false], [url, 'subFrame', false], [url, 'image', false]]) target.onBeforeRequest({ id: 1, url: address, resourceType: type, webContentsId: first.id }, result => assert.equal(result.cancel, !allowed));
+  assert.equal(isAllowedURL(url), false); assert.throws(() => browser.command({ type: 'navigate', input: url }));
+  const handlers = {}; hardenContents({ on: (name, fn) => { handlers[name] = fn; }, setWindowOpenHandler() {} }, true, address => browser.isLaunchNavigation(first, address));
+  for (const [address, main, allowed] of [[url, true, true], [unrelated, true, false], [url, false, false]]) {
+    let prevented = false; handlers['will-frame-navigate']({ url: address, isMainFrame: main, preventDefault() { prevented = true; } }); assert.equal(prevented, !allowed);
+  }
+  browser.command({ type: 'dark-pages', value: 'on' }); const replacement = browser.views.at(-1).webContents;
+  assert.notEqual(first, replacement); assert.equal(browser.isLaunchNavigation(replacement, url), true); assert.equal(browser.isLaunchNavigation(replacement, unrelated), false);
+  assert.deepEqual(browser.state().store.history, []);
+});
+
+function settingsMain(t, options) {
+  const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm'), filename = resolve('dist/electron/main.js'), localRequire = require('node:module').createRequire(filename), directory = temporaryDirectory(t, 'settings-main'), windows = [], launches = [], handlers = new Map();
+  const app = Object.assign(new EventEmitter(), { isPackaged: true, requestSingleInstanceLock: () => options.lock !== false, getLocale: () => 'es-AR', getPath: () => directory, enableSandbox() {}, whenReady: async () => {}, commandLine: { appendSwitch() {}, removeSwitch() {} }, quit() { this.quits = (this.quits || 0) + 1; }, exit() { assert.fail('Mock main failed'); } });
+  const settings = { theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', migrationAllowed: false, language: 'en' };
+  class Window extends EventEmitter {
+    constructor() { super(); windows.push(this); this.webContents = new EventEmitter(); this.minimized = true; }
+    isDestroyed() { return false; } isMinimized() { return this.minimized; } restore() { this.minimized = false; this.restored = true; }
+    removeMenu() {} setBackgroundColor() {} show() { this.shown = true; } focus() { this.focused = true; }
+    async loadURL() { if (options.stall) await new Promise(done => { options.finish = done; }); this.loaded = true; }
+  }
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname', 'process'])({}, name => {
+    if (name === 'electron') return { app, BrowserWindow: Window, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), protocol: { registerSchemesAsPrivileged() {} }, screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1440, height: 900 } }) }, session: { defaultSession: { protocol: {} } }, ipcMain: { handle(name, fn) { handlers.set(name, fn); } } };
+    if (name === './settings') return { ...localRequire(name), createSettings: () => settings };
+    if (name === './browser') return { createBrowser: () => ({ layout() {}, openLaunch(url) { if (options.launchFail) throw new Error('Tab limit reached'); launches.push(url); } }), isProfileSession: () => false, isLaunchNavigation: () => false };
+    if (name === './protocol') return { serveHorizon: async () => {} };
+    if (name === './security') return { ...localRequire(name), secureSession() {}, validateSender() {} };
+    return localRequire(name);
+  }, require('node:path').dirname(filename), { argv: options.args ?? ['Horizon.exe'] });
+  return { app, settings, windows, launches, handlers, directory };
+}
+
+test('main holds startup and second-instance URLs until chrome loads, restores and focuses; no lock creates no window', async t => {
+  const rejected = settingsMain(t, { lock: false }); await new Promise(done => setImmediate(done)); assert.equal(rejected.app.quits, 1); assert.deepEqual(rejected.windows, []);
+  const options = { stall: true, args: ['Horizon.exe', 'https://startup.example/'] }, main = settingsMain(t, options);
+  main.app.emit('second-instance', {}, ['Horizon.exe', 'https://queued.example/'], main.directory);
+  await new Promise(done => setImmediate(done)); assert.deepEqual(main.launches, []); assert.equal(main.windows[0].shown, undefined);
+  options.finish(); await new Promise(done => setImmediate(done));
+  assert.deepEqual(main.launches, ['https://startup.example/', 'https://queued.example/']); assert.equal(main.windows[0].restored, true); assert.equal(main.windows[0].shown, true); assert.equal(main.windows[0].focused, true);
+  const html = join(main.directory, 'second.html'); writeFileSync(html, '<html></html>');
+  main.app.emit('second-instance', {}, ['Horizon.exe', 'second.html'], main.directory); assert.equal(main.launches.at(-1), require('node:url').pathToFileURL(html).href);
+  const count = main.launches.length; main.app.emit('second-instance', {}, ['--flag', 'javascript:alert(1)'], main.directory); assert.equal(main.launches.length, count);
+  main.windows[0].minimized = true; main.windows[0].focused = false; main.app.emit('second-instance', {}, ['--flag'], main.directory); assert.equal(main.windows[0].minimized, false); assert.equal(main.windows[0].focused, true);
+  options.launchFail = true; main.windows[0].focused = false; assert.doesNotThrow(() => main.app.emit('second-instance', {}, ['https://capped.example/'], main.directory)); assert.equal(main.windows[0].focused, true);
+  assert.equal(main.handlers.get('horizon:language')({}), 'en'); main.settings.language = 'system'; assert.equal(main.handlers.get('horizon:language')({}), 'es');
+});
+test('context selection searches use every chosen engine prefix', t => {
+  const browser = notebookBrowser(t), { command, state } = browser; browser.navigate();
+  const original = state().activeId, contents = browser.views[0].webContents;
+  const prefixes = { duckduckgo: 'https://duckduckgo.com/?q=', startpage: 'https://www.startpage.com/sp/search?query=', brave: 'https://search.brave.com/search?q=', ecosia: 'https://www.ecosia.org/search?q=', bing: 'https://www.bing.com/search?q=', google: 'https://www.google.com/search?q=' };
+  for (const [engine, prefix] of Object.entries(prefixes)) {
+    command({ type: 'set-search-engine', value: engine }); command({ type: 'activate-tab', id: original });
+    contents.emit('context-menu', {}, menuParams({ selectionText: 'bread & butter' }));
+    const menu = browser.window.webContents.sent.at(-1)[1];
+    command({ type: 'context-menu', id: menu.id, item: 'search-selection' });
+    assert.equal(state().tabs.find(tab => tab.id === state().activeId).url, prefix + 'bread%20%26%20butter');
+  }
+});
+
+test('each clear kind leaves unselected data and library entries alone', async t => {
+  for (const field of ['history', 'cookies', 'cache']) {
+    const browser = notebookBrowser(t); browser.navigate();
+    const store = browser.state().store;
+    store.bookmarks.push({ url: 'https://saved.example/', title: 'Saved', createdAt: 1 });
+    const before = structuredClone(store);
+    const result = await browser.command({ type: 'clear-browsing-data', history: false, cookies: false, cache: false, [field]: true });
+    assert.deepEqual(result, { history: field === 'history', cookies: field === 'cookies', cache: field === 'cache' });
+    assert.deepEqual(store.history, field === 'history' ? [] : before.history); assert.deepEqual(store.bookmarks, before.bookmarks); assert.deepEqual(store.downloads, before.downloads);
+    const calls = browser.views[0].webContents.session.cleared.map(entry => entry[0]);
+    assert.deepEqual(calls, field === 'history' ? [] : [field === 'cookies' ? 'clearStorageData' : 'clearCache']); browser.close();
+  }
+});
+
+test('reset site drops dismissed permission memory and resets all schemes and ports before asking again', t => {
+  const browser = notebookBrowser(t); browser.navigate();
+  const contents = browser.views[0].webContents, target = contents.session;
+  contents.mainFrame = { url: 'https://example.com/' };
+  let allowed; target.request(contents, 'geolocation', value => { allowed = value; }, {});
+  const prompt = browser.state().permissionPrompt;
+  browser.command({ type: 'answer-permission', id: prompt.id, answer: 'dismiss' }); assert.equal(allowed, false);
+  target.request(contents, 'geolocation', value => { allowed = value; }, {}); assert.equal(browser.state().permissionPrompt, null);
+  browser.command({ type: 'set-site-dark', enabled: true });
+  const store = browser.state().store.siteSettings;
+  setPermission(store, 'http://example.com:8080', 'notifications', 'block'); setPermission(store, 'https://example.com:8443', 'camera', 'allow');
+  browser.command({ type: 'reset-site', host: 'example.com' });
+  assert.deepEqual(store.permissions, []); assert.deepEqual(store.dark, []);
+  target.request(contents, 'geolocation', () => {}, {}); assert.equal(browser.state().permissionPrompt.origin, 'https://example.com');
 });

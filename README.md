@@ -7,8 +7,16 @@ same window. Personal keeps existing sign-ins; Work starts separately.
 Profiles can be created, renamed, recoloured, switched and deleted.
 
 Amber and Daylight are app-wide themes. Choose either one or System, with
-an optional high-contrast palette. Language follows the system locale:
-Spanish or English, with English for other locales.
+an optional high-contrast palette. Language follows the system locale
+(Spanish or English, with English for other locales) unless one is chosen
+in Settings.
+
+Settings opens in a tab from the menu: the default browser, the search
+engine (DuckDuckGo unless another is chosen), the downloads folder, the
+language, the theme and dark pages, blocking and third-party cookies, the
+sites with their own settings, clearing browsing data now or when Horizon
+closes, and profiles. Only the installed app registers Horizon as a browser,
+and only for the current user.
 
 Notebooks keep personal notes, selected text, area captures and whole-page
 captures locally, with encrypted capture images. Resume a notebook from the

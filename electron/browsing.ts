@@ -1,4 +1,10 @@
+import { SEARCH_ENGINES } from '../src/shared/api';
+import type { SearchEngine, SettingsSection } from '../src/shared/api';
 const URL_LIMIT = 8192;
+export function settingsAddress(section: SettingsSection): string { return section === 'general' ? 'horizon://settings' : `horizon://settings/${section}`; }
+export function settingsSection(value: string): SettingsSection | null {
+  return (['general', 'appearance', 'privacy', 'privacy/sites', 'profiles'] as const).find(section => settingsAddress(section) === value) ?? null;
+}
 
 export function isAllowedURL(value: unknown): value is string {
   if (typeof value !== 'string' || !value || value.length > URL_LIMIT || value.trim() !== value) return false;
@@ -25,7 +31,7 @@ export function parseErrorName(description: string): string {
   return description.match(/\bERR_[A-Z_]+\b/)?.[0] ?? 'ERR_FAILED';
 }
 
-export function classifyInput(input: string): string {
+export function classifyInput(input: string, engine: SearchEngine = 'duckduckgo'): string {
   if (typeof input !== 'string' || input.length > URL_LIMIT) throw new Error('Invalid address');
   const value = input.trim();
   if (!value || Array.from(value).some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
@@ -43,7 +49,8 @@ export function classifyInput(input: string): string {
     } catch { /* Non-address text is searched below. */ }
   }
   if (/^[a-z][a-z\d+.-]*:/i.test(value)) throw new Error('Unsupported address scheme');
-  const search = `https://duckduckgo.com/?q=${encodeURIComponent(value)}`;
+  if (!Object.hasOwn(SEARCH_ENGINES, engine)) throw new Error('Invalid search engine');
+  const search = SEARCH_ENGINES[engine].searchPrefix + encodeURIComponent(value);
   if (!isWebURL(search)) throw new Error('Invalid address');
   return search;
 }

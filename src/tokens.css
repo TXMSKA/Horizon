@@ -248,6 +248,14 @@
   --height-notebook-text: 18.75rem;
   --height-notebook-annotation: 6.25rem;
   --width-notebook-toast: 36rem;
+  --width-settings-rail: 17.5rem;
+  --width-settings-rail-compact: 4rem;
+  --height-settings-heading: 2.5625rem;
+  --height-settings-nav-row: 2.375rem;
+  --padding-settings-inline: 3.5rem;
+  --width-settings-column: 56.75rem;
+  --width-settings-dropdown: 13.75rem;
+  --width-settings-dialog: 35rem;
   --surface-chrome: light-dark(var(--palette-daylight-chrome), var(--palette-amber-chrome));
   --surface-raised: light-dark(var(--palette-daylight-surface), var(--palette-amber-surface));
   --surface-sunken: light-dark(var(--palette-daylight-surface-2), var(--palette-amber-surface-2));

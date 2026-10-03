@@ -64,8 +64,8 @@ function SitePopover({ id, label, labelledBy, describedBy, opener, onDismiss, on
   }}>{children}</div>;
 }
 
-export function ShieldPopover({ site, counts, ready, darkPages, language, favicon, initial, opener, onDismiss, onTabOut, run }: {
-  site: SiteSettings; counts: BlockedCounts; ready: boolean; darkPages: DarkPagesState; language: Language; favicon?: string; initial: string;
+export function ShieldPopover({ site, counts, ready, blockAds, darkPages, language, favicon, initial, opener, onDismiss, onTabOut, run }: {
+  site: SiteSettings; counts: BlockedCounts; ready: boolean; blockAds: boolean; darkPages: DarkPagesState; language: Language; favicon?: string; initial: string;
   opener: RefObject<HTMLButtonElement | null>; onDismiss: (reason: 'escape' | 'outside') => void; onTabOut: (backward: boolean) => void; run: (command: BrowserCommand) => Promise<boolean>;
 }) {
   const t = (key: CopyKey) => text(key, language);
@@ -77,12 +77,12 @@ export function ShieldPopover({ site, counts, ready, darkPages, language, favico
   const [permission, setPermission] = useState<SitePermission | null>(null);
   useEffect(() => { switchRef.current?.focus(); }, []);
   const closeMenu = () => { setPermission(null); rowRef.current?.focus(); };
-  const hint = !site.blocking ? t('blockingOffSite') : !ready && !blockedTotal(counts) ? t('blockingNotReady') : blockingBreakdown(counts, language);
+  const hint = !blockAds ? t('blockingOffSettings') : !site.blocking ? t('blockingOffSite') : !ready && !blockedTotal(counts) ? t('blockingNotReady') : blockingBreakdown(counts, language);
   const darkHint = darkPages.active ? null : t(darkPages.mode === 'off' ? 'darkPagesOff' : 'darkPagesSystemLight');
   return <SitePopover id="shield-popover" label={t('blockingOnSite')} opener={opener} onDismiss={onDismiss} onTabOut={onTabOut}>
     <SiteHeading host={site.host} favicon={favicon} initial={initial} />
     <hr />
-    <div className="site-blocking-row"><div className="site-blocking-copy"><span id={`${id}-blocking`}>{t('blockAdsTrackers')}</span><small id={`${id}-breakdown`}>{hint}</small></div><Switch checked={site.blocking} labelledBy={`${id}-blocking`} describedBy={`${id}-breakdown`} buttonRef={switchRef} onChange={enabled => {
+    <div className="site-blocking-row"><div className="site-blocking-copy"><span id={`${id}-blocking`}>{t('blockAdsTrackers')}</span><small id={`${id}-breakdown`}>{hint}</small></div><Switch checked={blockAds && site.blocking} disabled={!blockAds} labelledBy={`${id}-blocking`} describedBy={`${id}-breakdown`} buttonRef={switchRef} onChange={enabled => {
       if (pending.current) return;
       pending.current = true;
       void run({ type: 'set-blocking', enabled }).finally(() => { pending.current = false; });

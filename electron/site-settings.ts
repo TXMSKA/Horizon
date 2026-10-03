@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { getDomain } from 'tldts-experimental';
 import { SITE_PERMISSIONS } from '../src/shared/api';
-import type { PermissionDecision, PermissionDecisions, PermissionPrompt, SitePermission, SiteSettings, SiteSettingsStore } from '../src/shared/api';
+import type { PermissionDecision, PermissionDecisions, PermissionPrompt, SitePermission, SiteSettings, SiteSettingsEntry, SiteSettingsStore } from '../src/shared/api';
 import { isWebURL } from './browsing';
 
 export const SITE_SETTINGS_LIMIT = 10000;
@@ -38,6 +38,27 @@ export function setBlocking(settings: SiteSettingsStore, host: string, enabled: 
     if (settings.blocking.length >= SITE_SETTINGS_LIMIT) throw new Error('SITE_SETTINGS_LIMIT');
     settings.blocking.push({ host, enabled });
   }
+}
+export function listSites(settings: SiteSettingsStore): SiteSettingsEntry[] {
+  const blocking = new Map(settings.blocking.map(entry => [entry.host, entry.enabled]));
+  const dark = new Map(settings.dark.map(entry => [entry.host, entry.enabled]));
+  const permissions = new Map(settings.permissions.map(entry => [entry.origin, entry]));
+  const hosts = new Set([...settings.blocking.filter(entry => !entry.enabled).map(entry => entry.host), ...settings.dark.map(entry => entry.host)]);
+  const origins = new Set(settings.permissions.filter(entry => SITE_PERMISSIONS.some(permission => entry[permission] !== 'ask')).map(entry => entry.origin));
+  const originHosts = new Set([...origins].map(siteHost));
+  for (const host of hosts) if (!originHosts.has(host)) origins.add(`https://${host}`);
+  return [...origins].sort().map(origin => {
+    const host = siteHost(origin)!;
+    const stored = permissions.get(origin);
+    const decisions = stored ? Object.fromEntries(SITE_PERMISSIONS.map(permission => [permission, stored[permission]])) as PermissionDecisions : defaultPermissions();
+    return { host, origin, blocking: blocking.get(host) ?? null, dark: dark.get(host) ?? null, permissions: decisions };
+  });
+}
+export function resetSite(settings: SiteSettingsStore, host: string): void {
+  if (!validHost(host)) throw new Error('SETTINGS_COMMAND_INVALID');
+  settings.blocking = settings.blocking.filter(entry => entry.host !== host);
+  settings.dark = settings.dark.filter(entry => entry.host !== host);
+  settings.permissions = settings.permissions.filter(entry => siteHost(entry.origin) !== host);
 }
 export function setSiteDark(settings: SiteSettingsStore, host: string, enabled: boolean): void {
   if (!validHost(host)) throw new Error('SITE_UNAVAILABLE');

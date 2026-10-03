@@ -1,91 +1,106 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Contrast, DarkPagesMode, DarkStrength, DarkTone, Theme } from '../src/shared/api';
+import { SEARCH_ENGINES } from '../src/shared/api';
+import type { Contrast, DarkPagesMode, DarkStrength, DarkTone, Language, LanguageSetting, SearchEngine, Theme } from '../src/shared/api';
 
 interface LegacySettings { version: 1; theme: Theme; contrast?: Contrast }
-interface Settings { version: 2; theme: Theme; contrast: Contrast; darkPages: DarkPagesMode; darkStrength: DarkStrength; darkTone: DarkTone }
-export interface ThemeSettings { readonly theme: Theme; readonly contrast: Contrast; readonly darkPages: DarkPagesMode; readonly darkStrength: DarkStrength; readonly darkTone: DarkTone; readonly migrationAllowed: boolean; setTheme(value: Theme, migrate: boolean): void; setContrast(value: Contrast): void; setDarkPages(value: DarkPagesMode): void; setDarkStrength(value: DarkStrength): void; setDarkTone(value: DarkTone): void }
-
+interface SettingsV2 { version: 2; theme: Theme; contrast: Contrast; darkPages: DarkPagesMode; darkStrength: DarkStrength; darkTone: DarkTone }
+export interface Settings extends Omit<SettingsV2, 'version'> { version: 3; searchEngine: SearchEngine; language: LanguageSetting; downloadsFolder: string | null; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean }
+export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
+  readonly migrationAllowed: boolean;
+  readonly downloadsFolderUnavailable: boolean;
+  setTheme(value: Theme, migrate: boolean): void; setContrast(value: Contrast): void; setDarkPages(value: DarkPagesMode): void; setDarkStrength(value: DarkStrength): void; setDarkTone(value: DarkTone): void;
+  setSearchEngine(value: SearchEngine): void; setLanguage(value: LanguageSetting): void; setDownloadsFolder(value: string | null): void;
+  setAskWhereToSave(value: boolean): void; setBlockAds(value: boolean): void; setBlockThirdPartyCookies(value: boolean): void;
+}
 export function isTheme(value: unknown): value is Theme { return value === 'system' || value === 'amber' || value === 'daylight'; }
 export function isContrast(value: unknown): value is Contrast { return value === 'standard' || value === 'high'; }
 export function isDarkPagesMode(value: unknown): value is DarkPagesMode { return value === 'off' || value === 'on' || value === 'system'; }
 export function isDarkStrength(value: unknown): value is DarkStrength { return value === 'soft' || value === 'standard' || value === 'deep'; }
 export function isDarkTone(value: unknown): value is DarkTone { return value === 'neutral' || value === 'warm'; }
+export function isSearchEngine(value: unknown): value is SearchEngine { return typeof value === 'string' && Object.hasOwn(SEARCH_ENGINES, value); }
+export function isLanguageSetting(value: unknown): value is LanguageSetting { return value === 'system' || value === 'en' || value === 'es'; }
+export function resolveLanguage(setting: LanguageSetting, locale: string): Language { return setting === 'en' || setting === 'es' ? setting : locale.toLowerCase().split('-')[0] === 'es' ? 'es' : 'en'; }
+function folderSyntax(value: unknown): value is string {
+  return typeof value === 'string' && !!value && value.length <= 1024 && !/[\x00-\x1f\x7f-\x9f]/.test(value) && isAbsolute(value)
+    && (process.platform !== 'win32' || /^[a-z]:[\\/]|^\\\\[^\\/]+[\\/][^\\/]+/i.test(value));
+}
+export function isDownloadsFolder(value: unknown): value is string {
+  if (!folderSyntax(value)) return false;
+  try { const entry = lstatSync(value); return entry.isDirectory() && !entry.isSymbolicLink(); } catch { return false; }
+}
+export function resolvedDownloadsFolder(settings: Pick<Settings, 'downloadsFolder'> & { downloadsFolderUnavailable?: boolean }, fallback: string) {
+  const unavailable = settings.downloadsFolderUnavailable === true || settings.downloadsFolder !== null && !isDownloadsFolder(settings.downloadsFolder);
+  return { downloadsFolder: unavailable || settings.downloadsFolder === null ? fallback : settings.downloadsFolder, downloadsFolderDefault: unavailable || settings.downloadsFolder === null, downloadsFolderUnavailable: unavailable };
+}
+function shape(value: unknown, keys: string[]): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
 function legacySettings(value: unknown): value is LegacySettings {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && (Object.keys(value).length === 2 || Object.keys(value).length === 3 && Object.hasOwn(value, 'contrast') && 'contrast' in value && isContrast(value.contrast))
-    && Object.hasOwn(value, 'version') && Object.hasOwn(value, 'theme') && 'version' in value && value.version === 1 && 'theme' in value && isTheme(value.theme);
+  return (shape(value, ['version', 'theme']) || shape(value, ['version', 'theme', 'contrast']) && isContrast(value.contrast)) && value.version === 1 && isTheme(value.theme);
 }
-export function validateSettings(value: unknown): value is Settings {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === 6
-    && ['version', 'theme', 'contrast', 'darkPages', 'darkStrength', 'darkTone'].every(key => Object.hasOwn(value, key))
-    && 'version' in value && value.version === 2 && 'theme' in value && isTheme(value.theme) && 'contrast' in value && isContrast(value.contrast)
-    && 'darkPages' in value && isDarkPagesMode(value.darkPages) && 'darkStrength' in value && isDarkStrength(value.darkStrength) && 'darkTone' in value && isDarkTone(value.darkTone);
+const V2_KEYS = ['version', 'theme', 'contrast', 'darkPages', 'darkStrength', 'darkTone'];
+function themeFields(value: Record<string, unknown>): boolean { return isTheme(value.theme) && isContrast(value.contrast) && isDarkPagesMode(value.darkPages) && isDarkStrength(value.darkStrength) && isDarkTone(value.darkTone); }
+function v2Settings(value: unknown): value is SettingsV2 { return shape(value, V2_KEYS) && value.version === 2 && themeFields(value); }
+function settingsShape(value: unknown): value is Settings {
+  return shape(value, [...V2_KEYS, 'searchEngine', 'language', 'downloadsFolder', 'askWhereToSave', 'blockAds', 'blockThirdPartyCookies']) && value.version === 3 && themeFields(value)
+    && isSearchEngine(value.searchEngine) && isLanguageSetting(value.language) && (value.downloadsFolder === null || folderSyntax(value.downloadsFolder))
+    && ['askWhereToSave', 'blockAds', 'blockThirdPartyCookies'].every(key => typeof value[key] === 'boolean');
 }
+export function validateSettings(value: unknown): value is Settings { return settingsShape(value) && (value.downloadsFolder === null || isDownloadsFolder(value.downloadsFolder)); }
 export function writeSettings(path: string, settings: Settings): void {
   if (!validateSettings(settings)) throw new Error('Invalid settings');
-  mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
-  try { writeFileSync(temporary, JSON.stringify(settings), { flag: 'wx', mode: 0o600 }); renameSync(temporary, path); }
-  finally { if (existsSync(temporary)) unlinkSync(temporary); }
+  try { mkdirSync(dirname(path), { recursive: true }); writeFileSync(temporary, JSON.stringify(settings), { flag: 'wx', mode: 0o600 }); renameSync(temporary, path); }
+  catch { throw new Error('SETTINGS_SAVE_FAILED'); }
+  finally { if (existsSync(temporary)) try { unlinkSync(temporary); } catch { /* Preserve the save failure. */ } }
 }
-export function readSettings(path: string, highContrast = false): Settings {
-  const empty: Settings = { version: 2, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral' };
+export function readSettings(path: string, highContrast = false, status = { downloadsFolderUnavailable: false }): Settings {
+  const empty: Settings = { version: 3, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true };
   try {
-    if (!existsSync(path)) {
-      empty.contrast = highContrast ? 'high' : 'standard';
-      writeSettings(path, empty); return empty;
-    }
-    let settings: Settings;
-    let migrated = false;
+    if (!existsSync(path)) { empty.contrast = highContrast ? 'high' : 'standard'; writeSettings(path, empty); return empty; }
+    let settings: Settings, migrated = false;
     try {
       if (statSync(path).size > 4096) throw new Error('Settings exceed size limit');
       const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
-      if (legacySettings(value)) { settings = { ...empty, ...value, version: 2 }; migrated = true; }
-      else if (validateSettings(value)) settings = value;
+      if (legacySettings(value) || v2Settings(value)) { settings = { ...empty, ...value, version: 3 }; migrated = true; }
+      else if (settingsShape(value)) settings = value;
       else throw new Error('Invalid settings');
-    } catch {
-      renameSync(path, `${path}.corrupt-${randomUUID()}`); writeSettings(path, empty); return empty;
-    }
-    // A valid legacy file must remain usable even when its migration cannot be saved.
-    if (migrated) try { writeSettings(path, settings); } catch { /* The next writable launch can persist the migration. */ }
+    } catch { renameSync(path, `${path}.corrupt-${randomUUID()}`); writeSettings(path, empty); return empty; }
+    if (settings.downloadsFolder !== null && !isDownloadsFolder(settings.downloadsFolder)) { status.downloadsFolderUnavailable = true; settings = { ...settings, downloadsFolder: null }; }
+    if (migrated) try { writeSettings(path, settings); } catch { /* Keep valid migrated values in memory on a read-only disk. */ }
     return settings;
-  } catch { /* An unavailable profile must still allow startup with the resolved defaults. */ }
+  } catch { /* Defaults keep startup possible on an unavailable disk. */ }
   return empty;
 }
 export function createSettings(path: string, changed: (theme: Theme) => void, highContrast = false): ThemeSettings {
   let migrationAllowed = !existsSync(path);
-  let settings = readSettings(path, highContrast);
+  const readStatus = { downloadsFolderUnavailable: false };
+  let settings = readSettings(path, highContrast, readStatus);
   const save = (next: Settings) => {
-    writeSettings(path, next); settings = next; migrationAllowed = false; changed(settings.theme);
+    const unavailable = next.downloadsFolder !== null && !isDownloadsFolder(next.downloadsFolder);
+    const normalized = unavailable ? { ...next, downloadsFolder: null } : next;
+    writeSettings(path, normalized); settings = normalized; if (unavailable) readStatus.downloadsFolderUnavailable = true;
+    migrationAllowed = false; changed(settings.theme);
+  };
+  const boolean = (key: 'askWhereToSave' | 'blockAds' | 'blockThirdPartyCookies', value: boolean, error: string) => {
+    if (typeof value !== 'boolean') throw new Error(error); save({ ...settings, [key]: value });
   };
   return {
-    get theme() { return settings.theme; },
-    get contrast() { return settings.contrast; },
-    get darkPages() { return settings.darkPages; },
-    get darkStrength() { return settings.darkStrength; },
-    get darkTone() { return settings.darkTone; },
-    get migrationAllowed() { return migrationAllowed; },
-    setTheme(value, migrate) {
-      if (!isTheme(value)) throw new Error('Invalid theme');
-      if (migrate && !migrationAllowed) return;
-      save({ ...settings, theme: value });
-    },
-    setContrast(value) {
-      if (!isContrast(value)) throw new Error('Invalid contrast');
-      save({ ...settings, contrast: value });
-    },
-    setDarkPages(value) {
-      if (!isDarkPagesMode(value)) throw new Error('Invalid dark pages mode');
-      save({ ...settings, darkPages: value });
-    },
-    setDarkStrength(value) {
-      if (!isDarkStrength(value)) throw new Error('Invalid dark strength');
-      save({ ...settings, darkStrength: value });
-    },
-    setDarkTone(value) {
-      if (!isDarkTone(value)) throw new Error('Invalid dark tone');
-      save({ ...settings, darkTone: value });
-    },
+    get theme() { return settings.theme; }, get contrast() { return settings.contrast; }, get darkPages() { return settings.darkPages; }, get darkStrength() { return settings.darkStrength; }, get darkTone() { return settings.darkTone; },
+    get searchEngine() { return settings.searchEngine; }, get language() { return settings.language; }, get downloadsFolder() { return settings.downloadsFolder; }, get askWhereToSave() { return settings.askWhereToSave; }, get blockAds() { return settings.blockAds; }, get blockThirdPartyCookies() { return settings.blockThirdPartyCookies; }, get migrationAllowed() { return migrationAllowed; },
+    get downloadsFolderUnavailable() { return readStatus.downloadsFolderUnavailable || settings.downloadsFolder !== null && !isDownloadsFolder(settings.downloadsFolder); },
+    setTheme(value, migrate) { if (!isTheme(value)) throw new Error('Invalid theme'); if (!migrate || migrationAllowed) save({ ...settings, theme: value }); },
+    setContrast(value) { if (!isContrast(value)) throw new Error('Invalid contrast'); save({ ...settings, contrast: value }); },
+    setDarkPages(value) { if (!isDarkPagesMode(value)) throw new Error('Invalid dark pages mode'); save({ ...settings, darkPages: value }); },
+    setDarkStrength(value) { if (!isDarkStrength(value)) throw new Error('Invalid dark strength'); save({ ...settings, darkStrength: value }); },
+    setDarkTone(value) { if (!isDarkTone(value)) throw new Error('Invalid dark tone'); save({ ...settings, darkTone: value }); },
+    setSearchEngine(value) { if (!isSearchEngine(value)) throw new Error('SEARCH_ENGINE_INVALID'); save({ ...settings, searchEngine: value }); },
+    setLanguage(value) { if (!isLanguageSetting(value)) throw new Error('LANGUAGE_INVALID'); save({ ...settings, language: value }); },
+    setDownloadsFolder(value) { if (value !== null && !isDownloadsFolder(value)) throw new Error('DOWNLOADS_FOLDER_INVALID'); save({ ...settings, downloadsFolder: value }); readStatus.downloadsFolderUnavailable = false; },
+    setAskWhereToSave(value) { boolean('askWhereToSave', value, 'ASK_WHERE_TO_SAVE_INVALID'); },
+    setBlockAds(value) { boolean('blockAds', value, 'BLOCK_ADS_INVALID'); },
+    setBlockThirdPartyCookies(value) { boolean('blockThirdPartyCookies', value, 'BLOCK_THIRD_PARTY_COOKIES_INVALID'); },
   };
 }

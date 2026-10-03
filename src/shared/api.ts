@@ -1,4 +1,18 @@
 export type Language = 'en' | 'es';
+export type LanguageSetting = 'system' | Language;
+export const SEARCH_ENGINES = {
+  duckduckgo: { displayName: 'DuckDuckGo', searchPrefix: 'https://duckduckgo.com/?q=' },
+  startpage: { displayName: 'Startpage', searchPrefix: 'https://www.startpage.com/sp/search?query=' },
+  brave: { displayName: 'Brave', searchPrefix: 'https://search.brave.com/search?q=' },
+  ecosia: { displayName: 'Ecosia', searchPrefix: 'https://www.ecosia.org/search?q=' },
+  bing: { displayName: 'Bing', searchPrefix: 'https://www.bing.com/search?q=' },
+  google: { displayName: 'Google', searchPrefix: 'https://www.google.com/search?q=' },
+} as const;
+export type SearchEngine = keyof typeof SEARCH_ENGINES;
+export type SettingsSection = 'general' | 'appearance' | 'privacy' | 'privacy/sites' | 'profiles';
+export type DefaultBrowserStatus = 'default' | 'notDefault' | 'developmentBuild' | 'unsupported';
+export interface ClearedBrowsingData { history: boolean; cookies: boolean; cache: boolean }
+export type SettingsError = 'SETTINGS_COMMAND_INVALID' | 'SETTINGS_TAB_LIMIT' | 'SITE_SETTINGS_SAVE_FAILED' | 'SETTINGS_SAVE_FAILED' | 'SEARCH_ENGINE_INVALID' | 'LANGUAGE_INVALID' | 'DOWNLOADS_FOLDER_INVALID' | 'DOWNLOADS_FOLDER_PICK_FAILED' | 'ASK_WHERE_TO_SAVE_INVALID' | 'BLOCK_ADS_INVALID' | 'BLOCK_THIRD_PARTY_COOKIES_INVALID' | 'PROFILE_SETTINGS_SAVE_FAILED' | 'CLEAR_IN_PROGRESS' | 'CLEAR_HISTORY_FAILED' | 'CLEAR_SITE_DATA_FAILED' | 'CLEAR_CACHE_FAILED' | 'DEFAULT_BROWSER_UNSUPPORTED' | 'DEFAULT_BROWSER_DEVELOPMENT_BUILD' | 'DEFAULT_BROWSER_REGISTRATION_FAILED' | 'DEFAULT_BROWSER_SETTINGS_FAILED';
 export type Theme = 'system' | 'amber' | 'daylight';
 export type Contrast = 'standard' | 'high';
 export type DarkPagesMode = 'off' | 'on' | 'system';
@@ -21,11 +35,12 @@ export type PermissionDecision = 'ask' | 'allow' | 'block';
 export type PermissionDecisions = Record<SitePermission, PermissionDecision>;
 export interface SiteSettingsStore { blocking: { host: string; enabled: boolean }[]; dark: { host: string; enabled: boolean }[]; permissions: ({ origin: string } & PermissionDecisions)[] }
 export interface SiteSettings { host: string; origin: string; blocking: boolean; dark: boolean; permissions: PermissionDecisions }
+export interface SiteSettingsEntry { host: string; origin: string; blocking: boolean | null; dark: boolean | null; permissions: PermissionDecisions }
 export interface PermissionPrompt { id: string; origin: string; permissions: SitePermission[] }
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
-export interface BrowserStore { version: 3; history: HistoryEntry[]; bookmarks: Bookmark[]; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore }
-export interface TabState { id: string; notebook: string | null; notebookItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { notebooks: NotebookSummary[]; notebookInUse: string | null; notebooksVersion: number; notebookReadError: boolean; notebookLocked: boolean; notebookStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export interface BrowserStore { version: 4; history: HistoryEntry[]; bookmarks: Bookmark[]; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
+export interface TabState { id: string; settings: SettingsSection | null; notebook: string | null; notebookItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
+export interface BrowserState { searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; notebooks: NotebookSummary[]; notebookInUse: string | null; notebooksVersion: number; notebookReadError: boolean; notebookLocked: boolean; notebookStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
@@ -39,6 +54,13 @@ export interface NotebookSummary { id: string; name: string; notes: number; capt
 export type NotebookContent = Omit<Notebook, 'items'> & { items: (Omit<NotebookItem, 'image'> & { image: Omit<CaptureImage, 'filename'> | null })[] };
 export type NotebookError = 'NOTEBOOK_NAME_INVALID' | 'NOTEBOOK_NAME_EMPTY' | 'NOTEBOOK_NAME_LONG' | 'NOTEBOOK_NAME_DUPLICATE' | 'NOTEBOOK_LIMIT' | 'NOTEBOOK_ITEM_LIMIT' | 'NOTEBOOK_NOT_FOUND' | 'NOTEBOOK_ITEM_NOT_FOUND' | 'NOTEBOOK_ITEM_INVALID' | 'NOTEBOOK_STORAGE_FAILED' | 'NOTEBOOK_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'NOTHING_SELECTED';
 export type BrowserCommand =
+  | { type: 'open-settings'; section: SettingsSection }
+  | { type: 'set-search-engine'; value: SearchEngine }
+  | { type: 'set-language'; value: LanguageSetting }
+  | { type: 'set-ask-where-to-save' | 'set-block-ads' | 'set-block-third-party-cookies' | 'set-clear-history-on-close' | 'set-clear-cache-on-close'; value: boolean }
+  | { type: 'choose-downloads-folder' | 'reset-downloads-folder' | 'register-default-browser' }
+  | { type: 'clear-browsing-data'; history: boolean; cookies: boolean; cache: boolean }
+  | { type: 'reset-site'; host: string }
   | { type: 'retry-notebook-storage' }
   | { type: 'create-notebook'; name: string }
   | { type: 'rename-notebook'; id: string; name: string }
@@ -90,6 +112,7 @@ export interface HorizonAPI {
   getNotebook(id: string): Promise<NotebookContent>;
   getCaptureImage(notebook: string, item: string): Promise<Uint8Array | null>;
   getFavicon(id: string, hash: string): Promise<Uint8Array | null>;
+  command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
   command(command: BrowserCommand): Promise<void>;
   setContentArea(area: ContentArea): Promise<void>;
   onState(callback: (state: BrowserState) => void): () => void;
