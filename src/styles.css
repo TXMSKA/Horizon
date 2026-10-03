@@ -652,7 +652,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .desktop-dialog > * + * { margin-top: var(--space-16); }
 .desktop-loading { display: flex; flex-direction: column; gap: var(--space-16); font-size: var(--type-caption); }
 .desktop-skeleton { height: var(--size-36); background: var(--surface-pressed); border-radius: var(--radius-control); }
-.desktop-status-region { position: fixed; bottom: var(--space-20); left: 50%; transform: translateX(-50%); z-index: calc(var(--layer-overlay) + 2); max-width: calc(100vw - var(--space-24)); }
+.desktop-status-region { position: fixed; bottom: var(--size-36); left: 50%; transform: translateX(-50%); z-index: calc(var(--layer-overlay) + 2); max-width: calc(100vw - var(--space-24)); }
 .desktop-toast { display: flex; align-items: center; gap: var(--space-12); padding: var(--space-8) var(--space-16); max-width: var(--width-desktop-toast); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); font-size: var(--type-label); }
 .desktop-toast > span { min-width: 0; overflow-wrap: anywhere; }
 .desktop-toast.has-error { color: var(--text-error); }
@@ -691,9 +691,10 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .capture-selector-menu > button { height: var(--size-40); min-height: var(--size-40); padding-inline: var(--space-10); gap: var(--space-10); }
 .capture-selector-menu > button > svg { width: var(--size-16); height: var(--size-16); }
 .capture-selector-menu > button[aria-checked=true] { background: var(--surface-selected); }
-.capture-project-search { height: var(--size-36); min-height: var(--size-36); padding-inline: var(--space-10); gap: var(--space-10); font-size: var(--type-label); border-radius: var(--radius-control); }
+.capture-project-search { height: var(--size-36); min-height: var(--size-36); padding-inline: calc(var(--space-10) - var(--border-width)); gap: var(--space-10); font-size: var(--type-label); border-radius: var(--radius-control); }
+.capture-project-search > svg { flex: none; width: var(--size-16); height: var(--size-16); }
 .capture-selector-menu > p { font-size: var(--type-label); color: var(--text-secondary); }
-.capture-canvas { position: fixed; left: 0; width: 100%; bottom: 0; z-index: var(--layer-overlay); overflow: hidden; background: var(--surface-canvas); touch-action: none; }
+.capture-canvas { position: fixed; left: 0; width: 100%; z-index: var(--layer-overlay); overflow: hidden; background: var(--surface-canvas); touch-action: none; }
 .capture-frozen { position: absolute; display: block; object-fit: fill; }
 .full-page .capture-frozen { border-radius: var(--radius-panel); }
 .capture-mask { position: absolute; top: var(--crop-top); left: var(--crop-left); width: var(--crop-width); height: var(--crop-height); pointer-events: none; }

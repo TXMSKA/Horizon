@@ -33,9 +33,10 @@ export function CapturePreview({ state, language, shot, header, opener, onClose,
       const top = header.current?.getBoundingClientRect().bottom ?? 0;
       if (canvas.current) {
         const bounds = page?.getBoundingClientRect();
-        canvas.current.style.setProperty('top', `${top}px`);
+        canvas.current.style.setProperty('top', `${bounds?.top ?? top}px`);
         canvas.current.style.setProperty('left', `${bounds?.left ?? 0}px`);
         canvas.current.style.setProperty('width', `${bounds?.width ?? innerWidth}px`);
+        canvas.current.style.setProperty('height', `${bounds?.height ?? innerHeight - top}px`);
       }
       if (card.current) {
         const bounds = card.current.getBoundingClientRect(), trigger = opener.current?.getBoundingClientRect();
@@ -53,9 +54,10 @@ export function CapturePreview({ state, language, shot, header, opener, onClose,
       if (!img || !area || !shot) return;
       const parent = area.getBoundingClientRect();
       const availableWidth = parent.width, availableHeight = full ? Math.max(1, parent.height - 120) : parent.height;
-      const scale = Math.min(availableWidth / shot.width, availableHeight / shot.height);
+      // The screenshot is in device pixels; drawn at the page's width it lands exactly where the page was.
+      const scale = full ? Math.min(availableWidth / shot.width, availableHeight / shot.height) : availableWidth / shot.width;
       const width = shot.width * scale, height = shot.height * scale;
-      const left = (parent.width - width) / 2, top = full ? 100 : (parent.height - height) / 2;
+      const left = full ? (parent.width - width) / 2 : 0, top = full ? 100 : 0;
       for (const [key, value] of Object.entries({ left, top, width, height })) img.style.setProperty(key, `${value}px`);
       for (const [key, value] of Object.entries({ left, top, width, height })) area.style.setProperty(`--crop-${key}`, `${value}px`);
       if (target && rect) for (const [key, value] of Object.entries({ left: left + rect.x * scale, top: top + rect.y * scale, width: rect.width * scale, height: rect.height * scale })) target.style.setProperty(key, `${value}px`);
@@ -107,7 +109,7 @@ export function CapturePreview({ state, language, shot, header, opener, onClose,
   const key = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (chooser) { setChooser(false); chevron.current?.focus(); } else if (editor) cancel(); else onClose(); } };
   const feedback = <>{error && <div className="capture-feedback" role="alert"><span>{error}</span><button className="desktop-small-link" type="button" disabled={busy} onClick={() => { if (retry.current) void work(retry.current); }}>{t('retry')}</button></div>}<span className="capture-copy-status" role="status" aria-live="polite">{copied}</span></>;
   return createPortal(<>
-    {editor ? <div ref={canvas} className={`capture-canvas${full ? ' full-page' : ''}`} role="dialog" aria-label={t('captureEditor')} aria-busy={busy} onKeyDown={key}>
+    {editor ? <div key="editor" ref={canvas} className={`capture-canvas${full ? ' full-page' : ''}`} role="dialog" aria-label={t('captureEditor')} aria-busy={busy} onKeyDown={key}>
       <img ref={image} className="capture-frozen" src={url} alt={t('capturePurpose')} />
       {rect && shot && <><svg className="capture-mask" viewBox={`0 0 ${shot.width} ${shot.height}`} preserveAspectRatio="none" aria-hidden="true"><path fillRule="evenodd" d={`M0 0H${shot.width}V${shot.height}H0Z M${rect.x} ${rect.y}h${rect.width}v${rect.height}h-${rect.width}Z`} /></svg>
         <div className="capture-rectangle" ref={selection} role="group" tabIndex={0} aria-label={t('captureCrop')} aria-describedby="crop-instructions" onPointerDown={event => {
@@ -123,7 +125,7 @@ export function CapturePreview({ state, language, shot, header, opener, onClose,
           setRect(adjust(rect, handle === undefined ? null : Number(handle), event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0, event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0));
         }}>{[0, 1, 2, 3].map(corner => <button key={corner} type="button" className={`capture-corner corner-${corner}`} data-corner={corner} aria-label={t('captureCorner').replace('{number}', String(corner + 1))} disabled={busy} />)}</div><p id="crop-instructions" className="visually-hidden">{t('captureInstructions')}</p></>}
       <div className="capture-editor-bar" ref={bar} data-capture-popover><div className="segmented" role="radiogroup" aria-label={t('captureKind')}>{[false, true].map(page => <button key={String(page)} type="button" role="radio" aria-checked={full === page} tabIndex={full === page ? 0 : -1} disabled={busy} onClick={() => { if (full !== page) void changeKind(page); }} onKeyDown={event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) { event.preventDefault(); const next = event.key === 'Home' ? false : event.key === 'End' ? true : !full; if (next !== full) void changeKind(next).then(() => requestAnimationFrame(() => bar.current?.querySelector<HTMLButtonElement>('[aria-checked=true]')?.focus())); } }}>{t(page ? 'capturePage' : 'captureScreen')}</button>)}</div><button className="desktop-action capture-cancel" type="button" disabled={busy} onClick={cancel}>{t('cancel')}</button>{splitButton}</div><div className="capture-editor-feedback">{feedback}</div>
-    </div> : <div className="capture-preview" ref={card} data-capture-popover role="dialog" aria-modal="false" aria-label={t('capturePreview')} tabIndex={-1} aria-busy={busy || !shot} onKeyDown={key}>
+    </div> : <div key="preview" className="capture-preview" ref={card} data-capture-popover role="dialog" aria-modal="false" aria-label={t('capturePreview')} tabIndex={-1} aria-busy={busy || !shot} onKeyDown={key}>
       {shot && url ? <svg className="capture-thumbnail" viewBox={rect ? `${rect.x} ${rect.y} ${rect.width} ${rect.height}` : `0 0 ${shot.width} ${shot.height}`} role="img" aria-label={t('capturePurpose')}><image href={url} width={shot.width} height={shot.height} /></svg> : <div className="capture-thumbnail desktop-skeleton" role="status"><span className="visually-hidden">{t('loading')}</span></div>}
       <div className="capture-actions">{[{ key: 'captureCrop', icon: Crop, action: crop }, { key: 'capturePage', icon: AppWindow, action: () => { void changeKind(true); } }, { key: 'copy', icon: Copy, action: () => { void work(async () => { await apply(true); setCopied(t('copied')); }); } }].map(({ key, icon: Icon, action }) => <div key={key}><button type="button" disabled={busy || !shot} aria-label={t(key as CopyKey)} onClick={action}><Icon aria-hidden="true" /></button><span>{t(key as CopyKey)}</span></div>)}</div>
       <small>{t('keptInCaptures')}</small><hr />{splitButton}{feedback}
