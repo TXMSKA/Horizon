@@ -4080,7 +4080,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
     name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
-  electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
+  electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialog: async (...args) => { options.captureSaveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.captureSaveChoice ?? { canceled: true }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
   electron.shell = { openExternal: async () => assert.fail('System settings must stay mocked'), showItemInFolder: path => { options.shownPath = path; }, openPath: async () => '' };
   Contents.prototype.stop = function () { this.stops = (this.stops || 0) + 1; };
   Contents.prototype.reload = function () { this.reloads = (this.reloads || 0) + 1; };
@@ -4632,6 +4632,46 @@ test('favorites bar has one tab stop, keyboard travel, nested open all and Escap
   assert.equal(focused.at(-1), 'folder');
 });
 
+test('private favorites keep opening actions and omit edit, creation and drag controls in the bar and panel', () => {
+  for (const language of ['en', 'es']) for (const surface of ['bar', 'panel']) {
+    const hooks = notebookTestHooks(), sent = [], { FavoritesBar, FavoritesPanel } = favoritesInterface(hooks, sent), copy = interfaceModule('src/copy.ts');
+    const link = { kind: 'link', id: randomUUID(), url: 'https://example.com/', title: 'Example', createdAt: 1 };
+    const state = { privateWindow: true, activeProfileId: 'profile', store: { favorites: { bar: [link], other: [] } } };
+    const props = { state, language, run: async command => { sent.push(command); return true; }, onDelete: async () => assert.fail('Private edit action'), opener: { current: null }, undo: null, onRestore() {}, onDismiss() {}, onAnnounce() {}, onOverlay() {}, onActivate() {}, dismiss: false };
+    const render = () => hooks.render(() => (surface === 'bar' ? FavoritesBar : FavoritesPanel)(props));
+    let tree = render();
+    assert.equal(notebookNodes(tree, node => node.props['aria-label'] === copy.text('newFolder', language)).length, 0);
+    assert.equal(notebookNodes(tree, node => node.props.draggable === true).length, 0);
+    const row = notebookNodes(tree, node => node.type === 'button' && node.props.title === 'Example')[0];
+    row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ left: 0, bottom: 32 }) }, clientX: 0, clientY: 32 });
+    tree = render(); const menu = notebookNodes(tree, node => node.type === 'menu')[0], actions = notebookNodes(menu, node => node.props.role === 'menuitem');
+    assert.equal(actions.length, 1); assert.equal(actions[0].props.disabled, false); actions[0].props.onClick();
+    assert.deepEqual(sent, [{ type: 'open-favorite-new-tab', id: link.id }]);
+  }
+});
+
+test('private menus omit closed-tab recovery and expose the new window shortcuts semantically', () => {
+  const copy = interfaceModule('src/copy.ts'), { BrowserMenu } = interfaceModule('src/BrowserMenu.tsx', { 'lucide-react': {}, './copy': copy, './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' } });
+  const tree = BrowserMenu({ language: 'en', privateWindow: true, active: { url: 'https://example.com/', zoom: 1 }, keyboard: true, opener: { current: null }, onDismiss() {}, onShortcut() {}, onPanel() {}, onSettings() {}, onAbout() {}, run: async () => true });
+  assert.equal(notebookNodes(tree, node => node.type === 'kbd' && node.props.children === 'Ctrl+Shift+T').length, 0);
+  assert.deepEqual(notebookNodes(tree, node => node.props['aria-keyshortcuts']).map(node => node.props['aria-keyshortcuts']), ['Control+n', 'Control+Shift+n']);
+});
+
+test('private capture previews offer file export and copying without a Desktop destination or a persistence promise', async () => {
+  for (const language of ['en', 'es']) {
+    const hooks = notebookTestHooks(), sent = [], { CapturePreview } = capturePreviewInterface(hooks, async command => { sent.push(command); return true; }), copy = interfaceModule('src/copy.ts');
+    const shot = { id: randomUUID(), width: 100, height: 80, bytes: faviconPNG, cut: false };
+    const props = { state: { privateWindow: true, projects: [], projectInUse: null }, language, shot, header: { current: null }, opener: { current: null }, onClose() {}, onSave: async () => assert.fail('Private Desktop destination'), onVisible: work => work(), onShot() {} };
+    const render = () => hooks.render(() => CapturePreview(props)); const tree = render();
+    assert.equal(notebookNodes(tree, node => node.type === 'picker' || node.props['aria-haspopup'] === 'dialog').length, 0);
+    assert.equal(notebookNodes(tree, node => node.type === 'small').length, 0);
+    const save = notebookNodes(tree, node => node.type === 'button' && node.props.children === copy.text('saveCaptureFile', language))[0];
+    save.props.onClick(); for (let i = 0; i < 4; i++) await Promise.resolve();
+    assert.deepEqual(sent, [{ type: 'save-capture-file', id: shot.id }]);
+    assert.equal(notebookNodes(render(), node => node.props.role === 'status' && node.props.children === copy.text('captureFileSaved', language)).length, 1);
+  }
+});
+
 test('favorites panel expands its tree, filters nested links and sends id-based rename and folder commands', async () => {
   const hooks = notebookTestHooks(), sent = [], events = [], { FavoritesPanel } = favoritesInterface(hooks, sent);
   const link = { kind: 'link', id: randomUUID(), url: 'https://example.com/', title: 'Nested article', createdAt: 1 };
@@ -4878,7 +4918,7 @@ test('browser panel routes are removed, panels use the menu anchor and all menu 
   assert.doesNotMatch(menu, /menuitemradio|highContrast|darkPages|passwords|extensions/);
   assert.match(app, /onClear=\{\(\) => openSettings\('privacy', true\)\}/);
   for (const route of ['horizon://history', 'horizon://bookmarks', 'horizon://downloads']) assert.throws(() => classifyInput(route));
-  for (const key of ['newTab', 'newWindow', 'newPrivateWindow', 'privateWindow', 'private', 'privateWindowNotice', 'privateBlockingHint', 'privateHistoryTitle', 'privateHistory', 'privateDownloadsTitle', 'privateDownloads', 'zoom', 'zoomIn', 'zoomOut', 'fullscreen', 'find', 'favorites', 'history', 'downloads', 'settings', 'aboutHorizon', 'appVersion', 'today', 'yesterday', 'downloadSize', 'downloadStateSize', 'downloadRetry', 'downloadRemove', 'downloadDone', 'close']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim(), `${key}: ${language}`);
+  for (const key of ['newTab', 'newWindow', 'newPrivateWindow', 'privateWindow', 'private', 'saveCaptureFile', 'captureFileSaved', 'CAPTURE_SAVE_FAILED', 'privateBlockingHint', 'privateHistoryTitle', 'privateHistory', 'privateDownloadsTitle', 'privateDownloads', 'zoom', 'zoomIn', 'zoomOut', 'fullscreen', 'find', 'favorites', 'history', 'downloads', 'settings', 'aboutHorizon', 'appVersion', 'today', 'yesterday', 'downloadSize', 'downloadStateSize', 'downloadRetry', 'downloadRemove', 'downloadDone', 'close']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim(), `${key}: ${language}`);
   assert.deepEqual(validateCommand({ type: 'fullscreen' }), { type: 'fullscreen' });
   assert.deepEqual(validateCommand({ type: 'retry-download', id: 'download' }), { type: 'retry-download', id: 'download' });
   for (const command of [{ type: 'fullscreen', enabled: true }, { type: 'retry-download' }, { type: 'retry-download', id: '', url: 'https://example.com/' }, { type: 'retry-download', id: 'download', path: '/private' }]) assert.throws(() => validateCommand(command));
@@ -5432,6 +5472,16 @@ test('window session migration preserves encrypted v1 payloads and validates eve
   assert.deepEqual(readFileSync(path), bytes); assert.equal(failed.memoryOnly, true); assert.equal(readdirSync(directory).length, 1);
 });
 
+test('private page preferences disable every page execution engine without changing normal page defaults', () => {
+  const { pagePreferences } = require('../dist/electron/page-preferences.js');
+  const normal = pagePreferences('persist:profile', false), privatePage = pagePreferences('private-test', true);
+  assert.equal(privatePage.javascript, false); assert.equal(privatePage.plugins, false); assert.equal(privatePage.webgl, false);
+  for (const key of ['nodeIntegration', 'nodeIntegrationInWorker', 'nodeIntegrationInSubFrames', 'allowRunningInsecureContent', 'experimentalFeatures', 'webviewTag', 'devTools']) assert.equal(privatePage[key], false);
+  for (const key of ['sandbox', 'contextIsolation', 'webSecurity']) assert.equal(privatePage[key], true);
+  for (const key of ['javascript', 'plugins', 'webgl']) assert.equal(Object.hasOwn(normal, key), false);
+  privatePage.javascript = true; assert.equal(pagePreferences('private-other', true).javascript, false);
+});
+
 test('private blocking policy forces filters and third-party cookies independently of every preference', () => {
   const { blockingPolicy } = require('../dist/electron/blocking.js');
   const { recordsBrowsing } = require('../dist/electron/store.js');
@@ -5554,7 +5604,7 @@ test('private windows share an ephemeral session, force strict handlers and neve
   assert.ok([...normal.sessions].find(([, value]) => value === target)[0].startsWith('private-'));
   assert.equal(first.state().blockAds, true); assert.equal(first.state().blockThirdPartyCookies, true);
   for (const permission of ['media', 'geolocation', 'notifications', 'clipboard-read', 'unknown']) target.request(contents, permission, allowed => assert.equal(allowed, false), { mediaTypes: ['audio', 'video'] });
-  target.request(contents, 'fullscreen', allowed => assert.equal(allowed, true), {}); assert.equal(target.check(null, 'notifications', 'https://private.example', {}), false);
+  target.request(contents, 'fullscreen', allowed => assert.equal(allowed, false), {}); assert.equal(target.check(null, 'notifications', 'https://private.example', {}), false); assert.equal(target.check(contents, 'fullscreen', 'https://private.example', {}), false);
   assert.equal(first.state().permissionPrompt, null); assert.deepEqual(first.state().siteSettings.permissions, { camera: 'block', microphone: 'block', location: 'block', notifications: 'block' });
   target.onBeforeRequest({ id: 44, url: 'https://tracker.example/script', resourceType: 'script', webContentsId: contents.id }, result => assert.equal(result.cancel, true));
   target.onBeforeSendHeaders({ id: 44, url: 'https://tracker.example/script', resourceType: 'script', webContentsId: contents.id, requestHeaders: { Cookie: 'a=1' } }, result => assert.deepEqual(result.requestHeaders, {}));
@@ -5565,17 +5615,87 @@ test('private windows share an ephemeral session, force strict handlers and neve
   first.command({ type: 'open-settings', section: 'profiles' }); assert.equal(first.state().tabs.find(tab => tab.id === first.state().activeId).settings, 'general'); first.command({ type: 'close-tab', id: first.state().activeId });
   const { EventEmitter } = require('node:events'), item = Object.assign(new EventEmitter(), { getURL: () => 'https://private.example/file', getFilename: () => 'private-file.txt', getTotalBytes: () => 1, getReceivedBytes: () => 1, setSavePath(path) { this.path = path; }, cancel() {} });
   target.emit('will-download', { preventDefault() { assert.fail('Private intentional file download refused'); } }, item, contents);
-  writeFileSync(item.path, 'downloaded file'); item.emit('updated', {}, 'progressing'); item.emit('done', {}, 'completed');
+  writeFileSync(item.path, 'downloaded file'); item.emit('updated', {}, 'progressing');
   assert.deepEqual(first.state().store.downloads, []); assert.deepEqual(normal.state().store.downloads, []);
-  first.command({ type: 'bookmark' }); assert.equal(normal.state().store.favorites.bar[0].url, 'https://private.example/typed');
-  const capture = await first.command({ type: 'take-capture' }); assert.ok(capture.id); assert.equal(normal.state().captures.length, 1);
+  item.emit('done', {}, 'completed');
+  assert.deepEqual(first.state().store.downloads, []); assert.deepEqual(normal.state().store.downloads, []);
+  assert.throws(() => first.command({ type: 'bookmark' }), /read-only/); assert.deepEqual(normal.state().store.favorites.bar, []);
+  const capture = await first.command({ type: 'take-capture' }); assert.ok(capture.id); assert.equal(normal.state().captures.length, 0); assert.equal(first.state().captures.length, 1);
   fireTimers(normal.timers, 500);
   assert.deepEqual(readStore(path, cipher).history.map(entry => entry.url), ['https://normal.example/']); assert.deepEqual(readStore(path, cipher).downloads, []); assert.deepEqual(readStore(path, cipher).siteSettings.permissions, []);
   assert.deepEqual(require('../dist/electron/store.js').readStoreFile(sessionPath, cipher), normalSession);
   first.close(); await new Promise(setImmediate); assert.deepEqual(target.cleared, []); assert.equal(normal.isProfileSession(target), true);
   second.close(); await new Promise(setImmediate); assert.ok(target.cleared.some(([name]) => name === 'clearStorageData')); assert.ok(target.cleared.some(([name]) => name === 'clearCache')); assert.equal(normal.isProfileSession(target), false); assert.equal(existsSync(item.path), true);
+  assert.deepEqual(normal.state().store.downloads, []); assert.deepEqual(readStore(path, cipher).downloads, []);
   const next = normal.addWindow({ privateWindow: true, profileId: profile }); next.navigate(); assert.notEqual(normal.views.at(-1).webContents.session, target);
   normal.command({ type: 'new-tab' });
+});
+
+test('private favorite commands refuse every edit while independent snapshots keep opening profile favorites', t => {
+  const normal = notebookBrowser(t, authenticatedCipher()); normal.navigate(); normal.command({ type: 'bookmark' });
+  normal.command({ type: 'create-favorite-folder', name: 'Reading', parent: 'bar', position: 1 });
+  const favorite = normal.state().store.favorites.bar[0], folder = normal.state().store.favorites.bar[1];
+  fireTimers(normal.timers, 500);
+  const path = profileStorePath(normal.directory, normal.state().activeProfileId), previous = readFileSync(path);
+  const peer = normal.addWindow({ privateWindow: true }); peer.navigate();
+  const snapshot = peer.state().store.favorites; snapshot.bar[0].title = 'Synthetic changed title'; snapshot.bar.splice(1);
+  assert.equal(normal.state().store.favorites.bar[0].title, favorite.title); assert.equal(peer.state().store.favorites.bar.length, 2);
+  for (const command of [
+    { type: 'bookmark' }, { type: 'add-favorite', parent: 'bar', position: 0, url: 'https://private.example/', title: 'Private' },
+    { type: 'create-favorite-folder', parent: 'bar', position: 0, name: 'Private' },
+    { type: 'rename-favorite', id: folder.id, name: 'Private' }, { type: 'rename-favorite', id: favorite.id, name: 'Private' },
+    { type: 'move-favorite', id: favorite.id, parent: folder.id, position: 0 }, { type: 'delete-favorite', id: favorite.id },
+    { type: 'rename-bookmark', url: favorite.url, title: 'Private' }, { type: 'delete-bookmark', url: favorite.url }, { type: 'restore', kind: 'bookmarks' },
+  ]) assert.throws(() => peer.command(command), /read-only/);
+  peer.command({ type: 'open-favorite', id: favorite.id }); assert.equal(peer.state().tabs[0].url, favorite.url);
+  peer.command({ type: 'open-favorite-new-tab', id: favorite.id }); assert.equal(peer.state().tabs.length, 2);
+  normal.command({ type: 'rename-favorite', id: favorite.id, name: 'Updated normally' });
+  assert.equal(peer.state().store.favorites.bar[0].title, 'Updated normally');
+  assert.notDeepEqual(readFileSync(path), previous); const updated = readFileSync(path);
+  peer.close(); fireTimers(normal.timers, 500); assert.deepEqual(readFileSync(path), updated);
+});
+
+test('private captures copy and export from memory without creating Desktop files or sharing normal captures', async t => {
+  const options = { captureBytes: capturePNG(100, 80) }, normal = notebookBrowser(t, authenticatedCipher(), options); fireTimers(normal.timers, 500);
+  const peer = normal.addWindow({ privateWindow: true }); peer.navigate(); normal.area(false);
+  const profileDirectory = join(normal.directory, 'profiles', normal.state().activeProfileId), before = readdirSync(profileDirectory).sort();
+  const capture = await peer.command({ type: 'take-capture' });
+  assert.equal(normal.state().captures.length, 0); assert.equal(peer.state().captures.length, 1);
+  assert.deepEqual(readdirSync(profileDirectory).sort(), before);
+  const cropped = await peer.command({ type: 'edit-capture', id: capture.id, rect: { x: 0, y: 0, width: 8, height: 8 } });
+  assert.equal(cropped.width, 8); await peer.command({ type: 'copy-capture', id: capture.id }); assert.ok(options.copiedItems);
+  assert.equal(await peer.command({ type: 'save-capture-file', id: capture.id }), false);
+  options.captureSaveChoice = { canceled: false, filePath: join(normal.directory, 'export.png') };
+  assert.equal(await peer.command({ type: 'save-capture-file', id: capture.id }), true); assert.deepEqual(readFileSync(options.captureSaveChoice.filePath), Buffer.from(cropped.bytes));
+  options.saveError = true; await assert.rejects(peer.command({ type: 'save-capture-file', id: capture.id }), /CAPTURE_SAVE_FAILED/);
+  assert.throws(() => peer.command({ type: 'create-project', name: 'Private' }), /unavailable/);
+  assert.throws(() => peer.command({ type: 'navigate', input: 'horizon://desktop/captures' }), /unavailable/);
+  const { assertPrivateCommand } = require('../dist/electron/private-commands.js');
+  for (const type of ['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'open-desktop', 'open-desktop-panel']) assert.throws(() => assertPrivateCommand({ type }), /unavailable/);
+  assert.throws(() => assertPrivateCommand({ type: 'context-menu', item: 'add-to-desktop' }), /unavailable/);
+  const groups = contextMenuGroups(menuParams({ selectionText: 'Synthetic selection' }), { back: false, forward: false, reload: true }, true);
+  assert.equal(groups.flat().some(row => row.id === 'add-to-desktop'), false);
+  fireTimers(normal.timers, 500); peer.close(); await new Promise(setImmediate);
+  assert.deepEqual(readdirSync(profileDirectory).sort(), before); assert.ok(existsSync(options.captureSaveChoice.filePath));
+  const next = normal.addWindow({ privateWindow: true }); assert.deepEqual(next.state().captures, []);
+});
+
+test('private views keep execution disabled across replacements and popups; PDFs become downloads', t => {
+  const normal = notebookBrowser(t, authenticatedCipher()), peer = normal.addWindow({ privateWindow: true }); peer.navigate();
+  const view = normal.views.at(-1), contents = view.webContents;
+  assert.equal(view.options.webPreferences.javascript, false);
+  const popup = contents.popup({ url: 'https://example.com/popup', disposition: 'foreground-tab' });
+  assert.equal(popup.overrideBrowserWindowOptions.webPreferences.javascript, false);
+  popup.createWindow({}); assert.equal(normal.views.at(-1).options.webPreferences.javascript, false);
+  normal.command({ type: 'dark-pages', value: 'on' }); normal.browser.settingsChanged();
+  for (const view of normal.views) if (view.options.webPreferences.partition.startsWith('private-')) {
+    assert.equal(view.options.webPreferences.javascript, false); assert.equal(view.options.webPreferences.plugins, false); assert.equal(view.options.webPreferences.webgl, false);
+  }
+  const current = normal.views.at(-1).webContents, target = current.session;
+  target.onHeadersReceived({ id: 900, url: 'https://example.com/document.pdf', resourceType: 'mainFrame', webContentsId: current.id,
+    responseHeaders: { 'content-type': ['application/pdf; charset=binary'], 'content-disposition': ['inline; filename=test.pdf'] } }, result => {
+    assert.deepEqual(result.responseHeaders['Content-Disposition'], ['attachment']); assert.equal(Object.hasOwn(result.responseHeaders, 'content-disposition'), false);
+  });
 });
 
 test('private requests fail closed until filter initialization and unknown workers keep strict cookies', t => {
@@ -5878,7 +5998,7 @@ test('Desktop tab titles and card metadata follow the board in both languages', 
 test('the Hub draws Desktop first and focuses its first built tile', () => {
   assert.deepEqual(require('../dist/src/shared/api.js').HUB_APPS, ['desktop', 'themes']);
   const hub = readFileSync('src/Hub.tsx', 'utf8');
-  assert.match(hub, /HUB_APPS.map/);
+  assert.match(hub, /const apps = HUB_APPS.filter/); assert.match(hub, /apps.map/);
   assert.ok(hub.includes("querySelector<HTMLButtonElement>(page === 'home' ? '.hub-tile'"));
 });
 

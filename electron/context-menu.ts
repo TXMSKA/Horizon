@@ -11,7 +11,7 @@ export function isContextMenuItemId(value: unknown): value is ContextMenuItemId 
   return typeof value === 'string' && (itemIds.has(value) || value.startsWith('spell:') && value.length > 6 && value.length <= 262 && !/[\u0000-\u001f\u007f]/.test(value));
 }
 
-export function contextMenuGroups(params: PageMenuParams, navigation: Navigation): ContextMenuItem[][] {
+export function contextMenuGroups(params: PageMenuParams, navigation: Navigation, privateWindow = false): ContextMenuItem[][] {
   const groups: ContextMenuItem[][] = [];
   const row = (id: ContextMenuItemId, enabled = true): ContextMenuItem => ({ id, enabled });
   if (isWebURL(params.linkURL)) groups.push([row('open-link'), row('copy-link')]);
@@ -25,7 +25,7 @@ export function contextMenuGroups(params: PageMenuParams, navigation: Navigation
   if (!params.linkURL && params.mediaType !== 'image' && !params.isEditable && !params.selectionText.trim()) {
     groups.push([row('back', navigation.back), row('forward', navigation.forward), row('reload', navigation.reload)]);
   }
-  if (params.selectionText.trim()) groups.push([row('add-to-desktop')]);
+  if (!privateWindow && params.selectionText.trim()) groups.push([row('add-to-desktop')]);
   return groups;
 }
 
@@ -34,9 +34,9 @@ export class PageMenuSession {
   private pending?: { id: string; tabId: string; params: PageMenuParams; groups: ContextMenuItem[][] };
   get tabId(): string | undefined { return this.pending?.tabId; }
 
-  open(tabId: string, params: PageMenuParams, navigation: Navigation, offset: { x: number; y: number }, chromeZoom: number): PageContextMenu | null {
+  open(tabId: string, params: PageMenuParams, navigation: Navigation, offset: { x: number; y: number }, chromeZoom: number, privateWindow = false): PageContextMenu | null {
     this.invalidate();
-    const groups = contextMenuGroups(params, navigation);
+    const groups = contextMenuGroups(params, navigation, privateWindow);
     if (!groups.length) return null;
     const id = randomUUID();
     const stored = { ...params, editFlags: { ...params.editFlags }, dictionarySuggestions: [...params.dictionarySuggestions] };

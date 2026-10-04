@@ -96,6 +96,7 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
     }
     finally { pending.current = false; if (ref.current) setBusy(false); }
   };
+  const apps = HUB_APPS.filter(app => !state.privateWindow || app !== 'desktop');
   const open = (app: HubApp) => { closeMenu(false); setError(''); setRetry(null); onPage(app); };
   return <ToolbarPopover opener={opener}><div className={`hub-popup${page !== 'home' ? ' hub-app-page' : ''}`} id="hub-popup" ref={ref} role="dialog" tabIndex={-1} aria-label={t('hub')} aria-busy={busy} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (tileMenu) closeMenu(); else onDismiss(true); }
@@ -108,13 +109,13 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
     {page === 'home' && <div className="hub-ground" aria-hidden="true"><div className="horizon-rule" /><svg className="horizon-sun" viewBox="0 0 64 32"><path d="M0 32 A32 32 0 0 1 64 32" /></svg></div>}
     <div className="hub-content"><nav className="hub-dock" aria-label={t('quickAccess')}>
       <button className="icon-button" type="button" aria-label={t('hubHome')} title={t('hubHome')} aria-current={page === 'home' ? 'page' : undefined} onClick={() => { closeMenu(false); onPage('home'); }}><House aria-hidden="true" /></button>
-      {state.quickAccess.map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={() => open(app)}><Icon aria-hidden="true" /></button>; })}
+      {state.quickAccess.filter(app => !state.privateWindow || app !== 'desktop').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={() => open(app)}><Icon aria-hidden="true" /></button>; })}
     </nav><div className="hub-page"><h2>{t(page === 'home' ? 'hub' : hubApps[page].label)}</h2>
-      {page === 'home' ? <div className="hub-tiles">{HUB_APPS.map((app, index) => { const { label, icon: Icon } = hubApps[app]; return <button className="hub-tile" type="button" ref={app === 'themes' ? tile : undefined} key={app} aria-haspopup="menu" aria-expanded={tileMenu === app} onClick={() => open(app)} onContextMenu={event => { event.preventDefault(); tile.current = event.currentTarget; setTileMenu(app); }} onKeyDown={event => {
+      {page === 'home' ? <div className="hub-tiles">{apps.map((app, index) => { const { label, icon: Icon } = hubApps[app]; return <button className="hub-tile" type="button" ref={app === 'themes' ? tile : undefined} key={app} aria-haspopup="menu" aria-expanded={tileMenu === app} onClick={() => open(app)} onContextMenu={event => { event.preventDefault(); tile.current = event.currentTarget; setTileMenu(app); }} onKeyDown={event => {
         if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) { event.preventDefault(); tile.current = event.currentTarget; setTileMenu(app); return; }
         const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowDown' ? 3 : event.key === 'ArrowUp' ? -3 : 0;
         if (!step) return;
-        event.preventDefault(); const next = (index + step + HUB_APPS.length * 3) % HUB_APPS.length;
+        event.preventDefault(); const next = (index + step + apps.length * 3) % apps.length;
         (event.currentTarget.parentElement?.children[next] as HTMLButtonElement | undefined)?.focus();
       }}><span className="hub-tile-icon"><Icon aria-hidden="true" /></span><span>{t(label)}</span></button>; })}</div> : <InstalledThemes state={state} language={language} />}
       {error && <div className="settings-feedback error" role="alert"><span>{error}</span>{retry && <button className="text-button" type="button" ref={retryButton} aria-disabled={busy} onClick={() => { void pin(retry); }}>{t('retry')}</button>}</div>}

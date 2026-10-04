@@ -1,0 +1,11 @@
+import type { BrowserCommand } from '../src/shared/api';
+
+const favoriteWrites = new Set(['bookmark', 'add-favorite', 'create-favorite-folder', 'rename-favorite', 'move-favorite', 'delete-favorite', 'rename-bookmark', 'delete-bookmark']);
+const desktopWrites = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item']);
+
+export function assertPrivateCommand(command: BrowserCommand): void {
+  if (favoriteWrites.has(command.type) || command.type === 'restore' && command.kind === 'bookmarks') throw new Error('Private window favorites are read-only');
+  if (desktopWrites.has(command.type) || command.type === 'restore' && command.kind === 'desktop'
+    || command.type === 'context-menu' && command.item === 'add-to-desktop'
+    || command.type === 'open-desktop' || command.type === 'open-desktop-panel') throw new Error('Private window Desktop is unavailable');
+}

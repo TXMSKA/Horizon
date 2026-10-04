@@ -54,6 +54,7 @@ function useFavoriteActions({ state, language, run, onDelete }: ActionProps, clo
   const showMenu = (event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>, item: FavoriteItem) => {
     event.preventDefault(); event.stopPropagation();
     if (busy.current) return;
+    if (state.privateWindow && item.kind === 'folder' && !favoriteLinks(item.children).length) return;
     const opener = { current: event.currentTarget }, rect = event.currentTarget.getBoundingClientRect();
     const keyboard = 'key' in event;
     setContext({ item, opener, keyboard, point: keyboard ? { x: rect.left, y: rect.bottom } : { x: event.clientX, y: event.clientY } });
@@ -87,12 +88,13 @@ function useFavoriteActions({ state, language, run, onDelete }: ActionProps, clo
   const rootContext = context?.item.id === 'bar' || context?.item.id === 'other';
   const overlays = <>{context && <div className="favorites-surface"><Menu id={`${id}-menu`} className="favorite-item-menu" label={t('favoriteActions').replace('{name}', itemName(context.item))} keyboard={context.keyboard} point={context.point} opener={context.opener} onDismiss={reason => { if (reason === 'escape') context.opener.current?.focus(); setContext(null); }}>
     <button type="button" role="menuitem" tabIndex={-1} disabled={context.item.kind === 'folder' && !favoriteLinks(context.item.children).length} onClick={() => { void run({ type: context.item.kind === 'link' ? 'open-favorite-new-tab' : 'open-all-favorites', id: context.item.id }); setContext(null); close(); }}><ExternalLink aria-hidden="true" /><span>{t(context.item.kind === 'link' ? 'openFavoriteNewTab' : 'openAllFavorites').replace('{count}', String(context.item.kind === 'folder' ? favoriteLinks(context.item.children).length : 1))}</span></button>
-    <hr role="separator" />
+    {!state.privateWindow && <><hr role="separator" />
     {!rootContext && <><button type="button" role="menuitem" tabIndex={-1} onClick={() => openForm('rename', context.opener, favoriteLocation(state.store.favorites, context.item.id)!.parent, context.item)}><Pencil aria-hidden="true" /><span>{t('rename')}</span></button>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => openForm('move', context.opener, favoriteLocation(state.store.favorites, context.item.id)!.parent, context.item)}><FolderInput aria-hidden="true" /><span>{t('moveFavorite')}</span></button></>}
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => openForm('new', context.opener, context.item.kind === 'folder' ? context.item.id : favoriteLocation(state.store.favorites, context.item.id)!.parent)}><FolderPlus aria-hidden="true" /><span>{t('newFolder')}</span></button>
     {!rootContext && <><hr role="separator" />
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => { const opener = context.opener; setContext(null); void onDelete({ type: 'delete-favorite', id: context.item.id }, 'bookmarks', 'favoriteDeleted').then(() => { if (opener.current?.isConnected) opener.current.focus(); else document.querySelector<HTMLElement>('[data-favorite-undo], .favorites-bar button, .favorites-tree button')?.focus(); }); }}><Trash2 aria-hidden="true" /><span>{t('delete')}</span></button></>}
+    </>}
   </Menu></div>}
   {form && <PopupAnchor opener={form.opener} align="start"><div className="favorites-surface"><section className="favorite-form new-profile-popover" role="dialog" aria-labelledby={`${id}-form-title`} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
@@ -140,13 +142,13 @@ function useFavoriteDrag(state: BrowserState, run: ActionProps['run']) {
     setMark(null); dragging = null;
   };
   const end = () => { setMark(null); dragging = null; };
-  const props = (id: string, parent: string, position: number, folder = false, horizontal = false, inside = false) => ({
+  const props = (id: string, parent: string, position: number, folder = false, horizontal = false, inside = false) => (state.privateWindow ? {} : {
     draggable: true, onDragStart: (event: DragEvent<HTMLElement>) => start(event, id), onDragEnd: end,
     onDragOver: (event: DragEvent<HTMLElement>) => over(event, id, parent, position, folder, horizontal, inside), onDrop: (event: DragEvent<HTMLElement>) => drop(event, id),
     onDragLeave: (event: DragEvent<HTMLElement>) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMark(null); },
     'data-drop': mark?.target === id ? mark.edge : undefined,
   });
-  const containerProps = (id: string) => ({
+  const containerProps = (id: string) => (state.privateWindow ? {} : {
     onDragOver: (event: DragEvent<HTMLElement>) => over(event, id, id, 0, true, false, true),
     onDrop: (event: DragEvent<HTMLElement>) => drop(event, id),
     onDragLeave: (event: DragEvent<HTMLElement>) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMark(null); },
@@ -280,7 +282,7 @@ export function FavoritesPanel({ state, language, run, onDelete, opener, undo, o
   const renderFolder = (folder: FolderTarget, root = false, parent = '', position = 0) => {
     const open = expanded.has(folder.id);
     return <li role="none" key={folder.id}>
-      <button className="favorite-tree-row" type="button" role="treeitem" aria-expanded={open} aria-owns={open ? `${id}-${folder.id}-children` : undefined} data-tree-id={folder.id} tabIndex={treeFocus === folder.id ? 0 : -1} title={folder.name} onFocus={() => setFocused(folder.id)} onClick={() => toggle(folder.id)} {...drag.props(folder.id, root ? folder.id : parent, position, true)} draggable={!root} onDragEnter={() => { if (dragging) toggle(folder.id, true); }} onContextMenu={event => actions.showMenu(event, { ...folder, kind: 'folder', createdAt: 0 })} onKeyDown={event => actions.menuKey(event, { ...folder, kind: 'folder', createdAt: 0 })}><span className="favorite-tree-chevron">{open ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}</span><span className="favorite-mark">{open ? <FolderOpen aria-hidden="true" /> : <Folder aria-hidden="true" />}</span><span className="favorite-label">{folder.name}</span></button>
+      <button className="favorite-tree-row" type="button" role="treeitem" aria-expanded={open} aria-owns={open ? `${id}-${folder.id}-children` : undefined} data-tree-id={folder.id} tabIndex={treeFocus === folder.id ? 0 : -1} title={folder.name} onFocus={() => setFocused(folder.id)} onClick={() => toggle(folder.id)} {...drag.props(folder.id, root ? folder.id : parent, position, true)} draggable={!state.privateWindow && !root} onDragEnter={() => { if (dragging) toggle(folder.id, true); }} onContextMenu={event => actions.showMenu(event, { ...folder, kind: 'folder', createdAt: 0 })} onKeyDown={event => actions.menuKey(event, { ...folder, kind: 'folder', createdAt: 0 })}><span className="favorite-tree-chevron">{open ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}</span><span className="favorite-mark">{open ? <FolderOpen aria-hidden="true" /> : <Folder aria-hidden="true" />}</span><span className="favorite-label">{folder.name}</span></button>
       {open && <ul role="group" id={`${id}-${folder.id}-children`} className="favorite-tree-children">{folder.children.map((item, index) => item.kind === 'folder' ? renderFolder(item, false, folder.id, index) : <li role="none" key={item.id}><button className="favorite-tree-row favorite-tree-link" type="button" role="treeitem" data-tree-id={item.id} tabIndex={treeFocus === item.id ? 0 : -1} onFocus={() => setFocused(item.id)} title={itemName(item)} {...drag.props(item.id, folder.id, index)} onClick={event => { void run({ type: event.ctrlKey ? 'open-favorite-new-tab' : 'open-favorite', id: item.id }); close(); }} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'open-favorite-new-tab', id: item.id }); } }} onContextMenu={event => actions.showMenu(event, item)} onKeyDown={event => actions.menuKey(event, item)}><span className="favorite-tree-chevron" /><span className="favorite-mark"><FavoriteBadge item={item} /></span><span className="favorite-label">{itemName(item)}</span></button></li>)}
       </ul>}
     </li>;
@@ -293,7 +295,7 @@ export function FavoritesPanel({ state, language, run, onDelete, opener, undo, o
     if (event.key === 'ArrowRight' && folder != null) { event.preventDefault(); if (folder === 'false') toggle(item!.dataset.treeId!, true); else item!.parentElement?.querySelector<HTMLButtonElement>('[role=group] .favorite-tree-row')?.focus(); }
     else if (event.key === 'ArrowLeft') { event.preventDefault(); if (folder === 'true') toggle(item!.dataset.treeId!, false); else item?.closest<HTMLElement>('[role=group]')?.parentElement?.querySelector<HTMLButtonElement>(':scope > button')?.focus(); }
     else { const next = event.key === 'ArrowDown' ? Math.min(rows.length - 1, index + 1) : event.key === 'ArrowUp' ? Math.max(0, index - 1) : event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : -1; if (next >= 0) { event.preventDefault(); rows[next]?.focus(); } }
-  }}><div className="browser-panel-title"><h2 id={`${id}-title`}>{t('favorites')}</h2><button className="icon-button" type="button" aria-label={t('filterBookmarks')} aria-expanded={searching} onClick={() => { if (searching) setFilter(''); setSearching(previous => !previous); }}><Search aria-hidden="true" /></button><button className="icon-button" ref={newButton} type="button" aria-label={t('newFolder')} onClick={() => actions.openForm('new', newButton, favoriteChildren(state.store.favorites, focused) ? focused : favoriteLocation(state.store.favorites, focused)?.parent ?? 'bar')}><FolderPlus aria-hidden="true" /></button></div>
+  }}><div className="browser-panel-title"><h2 id={`${id}-title`}>{t('favorites')}</h2><button className="icon-button" type="button" aria-label={t('filterBookmarks')} aria-expanded={searching} onClick={() => { if (searching) setFilter(''); setSearching(previous => !previous); }}><Search aria-hidden="true" /></button>{!state.privateWindow && <button className="icon-button" ref={newButton} type="button" aria-label={t('newFolder')} onClick={() => actions.openForm('new', newButton, favoriteChildren(state.store.favorites, focused) ? focused : favoriteLocation(state.store.favorites, focused)?.parent ?? 'bar')}><FolderPlus aria-hidden="true" /></button>}</div>
     {searching && <div className="search-field browser-panel-search"><Search aria-hidden="true" /><input ref={search} aria-label={t('filterBookmarks')} placeholder={t('filterBookmarks')} value={filter} onChange={event => setFilter(event.target.value)} /></div>}
     {(state.storageReadError || state.storageError) && <p className="browser-panel-error" role="alert">{t(state.storageReadError ? 'storageReadError' : 'storageError')}</p>}
     {undo?.kind === 'bookmarks' && <div className="undo-bar" role="status"><span>{t(undo.message)}</span><button className="settings-button quiet" type="button" data-favorite-undo onClick={onRestore}>{t('undo')}</button></div>}

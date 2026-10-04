@@ -201,9 +201,22 @@ export function writeCaptureFile(directory: string, key: string, id: string, byt
   return name;
 }
 
-export function createDesktop(path: string, cipher: StoreCipher, changed: () => void) {
-  const status = { readError: false, memoryOnly: false, unread: false }, store = readDesktopStore(path, cipher, status);
+export function createDesktop(path: string, cipher: StoreCipher, changed: () => void, ephemeral = false) {
+  const status = { readError: false, memoryOnly: false, unread: false }, store: DesktopStore = ephemeral
+    ? { version: 2, key: randomBytes(32).toString('base64'), inUse: null, projects: [], captures: [] } : readDesktopStore(path, cipher, status);
   const directory = resolve(dirname(path), 'captures');
+  const images = new Map<string, Buffer>();
+  const saveStore = () => { if (!ephemeral) writeDesktopStore(path, store, cipher); };
+  const saveImage = (id: string, bytes: Buffer) => {
+    if (!ephemeral) return writeCaptureFile(directory, store.key, id, bytes);
+    if (!bytes.length || bytes.length > CAPTURE_LIMIT) throw new Error('CAPTURE_TOO_LARGE');
+    if ([...images.values()].reduce((sum, image) => sum + image.length, 0) + bytes.length > CAPTURE_STORAGE_LIMIT) throw new Error('DESKTOP_STORAGE_FULL');
+    const name = `${randomUUID()}.bin`; images.set(name, Buffer.from(bytes)); return name;
+  };
+  const removeImage = (name: string) => {
+    if (ephemeral) { images.delete(name); return; }
+    const file = regularCapture(directory, name); if (file) unlinkSync(file);
+  };
   let storageError = false, version = 0, disposed = false;
   let pendingWrite: ReturnType<typeof setTimeout> | undefined, restoreTimeout: ReturnType<typeof setTimeout> | undefined;
   let kept: { project: Project; index: number; inUse: boolean } | { projectId: string | null; item: DesktopItem; index: number }
@@ -211,7 +224,7 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
   let keptWritten = false;
   // The recovery copy retains the only key and references for its captures,
   // including after the replacement store reads successfully on a later launch.
-  if (!status.readError && !status.memoryOnly) try {
+  if (!ephemeral && !status.readError && !status.memoryOnly) try {
     const recoveryCopy = readdirSync(dirname(path)).some(name => name.startsWith(`${basename(path)}.corrupt-`));
     if (!recoveryCopy) cleanupCaptureFiles(directory, store);
   } catch { status.readError = true; }
@@ -219,13 +232,13 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
     if (pendingWrite === undefined) return;
     clearTimeout(pendingWrite); pendingWrite = undefined;
     if (status.unread || status.memoryOnly) return;
-    try { writeDesktopStore(path, store, cipher); storageError = false; if (kept) keptWritten = true; }
+    try { saveStore(); storageError = false; if (kept) keptWritten = true; }
     catch { storageError = true; if (kept && !keptWritten) rollbackDelete(); }
     changed();
   };
   const persist = () => {
     version++;
-    if (!disposed && !status.memoryOnly && !status.unread && pendingWrite === undefined) pendingWrite = setTimeout(flush, 500);
+    if (!ephemeral && !disposed && !status.memoryOnly && !status.unread && pendingWrite === undefined) pendingWrite = setTimeout(flush, 500);
   };
   const assertUnlocked = () => {
     if (status.unread) throw new Error('DESKTOP_STORAGE_FAILED');
@@ -249,7 +262,7 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
     return entry;
   };
   const removeFiles = (items: DesktopItem[]) => {
-    for (const entry of items) if (entry.image) { const file = regularCapture(directory, entry.image.filename); if (file) unlinkSync(file); }
+    for (const entry of items) if (entry.image) removeImage(entry.image.filename);
   };
   const rollbackDelete = () => {
     if (!kept) return;
@@ -333,15 +346,15 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
       return structuredClone({ ...project, items: project.items.map(contentItem) });
     },
     captures: (): DesktopItemContent[] => structuredClone(store.captures.map(contentItem)),
-    image: (project: string | null, id: string) => readCaptureFile(directory, store.key, item(project, id)),
+    image: (project: string | null, id: string) => ephemeral ? images.get(item(project, id).image?.filename ?? '') ?? null : readCaptureFile(directory, store.key, item(project, id)),
     replaceCapture: (id: string, bytes: Buffer, image: Omit<CaptureImage, 'filename' | 'bytes'>, kind: 'area' | 'page') => {
       assertUnlocked(); const entry = item(null, id), previous = entry.image, previousKind = entry.kind, updatedAt = entry.updatedAt;
-      const filename = writeCaptureFile(directory, store.key, id, bytes);
+      const filename = saveImage(id, bytes);
       entry.image = { ...image, filename, bytes: bytes.length }; entry.kind = kind; entry.updatedAt = Date.now();
-      try { writeDesktopStore(path, store, cipher); }
-      catch { entry.image = previous; entry.kind = previousKind; entry.updatedAt = updatedAt; const file = regularCapture(directory, filename); if (file) unlinkSync(file); throw new Error('DESKTOP_STORAGE_FAILED'); }
+      try { saveStore(); }
+      catch { entry.image = previous; entry.kind = previousKind; entry.updatedAt = updatedAt; removeImage(filename); throw new Error('DESKTOP_STORAGE_FAILED'); }
       // The old file is released only after the store references the replacement durably.
-      if (previous) { const file = regularCapture(directory, previous.filename); if (file) try { unlinkSync(file); } catch { storageError = true; } }
+      if (previous) try { removeImage(previous.filename); } catch { storageError = true; }
       persist(); changed();
     },
     create: (value: string) => {
@@ -380,7 +393,7 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
       assertUnlocked(); const entry = item(null, id); checkFolder(project, destination); capacity(project);
       const index = store.captures.indexOf(entry), previous = entry.folder;
       store.captures.splice(index, 1); entry.folder = destination; collection(project).push(entry);
-      try { writeDesktopStore(path, store, cipher); }
+      try { saveStore(); }
       catch { collection(project).splice(collection(project).indexOf(entry), 1); entry.folder = previous; store.captures.splice(index, 0, entry); throw new Error('DESKTOP_STORAGE_FAILED'); }
       touch(project); use(project);
     },
@@ -405,9 +418,9 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
       if (!['text', 'area', 'page'].includes(entry.kind) || id === null && entry.kind === 'text') throw new Error('DESKTOP_ITEM_INVALID');
       let written = false;
       try {
-        if (bytes && image) { entry.image = { ...image, bytes: bytes.length, filename: writeCaptureFile(directory, store.key, entry.id, bytes) }; written = true; }
+        if (bytes && image) { entry.image = { ...image, bytes: bytes.length, filename: saveImage(entry.id, bytes) }; written = true; }
         add(id, entry);
-        try { writeDesktopStore(path, store, cipher); }
+        try { saveStore(); }
         catch { collection(id).splice(collection(id).indexOf(entry), 1); throw new Error('DESKTOP_STORAGE_FAILED'); }
       } catch (error: unknown) {
         if (written && entry.image) try { removeFiles([entry]); } catch { storageError = true; }
@@ -456,6 +469,7 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
       clearTimeout(restoreTimeout); restoreTimeout = undefined;
       if (discard) { clearTimeout(pendingWrite); pendingWrite = undefined; } else flush();
       kept = undefined; keptWritten = false;
+      if (ephemeral) { images.clear(); store.captures.length = 0; store.projects.length = 0; }
     },
   };
 }

@@ -101,6 +101,7 @@ export type BrowserCommand =
   | { type: 'take-capture' }
   | { type: 'capture-full-page' | 'capture-screen'; id: string }
   | { type: 'edit-capture' | 'copy-capture'; id: string; rect?: CaptureRect }
+  | { type: 'save-capture-file'; id: string }
   | { type: 'set-show-capture'; value: boolean }
   | { type: 'set-blocking'; enabled: boolean }
   | { type: 'set-site-dark'; enabled: boolean }
@@ -152,6 +153,7 @@ export interface HorizonAPI {
   getCaptureImage(project: string | null, item: string): Promise<Uint8Array | null>;
   getFavicon(id: string, hash: string): Promise<Uint8Array | null>;
   command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
+  command(command: Extract<BrowserCommand, { type: 'save-capture-file' }>): Promise<boolean>;
   command(command: Extract<BrowserCommand, { type: 'take-capture' | 'capture-full-page' | 'capture-screen' | 'edit-capture' | 'copy-capture' }>): Promise<CaptureShot>;
   command(command: BrowserCommand): Promise<void>;
   setContentArea(area: ContentArea): Promise<void>;

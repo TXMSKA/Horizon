@@ -7,7 +7,8 @@ import type { LibraryPanel } from './BrowserPanel';
 import { Menu } from './Menu';
 import { ToolbarPopover } from './ToolbarPopover';
 
-export function BrowserMenu({ language, active, canReopen, keyboard, opener, onDismiss, onShortcut, onPanel, onSettings, onAbout, run }: {
+export function BrowserMenu({ language, active, privateWindow = false, canReopen, keyboard, opener, onDismiss, onShortcut, onPanel, onSettings, onAbout, run }: {
+  privateWindow?: boolean;
   canReopen: boolean;
   language: Language; active: TabState | undefined; keyboard: boolean; opener: RefObject<HTMLButtonElement | null>;
   onDismiss: (focus: boolean) => void; onShortcut: (shortcut: BrowserShortcut) => void; onPanel: (panel: LibraryPanel) => void;
@@ -17,10 +18,10 @@ export function BrowserMenu({ language, active, canReopen, keyboard, opener, onD
   const page = Boolean(active?.url && !active.desktop && !active.settings && !active.error);
   return <ToolbarPopover opener={opener}><Menu id="browser-menu" className="browser-tools-menu" label={t('menu')} keyboard={keyboard} opener={opener} onDismiss={reason => onDismiss(reason === 'escape')}>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onShortcut('new-tab')}><Plus aria-hidden="true" /><span>{t('newTab')}</span><kbd>Ctrl+T</kbd></button>
-    <button type="button" role="menuitem" tabIndex={-1} onClick={() => onShortcut('new-window')}><AppWindow aria-hidden="true" /><span>{t('newWindow')}</span><kbd>Ctrl+N</kbd></button>
-    <button type="button" role="menuitem" tabIndex={-1} onClick={() => onShortcut('new-private-window')}><EyeOff aria-hidden="true" /><span>{t('newPrivateWindow')}</span><kbd>Ctrl+Shift+N</kbd></button>
+    <button type="button" role="menuitem" tabIndex={-1} aria-keyshortcuts="Control+n" onClick={() => onShortcut('new-window')}><AppWindow aria-hidden="true" /><span>{t('newWindow')}</span><kbd>Ctrl+N</kbd></button>
+    <button type="button" role="menuitem" tabIndex={-1} aria-keyshortcuts="Control+Shift+n" onClick={() => onShortcut('new-private-window')}><EyeOff aria-hidden="true" /><span>{t('newPrivateWindow')}</span><kbd>Ctrl+Shift+N</kbd></button>
     <hr />
-    <button type="button" role="menuitem" tabIndex={-1} disabled={!canReopen} onClick={() => onShortcut('reopen-tab')}><Undo2 aria-hidden="true" /><span>{t('reopenTab')}</span><kbd>Ctrl+Shift+T</kbd></button>
+    {!privateWindow && <button type="button" role="menuitem" tabIndex={-1} disabled={!canReopen} onClick={() => onShortcut('reopen-tab')}><Undo2 aria-hidden="true" /><span>{t('reopenTab')}</span><kbd>Ctrl+Shift+T</kbd></button>}
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onShortcut('close-tab')}><X aria-hidden="true" /><span>{t('closeTab')}</span><kbd>Ctrl+F4</kbd></button>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onShortcut('home')}><Home aria-hidden="true" /><span>{t('home')}</span><kbd>Alt+Home</kbd></button>
     <hr />

@@ -82,7 +82,7 @@ export function ProfileControl({ profile, privateWindow, language, open, opener,
   profile?: ProfileState; privateWindow: boolean; language: Language; open: 'menu' | 'new' | null; opener: RefObject<HTMLButtonElement | null>; onClick: (keyboard: boolean) => void;
 }) {
   const name = profile?.name ?? text('personal', language);
-  if (privateWindow) return <span className="private-window-mark" aria-label={text('privateWindow', language)} title={text('privateWindow', language)}><EyeOff aria-hidden="true" /><span>{text('private', language)}</span></span>;
+  if (privateWindow) return <span className="private-window-mark" role="img" aria-label={text('privateWindow', language)} title={text('privateWindow', language)}><EyeOff aria-hidden="true" /><span>{text('private', language)}</span></span>;
   return <button className="icon-button profile-avatar" type="button" ref={opener} aria-haspopup="menu" aria-expanded={Boolean(open)} aria-controls={open === 'new' ? 'new-profile-popover' : 'profiles-menu'} aria-label={text('profile', language).replace('{name}', name)} title={name} onClick={event => onClick(event.detail === 0)}><span className="avatar-circle" aria-hidden="true">{Array.from(name)[0]?.toLocaleUpperCase(language)}</span></button>;
 }
 

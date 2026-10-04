@@ -83,6 +83,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     case 'move-item-project': valid = exact(['project', 'id', 'toProject', 'folder']) && project(command.project) && item(command.project, command.id) && project(command.toProject) && folder(command.toProject, command.folder); break;
     case 'add-capture-to-project': valid = exact(['id', 'project', 'folder']) && item(null, command.id) && project(command.project) && folder(command.project, command.folder); break;
     case 'delete-capture': valid = exact(['id']) && item(null, command.id); break;
+    case 'save-capture-file': valid = exact(['id']) && item(null, command.id) && !!captures.find(entry => entry.id === command.id)?.image; break;
     case 'add-link':
       valid = exact(['address', 'title', 'project', 'folder']) && project(command.project) && folder(command.project, command.folder);
       if (!isWebURL(command.address) || !desktopTitle(command.title)) throw new Error('LINK_INVALID'); break;

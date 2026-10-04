@@ -92,7 +92,7 @@ export function CapturePreview({ state, language, shot, header, opener, onClose,
     if (current || copy) { const next = await window.horizon.command({ type: copy ? 'copy-capture' : 'edit-capture', id: shot.id, ...(current ? { rect: current } : {}) }); onShot(next); cropRect.current = null; setRect(null); }
   };
   const save = (destination: ProjectSummary) => work(async () => { await apply(); await onSave(destination); });
-  const splitButton = <div className="capture-split" ref={split}>
+  const splitButton = state.privateWindow ? <div className="capture-split" ref={split}><button className="capture-save-main" type="button" disabled={busy || !shot} onClick={() => { void work(async () => { await apply(); if (shot && await window.horizon.command({ type: 'save-capture-file', id: shot.id })) setCopied(t('captureFileSaved')); }); }}>{t('saveCaptureFile')}</button></div> : <div className="capture-split" ref={split}>
     <button className="capture-save-main" type="button" disabled={busy || !shot} onClick={() => { if (project) void save(project); else setChooser(true); }}>{project ? t('saveToProject').replace('{name}', project.name) : t('saveToAProject')}</button>
     <span aria-hidden="true" /><button ref={chevron} type="button" disabled={busy || !shot} aria-label={t('chooseProject')} aria-haspopup="dialog" aria-expanded={chooser} onClick={() => setChooser(previous => !previous)}><ChevronDown aria-hidden="true" /></button>
   </div>;
@@ -128,8 +128,8 @@ export function CapturePreview({ state, language, shot, header, opener, onClose,
     </div> : <div key="preview" className="capture-preview" ref={card} data-capture-popover role="dialog" aria-modal="false" aria-label={t('capturePreview')} tabIndex={-1} aria-busy={busy || !shot} onKeyDown={key}>
       {shot && url ? <svg className="capture-thumbnail" viewBox={rect ? `${rect.x} ${rect.y} ${rect.width} ${rect.height}` : `0 0 ${shot.width} ${shot.height}`} role="img" aria-label={t('capturePurpose')}><image href={url} width={shot.width} height={shot.height} /></svg> : <div className="capture-thumbnail desktop-skeleton" role="status"><span className="visually-hidden">{t('loading')}</span></div>}
       <div className="capture-actions">{[{ key: 'captureCrop', icon: Crop, action: crop }, { key: 'capturePage', icon: AppWindow, action: () => { void changeKind(true); } }, { key: 'copy', icon: Copy, action: () => { void work(async () => { await apply(true); setCopied(t('copied')); }); } }].map(({ key, icon: Icon, action }) => <div key={key}><button type="button" disabled={busy || !shot} aria-label={t(key as CopyKey)} onClick={action}><Icon aria-hidden="true" /></button><span>{t(key as CopyKey)}</span></div>)}</div>
-      <small>{t('keptInCaptures')}</small><hr />{splitButton}{feedback}
+      {!state.privateWindow && <small>{t('keptInCaptures')}</small>}<hr />{splitButton}{feedback}
     </div>}
-    {chooser && <CaptureProjectPicker state={state} language={language} opener={chevron} anchor={editor ? bar : card} widthAnchor={editor ? split : undefined} busy={busy} onClose={() => setChooser(false)} onChoose={save} />}
+    {chooser && !state.privateWindow && <CaptureProjectPicker state={state} language={language} opener={chevron} anchor={editor ? bar : card} widthAnchor={editor ? split : undefined} busy={busy} onClose={() => setChooser(false)} onChoose={save} />}
   </>, document.body);
 }

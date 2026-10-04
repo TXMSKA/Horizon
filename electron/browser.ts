@@ -1,8 +1,10 @@
 import { app, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
-import type { BrowserWindow, DownloadItem, Session, WebContents, WebPreferences } from 'electron';
+import type { BrowserWindow, DownloadItem, Session, WebContents } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { pagePreferences } from './page-preferences';
+import { assertPrivateCommand } from './private-commands';
 import { IPC, SEARCH_ENGINES } from '../src/shared/api';
 import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } from '../src/shared/shortcuts';
@@ -190,6 +192,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   nativeTheme.on('updated', systemDarkPages);
   const run = (command: BrowserCommand) => {
     if (closing || shared.quitting) throw new Error('Browser is closing');
+    if (privateWindow) assertPrivateCommand(command);
     if (privateWindow && ['switch-profile', 'create-profile', 'update-profile', 'delete-profile', 'set-blocking', 'set-site-permission', 'answer-permission', 'reset-site', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].includes(command.type)) throw new Error('Private window settings are fixed');
     switch (command.type) {
       case 'new-window': case 'new-private-window':
@@ -282,9 +285,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     }
     const profileData = data;
     const readStatus = profileData.status;
-    const store: BrowserStore = privateWindow ? { version: 5, history: [], favorites: profileData.store.favorites, downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] }, clearHistoryOnClose: false, clearCacheOnClose: false } : profileData.store;
-    if (privateWindow) Object.defineProperty(store, 'favorites', { enumerable: true, get: () => profileData.store.favorites, set: value => { profileData.store.favorites = value; } });
-    const desktop = profileData.desktop;
+    const store: BrowserStore = privateWindow ? { version: 5, history: [], favorites: structuredClone(profileData.store.favorites), downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] }, clearHistoryOnClose: false, clearCacheOnClose: false } : profileData.store;
+    // A fresh snapshot shows normal-window edits without lending private code the writable tree.
+    if (privateWindow) Object.defineProperty(store, 'favorites', { enumerable: true, get: () => structuredClone(profileData.store.favorites) });
+    const desktop = privateWindow ? createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, publish, true) : profileData.desktop;
     const ownAddress = (url: string) => url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
     const sessionPath = resolve(dirname(storePath), 'session.json');
     const sessionStatus = profileData.sessionStatus;
@@ -320,12 +324,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const items = new Map<string, DownloadItem>();
     const trustedDownloads = new Map(store.downloads.filter(entry => basename(entry.path) === entry.filename && !/[\x00-\x1f\x7f-\x9f]/.test(entry.path)).map(entry => [entry.id, entry.path]));
     const reserved = new Set<string>();
-    const webPreferences: WebPreferences = {
-      partition: privateWindow ? shared.privatePartition! : profile.partition, sandbox: true, contextIsolation: true, nodeIntegration: false,
-      nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true,
-      allowRunningInsecureContent: false, experimentalFeatures: false, webviewTag: false,
-      devTools: false, navigateOnDragDrop: false,
-    };
+    const webPreferences = pagePreferences(privateWindow ? shared.privatePartition! : profile.partition, privateWindow);
     const webSession = session.fromPartition(webPreferences.partition!);
     const permissions = new PermissionQueue(store.siteSettings, publish, () => persist());
     const tabFor = (contents: WebContents | null | undefined) => contents && tabs.find(tab => tab.view?.webContents === contents);
@@ -333,15 +332,15 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const detachSession = attachSession(webSession, sessionOwner);
     // Frame requests inherit the top-level origin; a frame cannot choose the origin shown by chrome.
     sessionOwner.request = (contents, permission, callback, details) => {
-      if (permission === 'fullscreen') { callback(true); return; }
       if (privateWindow) { callback(false); return; }
+      if (permission === 'fullscreen') { callback(true); return; }
       const tab = tabFor(contents), origin = tab && siteSettings(store.siteSettings, contents.mainFrame.origin ?? contents.mainFrame.url)?.origin;
       if (!tab || !origin || tab.navigating || disposed || closing) { callback(false); return; }
       permissions.request(tab.state.id, origin, requestedPermissions(permission, details), callback);
     };
     sessionOwner.check = (contents, permission, requestingOrigin, details) => {
-      if (permission === 'fullscreen') return true;
       if (privateWindow) return false;
+      if (permission === 'fullscreen') return true;
       const tab = tabFor(contents);
       const url = tab ? contents!.mainFrame.origin ?? contents!.mainFrame.url : !contents ? details?.embeddingOrigin ?? requestingOrigin : '';
       const site = siteSettings(store.siteSettings, url ?? '');
@@ -365,6 +364,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       requests.set(details.id, context); return context;
     };
     sessionOwner.before = (details, callback) => {
+      if (privateWindow && details.resourceType === 'script') { callback({ cancel: true }); return; }
       const scheme = new URL(details.url).protocol;
       const tab = details.webContentsId === undefined ? undefined : tabs.find(tab => tab.view?.webContents.id === details.webContentsId);
       const cancel = details.resourceType === 'mainFrame' ? !(isAllowedURL(details.url) || !!tab?.view && isLaunchNavigation(tab.view.webContents, details.url))
@@ -395,6 +395,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const headers = context ? stripCookieHeaders(details.responseHeaders ?? {}, true, details.url, context.topURL,
         blockingPolicy(privateWindow, settings.blockAds, settings.blockThirdPartyCookies, siteSettings(store.siteSettings, context.topURL)?.blocking ?? true).thirdPartyCookies, context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : privateWindow ? Object.fromEntries(Object.entries(details.responseHeaders ?? {}).filter(([key]) => key.toLowerCase() !== 'set-cookie')) : details.responseHeaders;
       if (context && context.pageLoad === context.tab.pageLoad && context.tab.state.blocked.cookies !== context.tab.refusedCookies.size) { context.tab.state.blocked.cookies = context.tab.refusedCookies.size; publish(); }
+      if (privateWindow && details.resourceType === 'mainFrame' && Object.entries(headers ?? {}).some(([key, values]) => key.toLowerCase() === 'content-type' && values.some(value => /^application\/pdf(?:;|$)/i.test(value)))) {
+        const downloadHeaders = Object.fromEntries(Object.entries(headers ?? {}).filter(([key]) => key.toLowerCase() !== 'content-disposition'));
+        callback({ responseHeaders: { ...downloadHeaders, 'Content-Disposition': ['attachment'] } }); return;
+      }
       callback({ responseHeaders: headers });
     };
     sessionOwner.completed = details => { requests.delete(details.id); };
@@ -452,6 +456,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       catch { storageError = true; throw new Error('PROFILE_SETTINGS_SAVE_FAILED'); }
     };
     const editFavorites = (edit: () => void) => {
+      if (privateWindow) throw new Error('Private window favorites are read-only');
       const previous = structuredClone(store.favorites);
       try {
         edit();
@@ -754,7 +759,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         invalidateMenu();
         const menu = pageMenu.open(tab.state.id, params, {
           back: contents.navigationHistory.canGoBack(), forward: contents.navigationHistory.canGoForward(), reload: Boolean(tab.state.url),
-        }, view.getBounds(), window.webContents.getZoomFactor());
+        }, view.getBounds(), window.webContents.getZoomFactor(), privateWindow);
         if (!menu) return;
         window.webContents.focus();
         window.webContents.send(IPC.contextMenu, menu);
@@ -875,6 +880,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const dispatchShortcut = (shortcut: BrowserShortcut) => {
       const tab = active(), contents = page(tab?.view);
       if (!tab || !contents || !isCurrent() || disposed || closing) return;
+      if (privateWindow && shortcut === 'bookmark') return;
       if (shortcut === 'reopen-tab' && !state().canReopenTab) return;
       if (shortcut === 'fullscreen' || shortcut === 'stop' && tab.state.fullscreen) {
         run({ type: shortcut === 'fullscreen' ? 'fullscreen' : 'stop' }); return;
@@ -940,6 +946,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const desktopDestination = (input: string) => {
       const address = input.trim();
       if (!address.toLowerCase().startsWith('horizon://desktop/')) return null;
+      if (privateWindow) throw new Error('Private window Desktop is unavailable');
       if (address === 'horizon://desktop/captures') return 'captures';
       const project = desktop.list().find(project => desktopAddress(project.name) === address);
       if (!project) throw new Error('DESKTOP_NOT_FOUND');
@@ -1094,6 +1101,15 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           break;
         case 'take-capture': return takeCapture();
         case 'capture-full-page': return takeCapture(command.id);
+        case 'save-capture-file': return (async () => {
+          const bytes = desktop.image(null, command.id);
+          if (!bytes) throw new Error('CAPTURE_FAILED');
+          try {
+            const choice = await dialog.showSaveDialog(window, { defaultPath: resolve(resolvedDownloadsFolder(settings, downloads).downloadsFolder, 'capture.png'), filters: [{ name: 'PNG', extensions: ['png'] }] });
+            if (choice.canceled || !choice.filePath) return false;
+            writeFileSync(choice.filePath, bytes); return true;
+          } catch { throw new Error('CAPTURE_SAVE_FAILED'); }
+        })();
         case 'capture-screen': {
           if (!screenCapture || screenCapture.id !== command.id) throw new Error('CAPTURE_CHANGED');
           const { bytes, width, height } = screenCapture;
@@ -1358,6 +1374,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (discard) { clearTimeout(pendingWrite); pendingWrite = undefined; } else flush();
       attempt(() => webSession.removeListener('will-download', downloadHandler));
       detachSession();
+      if (privateWindow) desktop.dispose(true);
       requests.clear();
     };
     for (const { tab: saved, active: selected } of lazySession(savedSession, privateWindow || options.fresh ? 'new-page' : settings.onStart)) {
