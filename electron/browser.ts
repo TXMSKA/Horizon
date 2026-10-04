@@ -874,7 +874,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           }
           if (command.type === 'copy-capture') {
             try { await clipboard.write([new ClipboardItem({ 'image/png': new Blob([new Uint8Array(bytes)], { type: 'image/png' }) })]); }
-            catch { throw new Error('CAPTURE_FAILED'); }
+            catch { throw new Error('CAPTURE_COPY_FAILED'); }
           }
           if (!isCurrent() || disposed || closing || generation !== captureGeneration) throw new Error('CAPTURE_CHANGED');
           if (command.rect) desktop.replaceCapture(command.id, bytes, { ...pngSize(bytes), cut: entry.image.cut }, entry.kind === 'page' ? 'page' : 'area');
@@ -927,7 +927,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
               const project = desktop.state().projectInUse ?? [...desktop.list()].sort((a, b) => b.usedAt - a.usedAt)[0]?.id;
               if (!project) { desktopPanel.open = true; desktopPanel.page = { kind: 'new-project' }; window.webContents.focus(); break; }
               desktop.addText(project, null, params.selectionText.trim(), { url: tab.state.url, title: tab.state.title.slice(0, 200) });
-              desktop.retry(); break;
+              const items = desktop.get(project).items, entry = items.at(-1)!;
+              try { desktop.retry(); }
+              catch (reason) { const index = items.indexOf(entry); if (index >= 0) items.splice(index, 1); update(); throw reason; }
+              break;
             }
             case 'open-link': if (isWebURL(params.linkURL)) newTab(params.linkURL, false); break;
             case 'copy-link': if (isWebURL(params.linkURL)) clipboard.writeText(params.linkURL); break;

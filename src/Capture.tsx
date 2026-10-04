@@ -105,9 +105,9 @@ export function CapturePreview({ state, language, shot, header, opener, onClose,
     return { x: left, y: top, width: right - left, height: bottom - top };
   };
   const crop = () => { if (!shot) return; setEditor(true); setRect({ x: Math.floor(shot.width * 310 / 1440), y: Math.floor(shot.height * 239 / 770), width: Math.min(shot.width, Math.max(8, Math.floor(shot.width * 820 / 1440))), height: Math.min(shot.height, Math.max(8, Math.floor(shot.height * 329 / 770))) }); };
-  const cancel = () => { editorRequest.current++; setChooser(false); setEditor(false); };
+  const cancel = () => { editorRequest.current++; cropRect.current = null; gesture.current = null; setRect(null); setChooser(false); setEditor(false); };
   const key = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (chooser) { setChooser(false); chevron.current?.focus(); } else if (editor) cancel(); else onClose(); } };
-  const feedback = <>{error && <div className="capture-feedback" role="alert"><span>{error}</span><button className="desktop-small-link" type="button" disabled={busy} onClick={() => { if (retry.current) void work(retry.current); }}>{t('retry')}</button></div>}<span className="capture-copy-status" role="status" aria-live="polite">{copied}</span></>;
+  const feedback = <>{error && <div className="capture-feedback" role="alert"><span>{error}</span><button className="desktop-small-link" type="button" disabled={busy} onClick={() => { if (retry.current) void work(retry.current); }}>{t('retry')}</button></div>}{shot?.cut && <span className="capture-copy-status" role="status">{t('captureCut')}</span>}<span className="capture-copy-status" role="status" aria-live="polite">{copied}</span></>;
   return createPortal(<>
     {editor ? <div key="editor" ref={canvas} className={`capture-canvas${full ? ' full-page' : ''}`} role="dialog" aria-label={t('captureEditor')} aria-busy={busy} onKeyDown={key}>
       <img ref={image} className="capture-frozen" src={url} alt={t('capturePurpose')} />

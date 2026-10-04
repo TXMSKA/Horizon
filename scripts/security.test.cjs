@@ -3635,10 +3635,36 @@ test('failed capture replacement and project movement preserve the kept encrypte
 test('a failed cropped clipboard write keeps the original image and retries the same crop once', async t => {
   const options = { captureBytes: capturePNG(100, 80), clipboardError: true }, browser = notebookBrowser(t, plainCipher, options);
   browser.navigate(); const shot = await browser.command({ type: 'take-capture' }), rect = { x: 20, y: 10, width: 50, height: 40 };
-  await assert.rejects(browser.command({ type: 'copy-capture', id: shot.id, rect }), /CAPTURE_FAILED/);
+  await assert.rejects(browser.command({ type: 'copy-capture', id: shot.id, rect }), /CAPTURE_COPY_FAILED/);
   assert.deepEqual(browser.image(null, shot.id), options.captureBytes); assert.equal(browser.state().captures.length, 1);
   options.clipboardError = false; const result = await browser.command({ type: 'copy-capture', id: shot.id, rect });
   assert.equal(result.width, 50); assert.equal(result.height, 40); assert.deepEqual(browser.image(null, shot.id), capturePNG(50, 40));
+  browser.close();
+});
+
+test('context-menu text rolls back failed writes before another attempt or storage Retry', t => {
+  const fs = require('node:fs'), browser = notebookBrowser(t); browser.navigate();
+  browser.command({ type: 'create-project', name: 'Research' }); const project = browser.state().projectInUse;
+  browser.command({ type: 'add-note', project, title: 'Existing', text: 'Kept note' });
+  browser.command({ type: 'retry-desktop-storage' });
+  const path = join(browser.directory, 'profiles', browser.state().activeProfileId, 'notebooks.json');
+  const before = readFileSync(path), original = browser.notebook(project).items, rename = fs.renameSync; let denied = true;
+  t.mock.method(fs, 'renameSync', (...args) => { if (denied && args[1] === path) throw new Error('Synthetic disk refusal'); return rename(...args); });
+  const choose = () => {
+    browser.views[0].webContents.emit('context-menu', {}, menuParams({ selectionText: 'Selected words' }));
+    const menu = browser.window.webContents.sent.at(-1)[1];
+    return browser.command({ type: 'context-menu', id: menu.id, item: 'add-to-desktop' });
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.throws(choose, /DESKTOP_STORAGE_FAILED/);
+    assert.deepEqual(browser.notebook(project).items, original); assert.deepEqual(readFileSync(path), before);
+    const published = browser.window.webContents.sent.filter(([, value]) => value?.projects).at(-1)[1];
+    assert.equal(published.projects.find(entry => entry.id === project).captures, 0);
+  }
+  denied = false; browser.command({ type: 'retry-desktop-storage' });
+  assert.deepEqual(readDesktopStore(path).projects[0].items, original);
+  choose(); assert.equal(browser.notebook(project).items.length, original.length + 1);
+  assert.equal(readDesktopStore(path).projects[0].items.filter(item => item.text === 'Selected words').length, 1);
   browser.close();
 });
 
@@ -4894,4 +4920,144 @@ test('capture board and every capture refusal have English and Spanish copy', ()
   for (const language of ['en', 'es']) for (const key of ['capturePreview', 'captureEditor', 'captureScreen', 'captureCrop', 'capturePage', 'captureCorner', 'captureInstructions', 'keptInCaptures', 'saveTo', 'saveToAProject', 'saveToProject', 'searchProjects', 'noProjectResults', 'showCapture', 'showCaptureHint', 'copied', 'addToDesktop', 'CAPTURE_UNAVAILABLE', 'CAPTURE_LOADING', 'CAPTURE_CRASHED', 'CAPTURE_DESKTOP', 'CAPTURE_SETTINGS', 'CAPTURE_FAILED'])
     assert.equal(typeof text(key, language), 'string', language + ':' + key);
   const copy = readFileSync('src/copy.ts', 'utf8'); assert.doesNotMatch(copy, /captureText:|captureArea:|captureTextHint:|NOTHING_SELECTED:/);
+});
+
+function capturePreviewInterface(hooks, command) {
+  return interfaceModule('src/Capture.tsx', {
+    react: hooks.react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'),
+    './Desktop': { CaptureProjectPicker: 'picker', desktopError: desktopInterface().desktopError }, './shared/popup-position': require('../dist/src/shared/popup-position.js'),
+  }, { document: { body: {} }, window: { horizon: { command } } });
+}
+
+function captureAppActions(globals) {
+  const { compileFunction } = require('node:vm'), ts = require('typescript');
+  const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX), expressions = {};
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && ['openCapture', 'closeCapture'].includes(node.name.getText(source))) expressions[node.name.getText(source)] = node.initializer.getText(source);
+    if (ts.isJsxOpeningElement(node) && node.attributes.properties.some(attribute => ts.isJsxAttribute(attribute) && attribute.name.text === 'ref' && attribute.initializer?.expression?.getText(source) === 'desktopButtonRef')) {
+      for (const attribute of node.attributes.properties) if (ts.isJsxAttribute(attribute) && ['onFocus', 'onBlur', 'onMouseEnter', 'onMouseLeave'].includes(attribute.name.text)) expressions[attribute.name.text] = attribute.initializer.expression.getText(source);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source); assert.equal(Object.keys(expressions).length, 6);
+  const exported = {}, dependencies = { useCallback: callback => callback, ...globals };
+  const compiled = ts.transpileModule(Object.entries(expressions).map(([name, expression]) => `export const ${name} = ${expression};`).join('\n'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  compileFunction(compiled, ['exports', ...Object.keys(dependencies)])(exported, ...Object.values(dependencies));
+  return exported;
+}
+
+function captureAppGlobals(overrides = {}) {
+  return {
+    activeUrl: 'https://example.com/', active: {}, desktopScope: 'scope', liveDesktopScope: { current: 'scope' }, liveDesktopOverlay: { current: null },
+    language: 'en', closeFind() {}, closeContextMenu() {}, reportArea: async () => {}, capturePending: { current: false },
+    setCaptureHint() {}, setShieldScope() {}, setProfileOpen() {}, setHubPage() {}, setLyraOpen() {}, setMenuOpen() {}, setSuggestionsOpen() {}, setPanel() {},
+    setCaptureShot() {}, setDesktopOverlay() {}, setDesktopNotice() {}, restoringCaptureFocus: { current: false }, desktopButtonRef: { current: null }, hubButtonRef: { current: null },
+    text: interfaceModule('src/copy.ts').text, desktopError: desktopInterface().desktopError, ...overrides,
+  };
+}
+
+test('Capture focus restoration stays quiet while pointer hover and deliberate keyboard focus show the tooltip', () => {
+  let hint = false, closed = 0, focused = 0;
+  const event = visible => ({ currentTarget: { matches: selector => { assert.equal(selector, ':focus-visible'); return visible; } } });
+  const button = { current: null }, restoring = { current: false };
+  const actions = captureAppActions(captureAppGlobals({ desktopButtonRef: button, restoringCaptureFocus: restoring,
+    setCaptureHint: value => { hint = value; }, setDesktopOverlay: value => { assert.equal(value, null); closed++; } }));
+  button.current = { focus() { focused++; assert.equal(restoring.current, true); actions.onFocus(event(true)); } };
+  actions.onFocus(event(false)); assert.equal(hint, false);
+  actions.onFocus(event(true)); assert.equal(hint, true);
+  actions.onBlur(); assert.equal(hint, false);
+  actions.onMouseEnter(); assert.equal(hint, true); actions.onMouseLeave(); assert.equal(hint, false);
+  for (let index = 0; index < 2; index++) {
+    actions.onFocus(event(true)); actions.closeCapture(); assert.equal(hint, false); assert.equal(restoring.current, false);
+    actions.onMouseEnter(); assert.equal(hint, true); actions.onMouseLeave();
+    actions.onFocus(event(true)); assert.equal(hint, true); actions.onBlur();
+  }
+  assert.equal(focused, 2); assert.equal(closed, 2);
+});
+
+test('Capture opens its busy skeleton before the page command completes and respects dismissal, navigation and failure', async () => {
+  for (const outcome of ['success', 'closed', 'changed', 'failure']) {
+    let visible, finish, fail, shot = 'previous'; const pending = { current: false }, overlay = { current: null }, scope = { current: 'scope' }, notices = [], commands = [];
+    const actions = captureAppActions(captureAppGlobals({ capturePending: pending, liveDesktopOverlay: overlay, liveDesktopScope: scope,
+      setCaptureShot: value => { shot = value; }, setDesktopOverlay: value => { overlay.current = value; }, setDesktopNotice: value => notices.push(value),
+      reportArea: hidden => { assert.equal(hidden, false); return new Promise(resolve => { visible = resolve; }); },
+      window: { horizon: { command: command => { commands.push(command); return new Promise((resolve, reject) => { finish = resolve; fail = reject; }); } } },
+    }));
+    const work = actions.openCapture(); assert.equal(shot, null); assert.deepEqual(overlay.current, { scope: 'scope', mode: 'capture' }); assert.equal(pending.current, true);
+    const hooks = notebookTestHooks(), { CapturePreview } = capturePreviewInterface(hooks, () => assert.fail('Skeleton controls cannot capture'));
+    const tree = hooks.render(() => CapturePreview({ state: { projects: [] }, language: 'en', shot, header: { current: null }, opener: { current: null }, onClose() {}, onSave() {}, onVisible() {}, onShot() {} }));
+    assert.equal(notebookNodes(tree, node => node.props.className === 'capture-preview')[0].props['aria-busy'], true);
+    assert.equal(notebookNodes(tree, node => node.props.className === 'capture-thumbnail desktop-skeleton').length, 1);
+    assert.ok(notebookNodes(tree, node => node.type === 'button').every(node => node.props.disabled));
+    await actions.openCapture(); assert.equal(commands.length, 0); visible(); await new Promise(setImmediate);
+    assert.deepEqual(commands, [{ type: 'take-capture' }]);
+    if (outcome === 'closed') actions.closeCapture();
+    if (outcome === 'changed') scope.current = 'next';
+    if (outcome === 'failure') fail(new Error('CAPTURE_FAILED')); else finish({ id: 'shot' });
+    await work; assert.equal(pending.current, false);
+    assert.deepEqual(shot, outcome === 'success' ? { id: 'shot' } : null);
+    if (outcome === 'closed' || outcome === 'failure') assert.equal(overlay.current, null);
+    if (outcome === 'failure') assert.equal(notices.at(-1).failure, true); else assert.equal(notices.filter(Boolean).length, 0);
+  }
+});
+
+test('Cancel and editor Escape discard the crop before card Save or Copy, even before another render', async () => {
+  for (const escape of [false, true]) for (const copy of [false, true]) {
+    const hooks = notebookTestHooks(), commands = [], saved = [], updated = [];
+    const shot = { id: 'shot', bytes: faviconPNG, width: 1440, height: 770, cut: false }, project = { id: 'project', name: 'Research' };
+    const { CapturePreview } = capturePreviewInterface(hooks, async command => { commands.push(command); return shot; });
+    const render = () => hooks.render(() => CapturePreview({ state: { projects: [project], projectInUse: project.id }, language: 'en', shot,
+      header: { current: null }, opener: { current: null }, onClose() {}, onSave: async destination => saved.push(destination), onVisible: work => work(), onShot: next => updated.push(next) }));
+    const card = render(), actions = notebookNodes(card, node => node.props.className === 'capture-actions')[0];
+    notebookNodes(actions, node => node.props['aria-label'] === 'Crop')[0].props.onClick();
+    let editor = render(); const rectangle = notebookNodes(editor, node => node.props.className === 'capture-rectangle')[0];
+    rectangle.props.onKeyDown({ key: 'ArrowRight', shiftKey: true, target: { dataset: {} }, preventDefault() {}, stopPropagation() {} }); editor = render();
+    assert.equal(notebookNodes(editor, node => node.props.className === 'capture-rectangle').length, 1);
+    if (escape) notebookNodes(editor, node => node.props.role === 'dialog')[0].props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} });
+    else notebookNodes(editor, node => node.props.className === 'desktop-action capture-cancel')[0].props.onClick();
+    if (copy) notebookNodes(actions, node => node.props['aria-label'] === 'Copy')[0].props.onClick();
+    else notebookNodes(card, node => node.props.className === 'capture-save-main')[0].props.onClick();
+    await new Promise(setImmediate);
+    assert.deepEqual(commands, copy ? [{ type: 'copy-capture', id: shot.id }] : []);
+    assert.deepEqual(saved, copy ? [] : [project]); assert.deepEqual(updated, copy ? [shot] : []);
+    assert.equal(notebookNodes(render(), node => node.props.className === 'capture-rectangle').length, 0);
+  }
+});
+
+test('cut full pages explain the limit in the existing editor feedback and Screen clears it', async () => {
+  const copy = interfaceModule('src/copy.ts');
+  for (const language of ['en', 'es']) {
+    const hooks = notebookTestHooks(); let shot = { id: 'shot', bytes: faviconPNG, width: 100, height: 80, cut: false };
+    const { CapturePreview } = capturePreviewInterface(hooks, async command => ({ ...shot, cut: command.type === 'capture-full-page' }));
+    const render = () => hooks.render(() => CapturePreview({ state: { projects: [] }, language, shot, header: { current: null }, opener: { current: null },
+      onClose() {}, onSave() {}, onVisible: work => work(), onShot: next => { shot = next; } }));
+    const warning = tree => notebookNodes(tree, node => node.props.role === 'status' && node.props.children === copy.text('captureCut', language));
+    let tree = render(); assert.equal(warning(tree).length, 0);
+    notebookNodes(tree, node => node.props['aria-label'] === copy.text('capturePage', language))[0].props.onClick();
+    await new Promise(setImmediate); tree = render();
+    const feedback = notebookNodes(tree, node => node.props.className === 'capture-editor-feedback')[0];
+    assert.equal(warning(feedback).length, 1);
+    notebookNodes(tree, node => node.props.role === 'radio' && node.props.children === copy.text('captureScreen', language))[0].props.onClick();
+    await new Promise(setImmediate); assert.equal(warning(render()).length, 0);
+  }
+});
+
+test('failed Copy uses bilingual copy feedback and Retry keeps the screenshot available', async () => {
+  const copy = interfaceModule('src/copy.ts');
+  for (const language of ['en', 'es']) {
+    const hooks = notebookTestHooks(), commands = [], shots = []; let denied = true;
+    const shot = { id: 'shot', bytes: faviconPNG, width: 100, height: 80, cut: false };
+    const { CapturePreview } = capturePreviewInterface(hooks, async command => { commands.push(command); if (denied) throw new Error('CAPTURE_COPY_FAILED'); return shot; });
+    const render = () => hooks.render(() => CapturePreview({ state: { projects: [] }, language, shot, header: { current: null }, opener: { current: null },
+      onClose() {}, onSave() {}, onVisible: work => work(), onShot: next => shots.push(next) }));
+    notebookNodes(render(), node => node.props['aria-label'] === copy.text('copy', language))[0].props.onClick();
+    await new Promise(setImmediate);
+    let tree = render(); const alert = notebookNodes(tree, node => node.props.role === 'alert')[0];
+    assert.equal(notebookNodes(alert, node => node.type === 'span')[0].props.children, copy.text('CAPTURE_COPY_FAILED', language));
+    assert.notEqual(copy.text('CAPTURE_COPY_FAILED', language), copy.text('CAPTURE_FAILED', language));
+    assert.equal(notebookNodes(tree, node => node.props.className === 'capture-preview')[0].props['aria-busy'], false); assert.deepEqual(shots, []);
+    denied = false; notebookNodes(alert, node => node.type === 'button')[0].props.onClick(); await new Promise(setImmediate);
+    tree = render(); assert.equal(notebookNodes(tree, node => node.props.role === 'alert').length, 0);
+    assert.deepEqual(commands, [{ type: 'copy-capture', id: shot.id }, { type: 'copy-capture', id: shot.id }]); assert.deepEqual(shots, [shot]);
+  }
 });

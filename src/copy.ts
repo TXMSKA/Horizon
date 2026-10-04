@@ -190,6 +190,7 @@ export const copy = {
   CAPTURE_PAGE_HIDDEN: { en: 'The full page needs to be visible. Close any open panel and try again.', es: 'La página completa tiene que estar visible. Cerrá los paneles abiertos y probá de nuevo.' },
   CAPTURE_TIMEOUT: { en: 'The page took too long to capture. Try again.', es: 'La página tardó demasiado en capturarse. Probá de nuevo.' },
   CAPTURE_FAILED: { en: 'The page capture failed. Try again.', es: 'Falló la captura de la página. Probá de nuevo.' },
+  CAPTURE_COPY_FAILED: { en: 'The capture could not be copied. Try again.', es: 'No se pudo copiar la captura. Probá de nuevo.' },
   lyra: { en: 'Lyra', es: 'Lyra' },
   zoom: { en: 'Zoom', es: 'Zoom' },
   zoomIn: { en: 'Zoom in', es: 'Acercar' },

@@ -91,6 +91,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const desktopLeaves = useRef(0);
   const [captureShot, setCaptureShot] = useState<CaptureShot | null>(null);
   const [captureHint, setCaptureHint] = useState(false);
+  const restoringCaptureFocus = useRef(false);
   const capturePending = useRef(false);
   const desktopButtonRef = useRef<HTMLButtonElement>(null);
   const desktopOpener = useRef<HTMLElement | null>(null);
@@ -162,7 +163,11 @@ export function App({ language: initialLanguage }: { language: Language }) {
     catch (reason) { setError(command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
     finally { if (leaving && --desktopLeaves.current === 0) setDesktopLeaving(false); }
   }, [language, edits]);
-  const closeCapture = useCallback(() => { setDesktopOverlay(null); (desktopButtonRef.current ?? hubButtonRef.current)?.focus(); }, []);
+  const closeCapture = useCallback(() => {
+    setDesktopOverlay(null); setCaptureHint(false); restoringCaptureFocus.current = true;
+    try { (desktopButtonRef.current ?? hubButtonRef.current)?.focus(); }
+    finally { restoringCaptureFocus.current = false; }
+  }, []);
   const retryDesktopStorage = useCallback(async function retry(): Promise<void> {
     try { await edits.flush(); await window.horizon.command({ type: 'retry-desktop-storage' }); setDesktopNotice(null); }
     catch (reason) { setDesktopNotice({ message: desktopError(reason, language), failure: true, action: text('retry', language), onAction: () => { void retry(); } }); }
@@ -270,14 +275,19 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (reason) { setDesktopNotice({ message: text(reason, language) }); return; }
     capturePending.current = true;
     closeFind(); closeContextMenu(); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
-    setDesktopOverlay(null); setPageCapturePending(true); setDesktopNotice(null);
+    const overlay = { scope: desktopScope, mode: 'capture' as const };
+    setCaptureShot(null); setDesktopOverlay(overlay); setDesktopNotice(null);
     try {
       await reportArea(false);
       const shot = await window.horizon.command({ type: 'take-capture' });
-      if (liveDesktopScope.current !== desktopScope) return;
-      setCaptureShot(shot); setDesktopOverlay({ scope: desktopScope, mode: 'capture' });
-    } catch (reason) { setDesktopNotice({ message: desktopError(reason, language), failure: true, action: text('retry', language), onAction: () => { void openCapture(); } }); }
-    finally { capturePending.current = false; setPageCapturePending(false); }
+      if (liveDesktopScope.current !== desktopScope || liveDesktopOverlay.current !== overlay) return;
+      setCaptureShot(shot);
+    } catch (reason) {
+      if (liveDesktopScope.current === desktopScope && liveDesktopOverlay.current === overlay) {
+        setDesktopOverlay(null); setDesktopNotice({ message: desktopError(reason, language), failure: true, action: text('retry', language), onAction: () => { void openCapture(); } });
+      }
+    }
+    finally { capturePending.current = false; }
   }, [activeUrl, active?.desktop, active?.settings, active?.error, active?.loading, desktopScope, language, closeFind, closeContextMenu, reportArea]);
   const panelToTab = () => {
     if (!state) return;
@@ -580,7 +590,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
           {showBlocked && <span className="address-blocked">{blockedCount(totalBlocked, language)}</span>}
           <button className={`icon-button${bookmarked ? ' accent bookmarked' : ''}`} type="button" disabled={!/^https?:/.test(activeUrl)} aria-label={t(bookmarked ? 'removeBookmark' : 'bookmark')} aria-pressed={bookmarked} title={t(bookmarked ? 'removeBookmark' : 'bookmark')} onClick={() => shortcut('bookmark')}><Star aria-hidden="true" /></button>
         </form>
-        <div className="tools">{state?.showCapture !== false && <button className="icon-button" ref={desktopButtonRef} type="button" aria-label={t('captureShortcut')} aria-describedby={showCaptureHint ? 'capture-shortcut' : undefined} aria-haspopup="dialog" aria-expanded={Boolean(desktopMode)} onMouseEnter={() => setCaptureHint(true)} onMouseLeave={() => setCaptureHint(false)} onFocus={() => setCaptureHint(true)} onBlur={() => setCaptureHint(false)} onClick={() => { setCaptureHint(false); void openCapture(); }}><Scan aria-hidden="true" /></button>}
+        <div className="tools">{state?.showCapture !== false && <button className="icon-button" ref={desktopButtonRef} type="button" aria-label={t('captureShortcut')} aria-describedby={showCaptureHint ? 'capture-shortcut' : undefined} aria-haspopup="dialog" aria-expanded={Boolean(desktopMode)} onMouseEnter={() => setCaptureHint(true)} onMouseLeave={() => setCaptureHint(false)} onFocus={event => { if (!restoringCaptureFocus.current && event.currentTarget.matches(':focus-visible')) setCaptureHint(true); }} onBlur={() => setCaptureHint(false)} onClick={() => { setCaptureHint(false); void openCapture(); }}><Scan aria-hidden="true" /></button>}
           {state?.quickAccess.map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={event => { if (app === 'desktop') void openDesktopPanel({ kind: 'home' }, event.currentTarget); else openHub(app); }}><Icon aria-hidden="true" /></button>; })}
           <button className="icon-button" ref={hubButtonRef} type="button" aria-label={t('hub')} title={t('hub')} aria-haspopup="dialog" aria-expanded={Boolean(hubPage)} aria-controls="hub-popup" onClick={() => { if (hubPage) { setHubPage(null); hubButtonRef.current?.focus(); } else openHub('home'); }}><LayoutGrid aria-hidden="true" /></button>
           <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { setDesktopOverlay(null); setShieldScope(null); dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); setHubPage(null); setLyraOpen(false); setPanel(null); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
