@@ -67,6 +67,8 @@ main { flex: 1; min-height: 0; overflow-y: auto; padding: var(--gap-section) var
 /* The content container keeps the horizon proportional even when chrome grows; intrinsic height protects the blocks on short windows. */
 .start-sky { --start-top: clamp(0px, calc(100cqh - var(--height-start-top-collapse)), var(--gap-start-top)); flex-shrink: 0; min-height: max(calc(100cqh * 35 / 67), calc(var(--start-top) + var(--height-sky-floor))); padding: var(--start-top) var(--gap-page-inline) var(--gap-start-bottom); }
 .start-browsing { display: flex; flex-direction: column; gap: var(--gap-shortcuts); width: 100%; max-width: var(--width-start); margin: 0 auto; }
+.private-start-page .start-sky { padding-top: max(0px, calc(var(--start-top) - 22px)); }
+.private-window-notice { margin: 0; text-align: center; color: var(--text-secondary); font-size: var(--type-label); line-height: var(--line-label); }
 h1 { font-size: var(--type-display); font-weight: var(--weight-heading); line-height: var(--line-display); color: var(--text-title); letter-spacing: var(--tracking-heading); }
 .start-browsing h1 { font-family: var(--font-brand); font-weight: var(--weight-display); letter-spacing: var(--tracking-display); line-height: var(--height-brand); text-align: center; }
 .search-field { display: flex; align-items: center; gap: var(--gap-toolbar); min-height: var(--height-search); padding: 0 var(--gap-search); background: var(--surface-field); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-panel); color: var(--text-secondary); }

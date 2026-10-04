@@ -24,6 +24,7 @@ export const copy = {
   newPrivateWindow: { en: 'New private window', es: 'Nueva ventana privada' },
   privateWindow: { en: 'Private window', es: 'Ventana privada' },
   private: { en: 'Private', es: 'Privada' },
+  privateWindowNotice: { en: 'Nothing from this window is kept after it closes; blocking is at its strictest.', es: 'No se conserva nada de esta ventana al cerrarla; el bloqueo está al máximo.' },
   saveCaptureFile: { en: 'Save as a file', es: 'Guardar como archivo' },
   captureFileSaved: { en: 'Capture saved', es: 'Captura guardada' },
   CAPTURE_SAVE_FAILED: { en: 'The capture could not be saved. Try again.', es: 'No se pudo guardar la captura. Probá de nuevo.' },

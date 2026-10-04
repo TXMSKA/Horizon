@@ -670,6 +670,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
         <div className="start-sky"><div className="start-browsing">
           <h1>{t('product')}</h1>
           <form className="search-field start-search" onSubmit={event => { event.preventDefault(); navigate(startSearch); }}><Search aria-hidden="true" /><input spellCheck={false} autoComplete="off" aria-label={t('search')} placeholder={t('search')} value={startSearch} maxLength={8192} onChange={event => setStartSearch(event.target.value)} /><Sparkles className="accent" aria-hidden="true" /></form>
+          {state.privateWindow && <p className="private-window-notice">{t('privateWindowNotice')}</p>}
           <nav className="shortcuts" aria-label={t('shortcuts')}>{(Object.keys(sites) as (keyof typeof sites)[]).map(key => <a href={sites[key]} key={key} onClick={event => { event.preventDefault(); if (event.ctrlKey) void run({ type: 'new-tab', input: sites[key], background: true }); else navigate(sites[key]); }} onAuxClick={event => { event.preventDefault(); if (event.button === 1) void run({ type: 'new-tab', input: sites[key], background: true }); }}>{t(key)}</a>)}</nav>
         </div></div>
         <div className="start-ground">

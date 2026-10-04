@@ -117,10 +117,12 @@ if (instance) {
       window.removeMenu();
       const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry, undefined, { id, profileId, privateWindow, fresh,
         openWindow: (profileId, privateWindow, origin) => { void createWindow(profileId, privateWindow, origin).catch(() => console.error('Window creation failed')); } });
-      const entry = { window, browser, ready: false }; windows.set(window.webContents, entry);
+      // A destroyed window can no longer hand out its webContents, so the entry's key is kept from now.
+      const chromeContents = window.webContents;
+      const entry = { window, browser, ready: false }; windows.set(chromeContents, entry);
       if (!privateWindow && (!launchWindow || launchWindow.isDestroyed())) { launchWindow = window; launchBrowser = browser; launchReady = false; }
       window.once('closed', () => {
-        windows.delete(window.webContents);
+        windows.delete(chromeContents);
         if (launchWindow === window) {
           const next = [...windows.values()].find(entry => !entry.browser.privateWindow);
           launchWindow = next?.window; launchBrowser = next?.browser; launchReady = next?.ready ?? false;

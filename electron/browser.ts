@@ -1512,6 +1512,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       void finishClearing().then(() => window.close());
     }
   });
+  // A destroyed window can no longer hand out its webContents, so the handlers' key is kept from now.
+  const chromeContents = window.webContents;
   window.on('closed', () => {
     closing = true; invalidateMenu();
     blocker.stop();
@@ -1530,7 +1532,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!shared.owners.size) { for (const data of shared.profiles.values()) data.desktop.dispose(); groups.delete(userData); }
     app.removeListener('before-quit', beforeQuit);
     window.removeListener('focus', refreshDefaultBrowser);
-    const handlers = chromeHandlers.get(window.webContents); chromeHandlers.delete(window.webContents);
+    const handlers = chromeHandlers.get(chromeContents); chromeHandlers.delete(chromeContents);
     for (const channel of handlers?.keys() ?? []) if (![...chromeHandlers.values()].some(map => map.has(channel))) ipcMain.removeHandler(channel);
   });
   let privateReleased = false;
