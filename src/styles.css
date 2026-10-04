@@ -67,6 +67,8 @@ main { flex: 1; min-height: 0; overflow-y: auto; padding: var(--gap-section) var
 /* The content container keeps the horizon proportional even when chrome grows; intrinsic height protects the blocks on short windows. */
 .start-sky { --start-top: clamp(0px, calc(100cqh - var(--height-start-top-collapse)), var(--gap-start-top)); flex-shrink: 0; min-height: max(calc(100cqh * 35 / 67), calc(var(--start-top) + var(--height-sky-floor))); padding: var(--start-top) var(--gap-page-inline) var(--gap-start-bottom); }
 .start-browsing { display: flex; flex-direction: column; gap: var(--gap-shortcuts); width: 100%; max-width: var(--width-start); margin: 0 auto; }
+.private-start-page .start-sky { padding-top: max(0px, calc(var(--start-top) - 22px)); }
+.private-window-notice { margin: 0; text-align: center; color: var(--text-secondary); font-size: var(--type-label); line-height: var(--line-label); }
 h1 { font-size: var(--type-display); font-weight: var(--weight-heading); line-height: var(--line-display); color: var(--text-title); letter-spacing: var(--tracking-heading); }
 .start-browsing h1 { font-family: var(--font-brand); font-weight: var(--weight-display); letter-spacing: var(--tracking-display); line-height: var(--height-brand); text-align: center; }
 .search-field { display: flex; align-items: center; gap: var(--gap-toolbar); min-height: var(--height-search); padding: 0 var(--gap-search); background: var(--surface-field); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-panel); color: var(--text-secondary); }
@@ -396,6 +398,9 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .profile-icon-slot { flex: none !important; display: grid; place-items: center; width: var(--size-16); height: var(--size-16); }
 .profile-icon-slot .profile-dot { width: var(--size-profile-dot); height: var(--size-profile-dot); }
 .avatar-circle { display: grid; place-items: center; width: var(--size-28); height: var(--size-28); border-radius: var(--radius-pill); background: var(--surface-sunken); color: var(--text-title); font-size: var(--type-caption); font-weight: var(--weight-heading); line-height: var(--line-caption); }
+.private-window-mark { display: inline-flex; align-items: center; gap: var(--space-6); height: var(--size-32); padding: 0 var(--space-8); border-radius: var(--radius-pill); background: var(--surface-sunken); color: var(--text-title); font-size: var(--type-caption); line-height: var(--line-caption); }
+.private-window-mark > svg { width: var(--icon-control); height: var(--icon-control); color: var(--text-secondary); }
+:root[data-contrast=high] .private-window-mark { border: var(--border-width) solid var(--outline-profile); }
 .profile-avatar[aria-expanded=true], .toolbar .icon-button[aria-expanded=true] { background: var(--surface-pressed); }
 :root[data-contrast=high] .avatar-circle { border: var(--border-width) solid var(--outline-profile); }
 .lyra-button > span { display: grid; place-items: center; width: var(--size-30); height: var(--size-30); border-radius: var(--radius-pill); background: var(--accent); color: var(--on-accent); }
@@ -717,7 +722,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .capture-split button { display: flex; align-items: center; justify-content: center; height: 100%; min-height: 0; padding: 0; color: var(--on-accent); }
 .capture-split .capture-save-main { flex: 1; padding-inline: var(--space-14); justify-content: flex-start; font-size: var(--type-label); font-weight: var(--weight-emphasis); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .capture-split > span { height: var(--space-20); width: var(--border-width); flex: none; background: var(--on-accent); opacity: var(--opacity-capture-divider); }
-.capture-split > button:last-child { width: var(--size-32); flex: none; }
+.capture-split > button:last-child:not(.capture-save-main) { width: var(--size-32); flex: none; }
 .capture-split button:not(:disabled):hover { background: var(--accent-hover); }
 .capture-split button:not(:disabled):active { background: var(--accent-pressed); }
 .capture-split button:focus-visible { outline-color: var(--on-accent); outline-offset: calc(-1 * var(--focus-width)); }

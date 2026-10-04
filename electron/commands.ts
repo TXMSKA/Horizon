@@ -83,6 +83,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     case 'move-item-project': valid = exact(['project', 'id', 'toProject', 'folder']) && project(command.project) && item(command.project, command.id) && project(command.toProject) && folder(command.toProject, command.folder); break;
     case 'add-capture-to-project': valid = exact(['id', 'project', 'folder']) && item(null, command.id) && project(command.project) && folder(command.project, command.folder); break;
     case 'delete-capture': valid = exact(['id']) && item(null, command.id); break;
+    case 'save-capture-file': valid = exact(['id']) && item(null, command.id) && !!captures.find(entry => entry.id === command.id)?.image; break;
     case 'add-link':
       valid = exact(['address', 'title', 'project', 'folder']) && project(command.project) && folder(command.project, command.folder);
       if (!isWebURL(command.address) || !desktopTitle(command.title)) throw new Error('LINK_INVALID'); break;
@@ -189,7 +190,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     case 'delete-history': case 'delete-bookmark': keys(command, ['type', 'url']); valid = isWebURL(command.url); break;
     case 'restore':
       keys(command, ['type', 'kind']); valid = command.kind === 'history' || command.kind === 'bookmarks' || command.kind === 'downloads' || command.kind === 'desktop'; break;
-    case 'reopen-tab': case 'home': case 'reload-no-cache': case 'print':
+    case 'new-window': case 'new-private-window': case 'reopen-tab': case 'home': case 'reload-no-cache': case 'print':
     case 'back': case 'forward': case 'reload': case 'stop': case 'bookmark': case 'focus-page': case 'stop-find': case 'clear-history': case 'open-downloads-folder': case 'fullscreen':
       keys(command, ['type']); valid = Object.hasOwn(command, 'type'); break;
   }

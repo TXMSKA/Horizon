@@ -13,6 +13,9 @@ import { getDomain } from 'tldts-experimental';
 export type BlockKind = 'ads' | 'trackers';
 export interface BlockMatch { kind: BlockKind; redirectURL?: string }
 export interface CosmeticMetrics { bytes: number; extractionMs: number; rules: number }
+export function blockingPolicy(privateWindow: boolean, blockAds: boolean, blockThirdPartyCookies: boolean, siteBlocking = true) {
+  return { filters: privateWindow || blockAds && siteBlocking, thirdPartyCookies: privateWindow || blockThirdPartyCookies && siteBlocking };
+}
 export const LIST_HOSTS = Object.freeze(['raw.githubusercontent.com'] as const);
 export const LIST_TIMEOUT_MS = 30_000;
 export const LIST_BYTES_LIMIT = 16 * 1024 * 1024;

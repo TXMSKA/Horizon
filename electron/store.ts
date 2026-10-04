@@ -29,6 +29,13 @@ function entries(value: unknown, validate: (entry: unknown) => boolean): boolean
 
 export interface StoreCipher { isEncryptionAvailable(): boolean; encryptString(value: string): Buffer; decryptString(value: Buffer): string }
 export interface StoreReadStatus { readError: boolean; memoryOnly: boolean }
+export const recordsBrowsing = (privateWindow: boolean): boolean => !privateWindow;
+export function clearStoredHistoryOnClose(path: string, store: BrowserStore, cipher: StoreCipher, save = writeStore): void {
+  if (!store.clearHistoryOnClose) return;
+  const previous = store.history;
+  store.history = [];
+  try { save(path, store, cipher); } catch (error) { store.history = previous; throw error; }
+}
 const encryptedHeader = Buffer.from('HORIZON-STORE-1\n');
 const STORE_LIMIT = 64 * 1024 * 1024;
 export function encryptedStore(path: string): boolean {

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { Check, LoaderCircle, Plus, Trash2, TriangleAlert, Users } from 'lucide-react';
+import { Check, EyeOff, LoaderCircle, Plus, Trash2, TriangleAlert, Users } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS } from './shared/api';
@@ -78,16 +78,17 @@ export function ProfileForm({ language, profiles, profile, onCancel, onSuccess, 
   </form>;
 }
 
-export function ProfileControl({ profile, language, open, opener, onClick }: {
-  profile?: ProfileState; language: Language; open: 'menu' | 'new' | null; opener: RefObject<HTMLButtonElement | null>; onClick: (keyboard: boolean) => void;
+export function ProfileControl({ profile, privateWindow, language, open, opener, onClick }: {
+  profile?: ProfileState; privateWindow: boolean; language: Language; open: 'menu' | 'new' | null; opener: RefObject<HTMLButtonElement | null>; onClick: (keyboard: boolean) => void;
 }) {
   const name = profile?.name ?? text('personal', language);
+  if (privateWindow) return <span className="private-window-mark" role="img" aria-label={text('privateWindow', language)} title={text('privateWindow', language)}><EyeOff aria-hidden="true" /><span>{text('private', language)}</span></span>;
   return <button className="icon-button profile-avatar" type="button" ref={opener} aria-haspopup="menu" aria-expanded={Boolean(open)} aria-controls={open === 'new' ? 'new-profile-popover' : 'profiles-menu'} aria-label={text('profile', language).replace('{name}', name)} title={name} onClick={event => onClick(event.detail === 0)}><span className="avatar-circle" aria-hidden="true">{Array.from(name)[0]?.toLocaleUpperCase(language)}</span></button>;
 }
 
-export function ProfilesMenu({ state, language, keyboard, opener, onDismiss, onSwitch, onNew, onManage }: {
+export function ProfilesMenu({ state, language, keyboard, opener, onDismiss, onSwitch, onNew, onManage, onPrivate }: {
   state: BrowserState; language: Language; keyboard: boolean; opener: RefObject<HTMLButtonElement | null>;
-  onDismiss: (reason: 'escape' | 'tab' | 'outside') => void; onSwitch: (profile: ProfileState) => void; onNew: () => void; onManage: () => void;
+  onDismiss: (reason: 'escape' | 'tab' | 'outside') => void; onSwitch: (profile: ProfileState) => void; onNew: () => void; onManage: () => void; onPrivate: () => void;
 }) {
   const t = (key: CopyKey) => text(key, language);
   return <ToolbarPopover opener={opener}><Menu id="profiles-menu" className="profiles-menu" label={t('profiles')} keyboard={keyboard} initialFocus="[aria-checked=true]" opener={opener} onDismiss={onDismiss}>
@@ -95,6 +96,8 @@ export function ProfilesMenu({ state, language, keyboard, opener, onDismiss, onS
     {state.profiles.map(profile => <button className="profile-menu-row" type="button" role="menuitemradio" tabIndex={-1} key={profile.id} aria-checked={profile.id === state.activeProfileId} onClick={() => onSwitch(profile)}><span className="profile-icon-slot" aria-hidden="true"><span className="profile-dot" data-profile-color={profile.color} /></span><span className="profile-row-body"><strong>{profile.name}</strong></span>{profile.id === state.activeProfileId && <Check className="profile-check" aria-hidden="true" />}</button>)}
     <button type="button" role="menuitem" tabIndex={-1} onClick={onNew}><Plus aria-hidden="true" /><span>{t('newProfile')}</span></button>
     <button type="button" role="menuitem" tabIndex={-1} onClick={onManage}><Users aria-hidden="true" /><span>{t('manageProfiles')}</span></button>
+    <hr />
+    <button type="button" role="menuitem" tabIndex={-1} onClick={onPrivate}><EyeOff aria-hidden="true" /><span>{t('privateWindow')}</span></button>
   </Menu></ToolbarPopover>;
 }
 
