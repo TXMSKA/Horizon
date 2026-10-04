@@ -1,4 +1,44 @@
 [
-  { "id": "identity", "letter": "ID", "short": "Identity", "title": "Visual identity: Amber, Daylight and high contrast" },
-  { "id": "flows", "letter": "FL", "short": "Flows", "title": "Flows: how Horizon is used, step by step" }
+  {
+    "id": "identity",
+    "letter": "ID",
+    "short": "Identity",
+    "title": "Visual identity: Amber, Daylight and high contrast"
+  },
+  {
+    "id": "flows",
+    "letter": "FL",
+    "short": "Flows",
+    "title": "Flows: how Horizon is used, step by step"
+  },
+  {
+    "id": "hub",
+    "letter": "HU",
+    "short": "Hub",
+    "title": "The Hub and its apps"
+  },
+  {
+    "id": "capture",
+    "letter": "CA",
+    "short": "Capture",
+    "title": "Capture: a screenshot first"
+  },
+  {
+    "id": "desktop",
+    "letter": "DE",
+    "short": "Desktop",
+    "title": "The Desktop: projects, captures and what you keep"
+  },
+  {
+    "id": "lyra",
+    "letter": "LY",
+    "short": "Lyra",
+    "title": "Lyra in the side panel"
+  },
+  {
+    "id": "settings",
+    "letter": "SE",
+    "short": "Settings",
+    "title": "Settings: one page in a tab"
+  }
 ]
