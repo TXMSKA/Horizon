@@ -1,11 +1,12 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, protocol, screen, session } from 'electron';
-import { resolve } from 'node:path';
+import { app, BrowserWindow, ipcMain, nativeTheme, protocol, safeStorage, screen, session } from 'electron';
+import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { IPC } from '../src/shared/api';
 import { hardenContents, secureSession, START_URL, validateSender } from './security';
 import { serveHorizon } from './protocol';
-import { createBrowser, isLaunchNavigation, isProfileSession } from './browser';
-import { cleanupPartitions, readRegistry } from './profiles';
+import { createBrowser, isLaunchNavigation, isProfileSession, restoredWindows } from './browser';
+import { cleanupPartitions, profileStorePath, readRegistry } from './profiles';
+import { readWindowSessions, writeWindowSessions } from './session-store';
 import { createSettings, resolveLanguage } from './settings';
 import { launchAddress } from './launch';
 import { darkPagesActive, setDarkPagesSwitch } from './dark-pages';
@@ -28,8 +29,10 @@ if (instance) {
   let launchWindow: BrowserWindow | undefined;
   let launchBrowser: ReturnType<typeof createBrowser> | undefined;
   let launchReady = false;
+  let openNormalWindow: (() => Promise<unknown>) | undefined;
   const pendingLaunches: string[] = [];
   const deliverLaunches = () => {
+    if ((!launchWindow || launchWindow.isDestroyed()) && pendingLaunches.length && openNormalWindow) { void openNormalWindow().then(deliverLaunches); return; }
     if (!launchReady || !launchWindow || !launchBrowser || launchWindow.isDestroyed()) return;
     while (pendingLaunches.length) {
       const address = pendingLaunches.shift()!;
@@ -56,8 +59,12 @@ if (instance) {
   });
 
   app.whenReady().then(async () => {
+    const windows = new Map<Electron.WebContents, { window: BrowserWindow; browser: ReturnType<typeof createBrowser>; ready: boolean }>();
     const registryPath = resolve(app.getPath('userData'), 'profiles.json');
-    const settings = createSettings(resolve(app.getPath('userData'), 'settings.json'), () => { window.setBackgroundColor(background()); }, nativeTheme.shouldUseHighContrastColors);
+    const settings = createSettings(resolve(app.getPath('userData'), 'settings.json'), () => {
+      for (const { window } of windows.values()) window.setBackgroundColor(background());
+      windows.values().next().value?.browser.settingsChanged?.();
+    }, nativeTheme.shouldUseHighContrastColors);
     const language = resolveLanguage(settings.language, app.getLocale());
     const registry = cleanupPartitions(app.getPath('sessionData'), registryPath, readRegistry(registryPath, language), app.getPath('userData'));
     secureSession(session.defaultSession);
@@ -71,67 +78,102 @@ if (instance) {
       return page;
     };
     // A work area smaller than the design frame gets a window that still leaves room around it.
-    const area = screen.getPrimaryDisplay().workAreaSize;
-    const window = new BrowserWindow({
-      width: Math.min(DESIGN_WIDTH, Math.round(area.width * 0.9)),
-      height: Math.min(DESIGN_HEIGHT, Math.round(area.height * 0.9)),
-      center: true,
-      minWidth: 640,
-      minHeight: 480,
-      frame: false,
-      show: false,
-      icon: resolve(__dirname, '../icon.png'),
-      backgroundColor: background(),
-      webPreferences: {
-        preload: resolve(__dirname, 'preload.js'),
-        additionalArguments: [`--horizon-theme=${settings.theme}`, `--horizon-contrast=${settings.contrast}`, `--horizon-theme-migrate=${settings.migrationAllowed ? 1 : 0}`],
-        nodeIntegration: false,
-        nodeIntegrationInWorker: false,
-        nodeIntegrationInSubFrames: false,
-        contextIsolation: true,
-        sandbox: true,
-        webSecurity: true,
-        allowRunningInsecureContent: false,
-        experimentalFeatures: false,
-        webviewTag: false,
-        devTools: !app.isPackaged,
-      },
-    });
-    const systemTheme = () => { if (settings.theme === 'system') window.setBackgroundColor(background()); };
-    nativeTheme.on('updated', systemTheme);
-    window.once('closed', () => nativeTheme.removeListener('updated', systemTheme));
-    window.removeMenu();
-    const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry);
-    launchWindow = window; launchBrowser = browser;
-    // The interface draws at 92% of the design frame and shrinks with a smaller window, never below 75%, so text and targets stay usable.
-    const fitScale = () => {
-      const { width, height } = window.getContentBounds();
-      window.webContents.setZoomFactor(Math.max(0.75, 0.92 * Math.min(1, width / DESIGN_WIDTH, height / DESIGN_HEIGHT)));
-      browser.layout();
+    const createWindow = async (profileId?: string, privateWindow = false, origin?: BrowserWindow, id?: string, fresh = true) => {
+      const offset = origin && !origin.isDestroyed() ? origin.getBounds() : undefined;
+      const display = offset ? screen.getDisplayMatching(offset) : screen.getPrimaryDisplay();
+      const area = display.workAreaSize;
+      const width = Math.min(DESIGN_WIDTH, Math.round(area.width * 0.9));
+      const height = Math.min(DESIGN_HEIGHT, Math.round(area.height * 0.9));
+      const workArea = display.workArea;
+      profileId ??= windows.values().next().value?.browser.registry().activeId ?? registry.activeId;
+      const window = new BrowserWindow({
+        width,
+        height,
+        ...(offset ? { x: Math.max(workArea.x, Math.min(offset.x + 32, workArea.x + workArea.width - width)), y: Math.max(workArea.y, Math.min(offset.y + 32, workArea.y + workArea.height - height)) } : { center: true }),
+        minWidth: 640,
+        minHeight: 480,
+        frame: false,
+        show: false,
+        icon: resolve(__dirname, '../icon.png'),
+        backgroundColor: background(),
+        webPreferences: {
+          preload: resolve(__dirname, 'preload.js'),
+          additionalArguments: [`--horizon-theme=${settings.theme}`, `--horizon-contrast=${settings.contrast}`, `--horizon-theme-migrate=${settings.migrationAllowed ? 1 : 0}`],
+          nodeIntegration: false,
+          nodeIntegrationInWorker: false,
+          nodeIntegrationInSubFrames: false,
+          contextIsolation: true,
+          sandbox: true,
+          webSecurity: true,
+          allowRunningInsecureContent: false,
+          experimentalFeatures: false,
+          webviewTag: false,
+          devTools: !app.isPackaged,
+        },
+      });
+      const systemTheme = () => { if (settings.theme === 'system') window.setBackgroundColor(background()); };
+      nativeTheme.on('updated', systemTheme);
+      window.once('closed', () => nativeTheme.removeListener('updated', systemTheme));
+      window.removeMenu();
+      const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry, undefined, { id, profileId, privateWindow, fresh,
+        openWindow: (profileId, privateWindow, origin) => { void createWindow(profileId, privateWindow, origin).catch(() => console.error('Window creation failed')); } });
+      const entry = { window, browser, ready: false }; windows.set(window.webContents, entry);
+      if (!privateWindow && (!launchWindow || launchWindow.isDestroyed())) { launchWindow = window; launchBrowser = browser; launchReady = false; }
+      window.once('closed', () => {
+        windows.delete(window.webContents);
+        if (launchWindow === window) {
+          const next = [...windows.values()].find(entry => !entry.browser.privateWindow);
+          launchWindow = next?.window; launchBrowser = next?.browser; launchReady = next?.ready ?? false;
+        }
+      });
+      // The interface draws at 92% of the design frame and shrinks with a smaller window, never below 75%, so text and targets stay usable.
+      const fitScale = () => {
+        const { width, height } = window.getContentBounds();
+        window.webContents.setZoomFactor(Math.max(0.75, 0.92 * Math.min(1, width / DESIGN_WIDTH, height / DESIGN_HEIGHT)));
+        browser.layout();
+      };
+      window.on('resize', fitScale);
+      window.webContents.on('did-finish-load', fitScale);
+      window.once('ready-to-show', () => window.show());
+      await window.loadURL(START_URL);
+      entry.ready = true;
+      if (launchWindow === window) launchReady = true;
+      if (pendingLaunches.length) deliverLaunches();
+      return window;
     };
-    window.on('resize', fitScale);
-    window.webContents.on('did-finish-load', fitScale);
     ipcMain.handle(IPC.language, (event, ...args: unknown[]) => {
-      validateSender(event, window.webContents);
+      const entry = windows.get(event.sender); if (!entry) throw new Error('Unknown browser window');
+      validateSender(event, entry.window.webContents);
       if (args.length) throw new Error('Unexpected language argument');
       return resolveLanguage(settings.language, app.getLocale());
     });
     ipcMain.handle(IPC.windowAction, (event, ...args: unknown[]) => {
+      const entry = windows.get(event.sender); if (!entry) throw new Error('Unknown browser window');
+      const window = entry.window;
       validateSender(event, window.webContents);
       if (args.length !== 1) throw new Error('Invalid window action arguments');
       const action = args[0];
       if (action === 'minimize') window.minimize();
-      else if (action === 'maximize') {
-        if (window.isMaximized()) window.unmaximize();
-        else window.maximize();
-      } else if (action === 'close') window.close();
+      else if (action === 'maximize') { if (window.isMaximized()) window.unmaximize(); else window.maximize(); }
+      else if (action === 'close') window.close();
       else throw new Error('Invalid window action');
     });
     await serveHorizon(session.defaultSession.protocol, resolve(__dirname, '../renderer'));
-    window.once('ready-to-show', () => window.show());
-    await window.loadURL(START_URL);
-    launchReady = true;
-    if (pendingLaunches.length) deliverLaunches();
+    openNormalWindow = () => createWindow();
+    const previous = restoredWindows(app.getPath('userData'), registry);
+    const saved = settings.onStart === 'restore' ? previous : previous.slice(0, 1).map(window => ({ ...window, profileId: registry.activeId }));
+    if (settings.onStart === 'new-page' && previous.length > 1) {
+      for (const profile of registry.profiles) {
+        const path = resolve(dirname(profileStorePath(app.getPath('userData'), profile.id)), 'session.json');
+        const status = { readError: false, memoryOnly: false };
+        const sessions = readWindowSessions(path, safeStorage, url => url.startsWith('horizon://desktop/'), status);
+        if (status.memoryOnly) continue;
+        sessions.windows = sessions.windows.filter(window => window.id === saved[0]!.id);
+        writeWindowSessions(path, sessions, safeStorage);
+      }
+    }
+    if (saved.length) for (const { id, profileId } of saved) await createWindow(profileId, false, undefined, id, false);
+    else await createWindow(registry.activeId, false, undefined, undefined, false);
   }).catch((error: unknown) => {
     console.error(error);
     app.exit(1);

@@ -189,7 +189,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     case 'delete-history': case 'delete-bookmark': keys(command, ['type', 'url']); valid = isWebURL(command.url); break;
     case 'restore':
       keys(command, ['type', 'kind']); valid = command.kind === 'history' || command.kind === 'bookmarks' || command.kind === 'downloads' || command.kind === 'desktop'; break;
-    case 'reopen-tab': case 'home': case 'reload-no-cache': case 'print':
+    case 'new-window': case 'new-private-window': case 'reopen-tab': case 'home': case 'reload-no-cache': case 'print':
     case 'back': case 'forward': case 'reload': case 'stop': case 'bookmark': case 'focus-page': case 'stop-find': case 'clear-history': case 'open-downloads-folder': case 'fullscreen':
       keys(command, ['type']); valid = Object.hasOwn(command, 'type'); break;
   }

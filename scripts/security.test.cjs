@@ -89,12 +89,14 @@ test('On start migrates v5 on read, validates choices and persists both settings
 test('new browser shortcuts share pure mappings, tab selection and address completion', () => {
   const { shortcutTabIndex, completeAddress } = require('../dist/src/shared/shortcuts.js');
   for (const [key, control, shift, alt, expected] of [
+    ['n', true, false, false, 'new-window'], ['N', true, true, false, 'new-private-window'],
     ['t', true, true, false, 'reopen-tab'], ['F4', true, false, false, 'close-tab'], ['PageDown', true, false, false, 'next-tab'], ['PageUp', true, false, false, 'previous-tab'], ['9', true, false, false, 'tab-9'],
     ['d', false, false, true, 'focus-address'], ['e', true, false, false, 'focus-search'], ['k', true, false, false, 'focus-search'], ['Home', false, false, true, 'home'], ['Delete', true, true, false, 'clear-browsing-data'],
     ['F5', true, false, false, 'reload-no-cache'], ['F5', false, true, false, 'reload-no-cache'], ['r', true, true, false, 'reload-no-cache'], ['F3', false, false, false, 'find-next'], ['F3', false, true, false, 'find-previous'],
     ['g', true, false, false, 'find-next'], ['g', true, true, false, 'find-previous'], ['p', true, false, false, 'print'], ['f', false, false, true, 'menu'], ['e', false, false, true, 'menu'],
   ]) { const input = { key, control, shift, alt, meta: false }; assert.equal(browserShortcut(input), expected, key); assert.equal(browserShortcut({ ...input, meta: true }), null); }
-  for (const key of ['n', 's', 'Enter']) assert.equal(browserShortcut({ key, control: true, shift: false, alt: false, meta: false }), null);
+  for (const key of ['s', 'Enter']) assert.equal(browserShortcut({ key, control: true, shift: false, alt: false, meta: false }), null);
+  for (const control of [false, true]) for (const shift of [false, true]) assert.equal(browserShortcut({ key: 'n', control, shift, alt: true, meta: false }), null);
   assert.equal(shortcutTabIndex('tab-9', 12, 0), 11); assert.equal(shortcutTabIndex('tab-8', 12, 0), 7); assert.equal(shortcutTabIndex('tab-8', 2, 0), -1);
   assert.equal(shortcutTabIndex('next-tab', 3, 2), 0); assert.equal(shortcutTabIndex('previous-tab', 3, 0), 2); assert.equal(shortcutTabIndex('next-tab', 0, -1), -1);
   assert.equal(completeAddress(' horizon '), 'https://www.horizon.com/'); assert.equal(completeAddress('my-site'), 'https://www.my-site.com/');
@@ -104,12 +106,12 @@ test('new browser shortcuts share pure mappings, tab selection and address compl
 });
 
 test('shortcut reservation gives document actions to pages and keeps browser tab management reserved', () => {
-  const reserved = ['new-tab', 'close-tab', 'reopen-tab', 'next-tab', 'previous-tab', 'fullscreen', ...Array.from({ length: 9 }, (_, index) => 'tab-' + (index + 1))];
+  const reserved = ['new-window', 'new-private-window', 'new-tab', 'close-tab', 'reopen-tab', 'next-tab', 'previous-tab', 'fullscreen', ...Array.from({ length: 9 }, (_, index) => 'tab-' + (index + 1))];
   const page = ['focus-address', 'focus-search', 'find', 'find-next', 'find-previous', 'reload', 'reload-no-cache', 'print', 'capture', 'bookmark', 'favorites', 'history', 'downloads', 'home', 'back', 'forward', 'menu', 'clear-browsing-data', 'zoom-in', 'zoom-out', 'zoom-reset', 'stop'];
   for (const action of reserved) assert.equal(browserReservedShortcut(action), true, action);
   for (const action of page) assert.equal(browserReservedShortcut(action), false, action);
   assert.equal(browserReservedShortcut(null), false);
-  for (const action of [...reserved, ...page]) assert.equal(browserReservedShortcut(action, true), action === 'fullscreen' || action === 'stop', action);
+  for (const action of [...reserved, ...page]) assert.equal(browserReservedShortcut(action, true), ['new-window', 'new-private-window', 'fullscreen', 'stop'].includes(action), action);
   const accelerators = browserShortcutAccelerators();
   assert.equal(new Set(accelerators.map(item => item.accelerator)).size, accelerators.length);
   for (const action of [...reserved, ...page]) assert.ok(accelerators.some(item => item.shortcut === action), action);
@@ -1735,6 +1737,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     getTitle() { return this.title || ''; }
     close() { if (this.destroyed) return; this.destroyed = true; this.emit('destroyed'); }
     isLoading() { return this.loading; }
+    stop() { this.loading = false; }
     capturePage() { this.captures = (this.captures || 0) + 1; return Promise.resolve(this.image); }
     stopFindInPage() {}
     findInPage(text, options) { this.find = { text, options }; return 7; }
@@ -1790,7 +1793,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const localRequire = createRequire(filename);
   const loaded = { exports: {} };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'module', '__filename', '__dirname', 'setTimeout', 'clearTimeout'])(loaded.exports,
-    name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { createBlockingEngine() { return {
+    name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name), createBlockingEngine() { return {
       get ready() { return mockBlockingReady; }, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '',
       match(url) { blockingCalls.push(url); return url.includes('/blocked-ad') ? { kind: 'ads' } : url.includes('/blocked-tracker') ? { kind: 'trackers' } : undefined; },
     }; } } : name === './store' ? { ...localRequire(name), writeStore(path, store, cipher) {
@@ -2031,12 +2034,12 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(state().storageError, true);
   writeFailure = false;
   view.webContents.emit('page-title-updated', {}, 'Saved title');
-  electron.app.emit('before-quit');
+  browser.flush();
   assert.equal(timers.size, 0);
   assert.equal(writes.at(-1).history[0].title, 'Saved title');
   assert.equal(state().storageError, false);
   const flushedWrites = writes.length;
-  electron.app.emit('before-quit');
+  browser.flush();
   assert.equal(writes.length, flushedWrites);
   view.webContents.emit('did-navigate', {}, 'https://example.com/missing', 404);
   assert.equal(state().tabs[0].error, null);
@@ -2674,7 +2677,7 @@ test('dark page flips replace views in every profile without closing tabs and si
     } },
   };
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
-  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? {
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name),
     createBlockingEngine: () => ({ ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '', match: () => undefined }),
   } : localRequire(name), require('node:path').dirname(filename));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
@@ -3041,7 +3044,7 @@ test('main paints the resolved palette and passes both settings before loading c
       if (name === './settings') return { ...localRequire(name), createSettings(path, callback, high) { assert.equal(path, join(directory, 'settings.json')); assert.equal(high, true); changed = callback; return settings; } };
       if (name === './security') return { START_URL: 'horizon://app/', secureSession() {} };
       if (name === './protocol') return { serveHorizon: async () => {} };
-      if (name === './browser') return { createBrowser: () => ({ layout() {} }) };
+      if (name === './browser') return { restoredWindows: () => [], createBrowser: () => ({ layout() {} }) };
       return localRequire(name);
     }, require('node:path').dirname(filename));
     await new Promise(done => setImmediate(done));
@@ -4001,9 +4004,17 @@ test('either page protocol call exceeding its deadline detaches without acceptin
 });
 function capturePNG(width, height) { const bytes = Buffer.from(faviconPNG); bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20); return bytes; }
 
+const notebookCleanups = new WeakMap();
 function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
-  let close = () => {}; t.after(() => close());
+  let close = () => {};
+  const childClosers = [];
+  let cleanups = notebookCleanups.get(t);
+  if (!cleanups) {
+    cleanups = []; notebookCleanups.set(t, cleanups);
+    t.after(async () => { for (const cleanup of cleanups) cleanup(); await new Promise(setImmediate); });
+  }
+  cleanups.push(() => { for (const childClose of childClosers) childClose(); close(); });
   const directory = options.directory ?? temporaryDirectory(t, 'notebook-browser'), handlers = new Map(), views = [], timers = new Map(), sessions = new Map();
   const notebookModule = timedModule('desktop', timers), captureModule = timedModule('captures', timers);
   let contentsId = 0;
@@ -4054,7 +4065,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
     ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
     session: { fromPartition(partition) {
       if (!sessions.has(partition)) {
-        const target = new EventEmitter(); target.setPermissionRequestHandler = fn => { target.request = fn; }; target.setPermissionCheckHandler = fn => { target.check = fn; }; target.setDevicePermissionHandler = () => {};
+        const target = new EventEmitter(); target.partition = partition; target.setPermissionRequestHandler = fn => { target.request = fn; }; target.setPermissionCheckHandler = fn => { target.check = fn; }; target.setDevicePermissionHandler = () => {};
         target.webRequest = Object.fromEntries(['onBeforeRequest', 'onBeforeSendHeaders', 'onHeadersReceived', 'onCompleted', 'onErrorOccurred'].map(name => [name, fn => { target[name] = fn; }]));
         target.cleared = [];
         for (const name of ['clearStorageData', 'closeAllConnections', 'clearCache', 'clearAuthCache', 'clearCodeCaches']) target[name] = async args => { target.cleared.push([name, args]); if (options.clear) return options.clear(name, target); };
@@ -4066,7 +4077,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
-    name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
+    name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
   electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
@@ -4076,14 +4087,31 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   Contents.prototype.reloadIgnoringCache = function () { this.bypassedCache = (this.bypassedCache || 0) + 1; };
   options.prepare?.(directory);
   const settings = createSettings(join(directory, 'settings.json'), () => {});
-  const browser = exported.createBrowser(window, directory, join(directory, 'downloads'), settings, undefined, { status: 'developmentBuild', refresh: async () => {}, register: async () => {} });
+  const children = [];
+  const openWindow = (profileId, privateWindow) => { children.push(addWindow({ profileId, privateWindow, fresh: true })); };
+  const browser = exported.createBrowser(window, directory, join(directory, 'downloads'), settings, undefined, { status: 'developmentBuild', refresh: async () => {}, register: async () => {} }, { ...options.browserOptions, openWindow });
   let closed = false; close = () => { if (!closed) { closed = true; window.emit('closed'); } };
   const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
   const state = () => handlers.get('horizon:state')(event), command = value => handlers.get('horizon:command')(event, value);
   const notebook = (...args) => handlers.get('horizon:project')(event, ...args), image = (...args) => handlers.get('horizon:capture-image')(event, ...args);
   const area = hidden => handlers.get('horizon:content-area')(event, { top: 100, hidden });
   const navigate = (url = 'https://example.com/') => { command({ type: 'navigate', input: url }); views.at(-1).webContents.emit('did-navigate', {}, url); views.at(-1).webContents.emit('did-stop-loading'); };
-  return { directory, handlers, views, timers, sessions, window, app, close, event, state, command, notebook, image, area, navigate, settings, openLaunch: browser.openLaunch, isLaunchNavigation: exported.isLaunchNavigation };
+  function addWindow(browserOptions = {}) {
+    const childWindow = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
+      getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
+    const childBrowser = exported.createBrowser(childWindow, directory, join(directory, 'downloads'), settings, undefined, { status: 'developmentBuild', refresh: async () => {}, register: async () => {} }, { ...browserOptions, openWindow });
+    const childEvent = { sender: childWindow.webContents, senderFrame: childWindow.webContents.mainFrame };
+    const childState = () => handlers.get('horizon:state')(childEvent), childCommand = value => handlers.get('horizon:command')(childEvent, value);
+    let childClosed = false;
+    const childClose = () => { if (!childClosed) { childClosed = true; childWindow.emit('closed'); } };
+    childClosers.push(childClose);
+    t.after(childClose);
+    childWindow.close = childClose;
+    const childNavigate = (url = 'https://example.com/') => { childCommand({ type: 'navigate', input: url }); views.at(-1).webContents.emit('did-navigate', {}, url); views.at(-1).webContents.emit('did-stop-loading'); };
+    return { window: childWindow, browser: childBrowser, event: childEvent, state: childState, command: childCommand, navigate: childNavigate, close: childClose };
+  }
+  window.close = close;
+  return { directory, handlers, views, timers, sessions, window, app, close, event, state, command, notebook, image, area, navigate, settings, browser, addWindow, children, restoredWindows: exported.restoredWindows, isProfileSession: exported.isProfileSession, openLaunch: browser.openLaunch, isLaunchNavigation: exported.isLaunchNavigation };
 }
 
 test('favorite IPC keeps the current profile tree ordered, opens nested links, stars and restores deletes', t => {
@@ -4507,12 +4535,58 @@ test('browser menu keeps the drawn order, shortcuts and working zoom controls', 
   const { BrowserMenu } = interfaceModule('src/BrowserMenu.tsx', { 'lucide-react': {}, './copy': copy, './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' } });
   const tree = BrowserMenu({ language: 'en', active: { url: 'https://example.com/', zoom: 1 }, keyboard: true, opener: { current: null }, onDismiss() {}, onShortcut: action => shortcuts.push(action), onPanel: panel => panels.push(panel), onSettings() {}, onAbout() {}, run: async command => { commands.push(command); return true; } });
   const items = notebookNodes(tree, node => node.props.role === 'menuitem');
-  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'Reopen closed tab', 'Close tab', 'Home', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Reload past the cache', 'Print page', 'Favorites', 'History', 'Downloads', 'Settings', 'Clear browsing data', 'About Horizon']);
-  assert.deepEqual(notebookNodes(tree, node => node.type === 'kbd').map(node => node.props.children), ['Ctrl+T', 'Ctrl+Shift+T', 'Ctrl+F4', 'Alt+Home', 'Ctrl+F', 'Ctrl+F5 / Shift+F5', 'Ctrl+P', 'Ctrl+Shift+O', 'Ctrl+H', 'Ctrl+J', 'Ctrl+Shift+Delete']);
-  assert.equal(notebookNodes(tree, node => node.type === 'hr').length, 3);
-  items[4].props.onClick(); items[5].props.onClick(); items[6].props.onClick(); items[10].props.onClick();
-  assert.deepEqual(commands, [{ type: 'zoom', delta: -1 }, { type: 'zoom', delta: 1 }]); assert.deepEqual(shortcuts, ['fullscreen']); assert.deepEqual(panels, ['bookmarks']);
+  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'New window', 'New private window', 'Reopen closed tab', 'Close tab', 'Home', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Reload past the cache', 'Print page', 'Favorites', 'History', 'Downloads', 'Settings', 'Clear browsing data', 'About Horizon']);
+  assert.deepEqual(notebookNodes(tree, node => node.type === 'kbd').map(node => node.props.children), ['Ctrl+T', 'Ctrl+N', 'Ctrl+Shift+N', 'Ctrl+Shift+T', 'Ctrl+F4', 'Alt+Home', 'Ctrl+F', 'Ctrl+F5 / Shift+F5', 'Ctrl+P', 'Ctrl+Shift+O', 'Ctrl+H', 'Ctrl+J', 'Ctrl+Shift+Delete']);
+  assert.equal(notebookNodes(tree, node => node.type === 'hr').length, 4);
+  items[1].props.onClick(); items[2].props.onClick(); items[6].props.onClick(); items[7].props.onClick(); items[8].props.onClick(); items[12].props.onClick();
+  assert.deepEqual(commands, [{ type: 'zoom', delta: -1 }, { type: 'zoom', delta: 1 }]); assert.deepEqual(shortcuts, ['new-window', 'new-private-window', 'fullscreen']); assert.deepEqual(panels, ['bookmarks']);
   assert.ok(items.every(item => item.props.tabIndex === -1));
+});
+
+test('private interface replaces the profile control and explains empty browsing records in both languages', () => {
+  const copy = interfaceModule('src/copy.ts'), actions = [];
+  const { ProfileControl, ProfilesMenu } = interfaceModule('src/Profiles.tsx', { react: {}, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' } });
+  const { EmptyHistory, EmptyDownloads } = interfaceModule('src/EmptyState.tsx', { 'lucide-react': {}, './copy': copy });
+  for (const language of ['en', 'es']) {
+    const profile = { id: 'profile', name: 'Personal', color: 'amber' }, opener = { current: null };
+    const mark = ProfileControl({ profile, privateWindow: true, language, open: null, opener, onClick() { assert.fail('The private mark is passive'); } });
+    assert.equal(mark.type, 'span'); assert.equal(mark.props['aria-label'], copy.text('privateWindow', language)); assert.equal(mark.props.onClick, undefined);
+    assert.equal(notebookNodes(mark, node => node.type === 'button').length, 0);
+    assert.equal(ProfileControl({ profile, privateWindow: false, language, open: null, opener, onClick() {} }).type, 'button');
+    const menu = ProfilesMenu({ state: { profiles: [profile], activeProfileId: profile.id }, language, keyboard: true, opener, onDismiss() {}, onSwitch() {}, onNew() {}, onManage() {}, onPrivate: () => actions.push(language) });
+    const privateAction = notebookNodes(menu, node => node.props.role === 'menuitem').at(-1);
+    assert.equal(privateAction.props.children[1].props.children, copy.text('privateWindow', language)); privateAction.props.onClick();
+    for (const [component, title, reason] of [[EmptyHistory, 'privateHistoryTitle', 'privateHistory'], [EmptyDownloads, 'privateDownloadsTitle', 'privateDownloads']]) {
+      const empty = component({ language, privateWindow: true, onAction() {} }), tree = empty.type(empty.props);
+      assert.equal(notebookNodes(tree, node => node.type === 'h2')[0].props.children, copy.text(title, language));
+      assert.equal(notebookNodes(tree, node => node.type === 'p')[0].props.children, copy.text(reason, language));
+    }
+  }
+  assert.deepEqual(actions, ['en', 'es']);
+});
+
+test('private settings and site controls offer no profile changes or weaker blocking and permissions', () => {
+  const copy = interfaceModule('src/copy.ts');
+  for (const language of ['en', 'es']) {
+    const hooks = notebookTestHooks(), { Settings } = settingsInterface(hooks.react);
+    const state = { privateWindow: true, sites: [], blockAds: true, blockThirdPartyCookies: true, clearingBrowsingData: false };
+    const page = Settings({ state, section: 'profiles', language, onOpen() {} });
+    assert.equal(notebookNodes(page, node => node.props.className?.includes('settings-rail-row') && node.props['aria-label'] === copy.text('profiles', language)).length, 0);
+    assert.equal(notebookNodes(page, node => node.type?.name === 'ProfilesSettings').length, 0);
+    const privacyPage = Settings({ state, section: 'privacy/sites', language, onOpen() {} });
+    const privacy = notebookNodes(privacyPage, node => node.type?.name === 'PrivacySettings')[0];
+    const tree = hooks.render(() => privacy.type(privacy.props));
+    assert.equal(notebookNodes(tree, node => node.type?.name === 'SettingsToggle').length, 0);
+    assert.equal(notebookNodes(privacyPage, node => node.type?.name === 'SitesSettings').length, 0);
+    const shieldHooks = notebookTestHooks(), { ShieldPopover } = interfaceModule('src/SiteControls.tsx', { react: shieldHooks.react, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Switch': { Switch: 'switch' }, './Menu': { Menu: 'menu' } });
+    const shield = shieldHooks.render(() => ShieldPopover({ privateWindow: true, site: { host: 'example.com', blocking: true, dark: true, permissions: { camera: 'allow', microphone: 'allow', location: 'allow', notifications: 'allow' } },
+      counts: { ads: 0, trackers: 0, cookies: 0 }, ready: true, blockAds: true, darkPages: { mode: 'on', active: true, strength: 'standard', tone: 'neutral' }, language, initial: 'E', opener: { current: null }, onDismiss() {}, onTabOut() {}, run: async () => true }));
+    const blocking = notebookNodes(shield, node => node.props.className === 'site-blocking-row')[0];
+    assert.equal(notebookNodes(blocking, node => node.type === 'switch').length, 0);
+    const permissions = notebookNodes(shield, node => node.props.className === 'site-permission-row');
+    assert.equal(permissions.length, 4);
+    for (const row of permissions) { assert.equal(row.type, 'div'); assert.equal(row.props.onClick, undefined); assert.equal(row.props.children[2].props.children, copy.text('permissionBlocked', language)); }
+  }
 });
 
 function browserPanelInterface(hooks, document = {}) {
@@ -4801,10 +4875,10 @@ test('browser panel routes are removed, panels use the menu anchor and all menu 
   const app = readFileSync('src/App.tsx', 'utf8'), menu = readFileSync('src/BrowserMenu.tsx', 'utf8'), panel = readFileSync('src/BrowserPanel.tsx', 'utf8'), { copy } = interfaceModule('src/copy.ts');
   assert.doesNotMatch(app, /className="library-panel"|panel-content|filteredEntries|confirmClearHistory/);
   assert.match(app, /<BrowserPanel[^>]+opener=\{menuButtonRef\}/); assert.match(panel, /<ToolbarPopover opener=\{opener\}/); assert.match(menu, /<ToolbarPopover opener=\{opener\}/);
-  assert.doesNotMatch(menu, /menuitemradio|highContrast|darkPages|newWindow|passwords|extensions/);
+  assert.doesNotMatch(menu, /menuitemradio|highContrast|darkPages|passwords|extensions/);
   assert.match(app, /onClear=\{\(\) => openSettings\('privacy', true\)\}/);
   for (const route of ['horizon://history', 'horizon://bookmarks', 'horizon://downloads']) assert.throws(() => classifyInput(route));
-  for (const key of ['newTab', 'zoom', 'zoomIn', 'zoomOut', 'fullscreen', 'find', 'favorites', 'history', 'downloads', 'settings', 'aboutHorizon', 'appVersion', 'today', 'yesterday', 'downloadSize', 'downloadStateSize', 'downloadRetry', 'downloadRemove', 'downloadDone', 'close']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim(), `${key}: ${language}`);
+  for (const key of ['newTab', 'newWindow', 'newPrivateWindow', 'privateWindow', 'private', 'privateWindowNotice', 'privateBlockingHint', 'privateHistoryTitle', 'privateHistory', 'privateDownloadsTitle', 'privateDownloads', 'zoom', 'zoomIn', 'zoomOut', 'fullscreen', 'find', 'favorites', 'history', 'downloads', 'settings', 'aboutHorizon', 'appVersion', 'today', 'yesterday', 'downloadSize', 'downloadStateSize', 'downloadRetry', 'downloadRemove', 'downloadDone', 'close']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim(), `${key}: ${language}`);
   assert.deepEqual(validateCommand({ type: 'fullscreen' }), { type: 'fullscreen' });
   assert.deepEqual(validateCommand({ type: 'retry-download', id: 'download' }), { type: 'retry-download', id: 'download' });
   for (const command of [{ type: 'fullscreen', enabled: true }, { type: 'retry-download' }, { type: 'retry-download', id: '', url: 'https://example.com/' }, { type: 'retry-download', id: 'download', path: '/private' }]) assert.throws(() => validateCommand(command));
@@ -5321,8 +5395,9 @@ test('downloads ask dialog is parented, cancellation leaves ledger empty and tru
   const fifth = item(); target.emit('will-download', { preventDefault() { assert.fail('Fallback folder refused'); } }, fifth, contents); assert.equal(require('node:path').dirname(fifth.path), join(browser.directory, 'downloads')); assert.equal(browser.state().downloadsFolderUnavailable, true); assert.equal(browser.state().downloadsFolderDefault, true);
 });
 
-test('quit clears flagged unopened profiles under one five-second deadline and keeps unflagged profile history', async t => {
-  const options = { clear: name => name === 'clearCache' ? new Promise(() => {}) : undefined }, browser = notebookBrowser(t, plainCipher, options);
+test('quit awaits flagged unopened profile caches and keeps unflagged profile history', async t => {
+  let complete;
+  const options = { clear: name => name === 'clearCache' ? new Promise(resolve => { complete = resolve; }) : undefined }, browser = notebookBrowser(t, plainCipher, options);
   browser.navigate(); const active = browser.state().activeProfileId, unopened = browser.state().profiles.find(profile => profile.id !== active);
   const unopenedStore = sampleStore(browser.directory); unopenedStore.clearHistoryOnClose = true; unopenedStore.clearCacheOnClose = true;
   writeStore(profileStorePath(browser.directory, unopened.id), unopenedStore);
@@ -5331,10 +5406,211 @@ test('quit clears flagged unopened profiles under one five-second deadline and k
   await Promise.resolve(); await Promise.resolve();
   assert.equal(readStore(profileStorePath(browser.directory, unopened.id)).history.length, 0);
   assert.equal(readStore(profileStorePath(browser.directory, active)).history.length, 1);
-  assert.equal([...browser.timers.values()].filter(timer => timer.delay === 5000).length, 1);
-  fireTimers(browser.timers, 5000); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal([...browser.timers.values()].filter(timer => timer.delay === 5000).length, 0);
+  assert.equal(browser.app.quits, undefined); assert.throws(() => browser.command({ type: 'new-tab' }), /closing/);
+  complete(); await new Promise(setImmediate);
   assert.equal(browser.app.quits, 1);
 });
+test('window session migration preserves encrypted v1 payloads and validates every window', t => {
+  const { readWindowSessions, writeWindowSessions, validateWindowSessions, LEGACY_WINDOW_ID } = require('../dist/electron/session-store.js');
+  const directory = temporaryDirectory(t, 'window-sessions'), path = join(directory, 'session.json'), cipher = authenticatedCipher(), status = { readError: false, memoryOnly: false };
+  const legacy = { version: 1, tabs: [sessionTab()], active: 0, closed: [{ ...sessionTab('https://closed.example/'), position: 0 }] };
+  writeSession(path, legacy, cipher);
+  const migrated = readWindowSessions(path, cipher, () => false, status);
+  assert.deepEqual(migrated, { version: 2, windows: [{ id: LEGACY_WINDOW_ID, selected: false, session: legacy }] });
+  assert.equal(require('../dist/electron/store.js').readStoreFile(path, cipher).version, 2);
+  assert.equal(readFileSync(path).includes(Buffer.from('example.com')), false);
+  migrated.windows.push({ id: randomUUID(), selected: true, session: { version: 1, tabs: [sessionTab('https://second.example/')], active: 0, closed: [] } });
+  writeWindowSessions(path, migrated, cipher); assert.deepEqual(readWindowSessions(path, cipher, () => false, status), migrated);
+  for (const change of [value => { value.version = 1; }, value => { value.extra = true; }, value => { value.windows = new Array(201); }, value => { value.windows[1].id = value.windows[0].id; }, value => { value.windows[0].id = '../escape'; }, value => { value.windows[0].privateWindow = true; }, value => { value.windows[0].selected = 1; }, value => { value.windows[0].session.active = 99; }]) {
+    const invalid = structuredClone(migrated); change(invalid); assert.equal(validateWindowSessions(invalid), false); assert.throws(() => writeWindowSessions(path, invalid, cipher));
+  }
+  const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/session-store.js'), localRequire = require('node:module').createRequire(filename), exported = {};
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === './store' ? { ...localRequire(name), writeStoreFile() { throw new Error('Synthetic write failure'); } } : localRequire(name));
+  writeSession(path, legacy, cipher); const bytes = readFileSync(path), failed = { readError: false, memoryOnly: false };
+  assert.deepEqual(exported.readWindowSessions(path, cipher, () => false, failed).windows[0].session, legacy);
+  assert.deepEqual(readFileSync(path), bytes); assert.equal(failed.memoryOnly, true); assert.equal(readdirSync(directory).length, 1);
+});
+
+test('private blocking policy forces filters and third-party cookies independently of every preference', () => {
+  const { blockingPolicy } = require('../dist/electron/blocking.js');
+  const { recordsBrowsing } = require('../dist/electron/store.js');
+  assert.equal(recordsBrowsing(true), false); assert.equal(recordsBrowsing(false), true);
+  for (const ads of [false, true]) for (const cookies of [false, true]) for (const site of [false, true]) {
+    assert.deepEqual(blockingPolicy(true, ads, cookies, site), { filters: true, thirdPartyCookies: true });
+    assert.deepEqual(blockingPolicy(false, ads, cookies, site), { filters: ads && site, thirdPartyCookies: cookies && site });
+  }
+});
+
+test('normal windows own tabs and profile selection, share profile favorites and route native handlers', async t => {
+  const cipher = authenticatedCipher(), first = notebookBrowser(t, cipher), second = first.addWindow({ profileId: first.state().activeProfileId, fresh: true });
+  first.navigate('https://first.example/'); second.navigate('https://second.example/');
+  const firstContents = first.views[0].webContents, secondContents = first.views[1].webContents, target = firstContents.session;
+  assert.equal(secondContents.session, target); assert.equal(first.isProfileSession(target), true);
+  assert.deepEqual(first.state().tabs.map(tab => tab.url), ['https://first.example/']); assert.deepEqual(second.state().tabs.map(tab => tab.url), ['https://second.example/']);
+  first.command({ type: 'bookmark' }); assert.equal(second.state().store.favorites.bar[0].url, 'https://first.example/');
+  let allowed; target.request(secondContents, 'notifications', value => { allowed = value; }, {});
+  assert.equal(first.state().permissionPrompt, null); assert.equal(second.state().permissionPrompt.origin, 'https://second.example');
+  second.command({ type: 'answer-permission', id: second.state().permissionPrompt.id, answer: 'block' }); assert.equal(allowed, false);
+  const profile = first.state().activeProfileId, other = first.state().profiles.find(profile => profile.id !== first.state().activeProfileId).id;
+  first.command({ type: 'switch-profile', id: other }); assert.equal(second.state().activeProfileId, profile); assert.equal(second.state().tabs[0].url, 'https://second.example/');
+  first.command({ type: 'switch-profile', id: profile }); assert.equal(first.state().tabs[0].url, 'https://first.example/');
+  first.command({ type: 'new-window' }); assert.equal(first.children[0].state().activeProfileId, profile); assert.deepEqual(first.children[0].state().tabs.map(tab => tab.url), ['']);
+  first.children[0].close();
+  const { EventEmitter } = require('node:events'), item = Object.assign(new EventEmitter(), { getURL: () => 'https://second.example/download', getFilename: () => 'file.txt', getTotalBytes: () => 1, getReceivedBytes: () => 1, setSavePath(path) { this.path = path; }, cancel() {} });
+  target.emit('will-download', { preventDefault() { assert.fail('A foreign window listener cancelled this download'); } }, item, secondContents);
+  assert.ok(item.path); item.emit('done', {}, 'completed');
+  first.close(); assert.equal(first.isProfileSession(target), true); second.command({ type: 'new-tab' }); assert.equal(second.state().tabs.length, 2);
+  second.close(); assert.equal(first.isProfileSession(target), false);
+  await new Promise(setImmediate);
+});
+
+test('temporary browser stores close every owner before their directories are removed', t => {
+  const browser = notebookBrowser(t, authenticatedCipher());
+  browser.addWindow({ fresh: true }); browser.addWindow({ privateWindow: true });
+  browser.command({ type: 'create-project', name: 'Cleanup' });
+  assert.equal(existsSync(browser.directory), true);
+  t.after(() => assert.equal(existsSync(browser.directory), false));
+});
+
+test('peer profile deletion and unrelated settings preserve local tabs and blocked counts', async t => {
+  const blocker = { ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => ({ kind: 'trackers' }) };
+  const first = notebookBrowser(t, authenticatedCipher(), { blocker }), second = first.addWindow({ fresh: true });
+  const profile = first.state().activeProfileId, unused = first.state().profiles.find(entry => entry.id !== profile).id;
+  second.command({ type: 'create-profile', name: 'Third', color: 'blue' });
+  const third = second.state().activeProfileId, peerTab = second.state().activeId;
+  await first.command({ type: 'delete-profile', id: unused });
+  assert.equal(first.state().activeProfileId, profile); assert.equal(first.state().profiles.find(entry => entry.id === third).tabCount, 0);
+  assert.equal(second.state().activeProfileId, third); assert.equal(second.state().activeId, peerTab);
+  first.navigate(); const contents = first.views.at(-1).webContents;
+  contents.session.onBeforeRequest({ id: 1, url: 'https://tracker.example/script', resourceType: 'script', webContentsId: contents.id }, () => {});
+  assert.equal(first.state().tabs[0].blocked.trackers, 1);
+  first.command({ type: 'set-language', value: 'es' }); first.browser.settingsChanged();
+  assert.equal(first.state().tabs[0].blocked.trackers, 1);
+});
+
+test('all normal window sessions restore their own parked profile tabs and selected profile', t => {
+  const cipher = authenticatedCipher(), first = notebookBrowser(t, cipher), profile = first.state().activeProfileId, other = first.state().profiles.find(entry => entry.id !== profile).id;
+  first.navigate('https://personal-one.example/'); first.command({ type: 'switch-profile', id: other }); first.navigate('https://work-one.example/');
+  const second = first.addWindow({ profileId: profile, fresh: true }); second.navigate('https://personal-two.example/');
+  first.app.emit('before-quit', { preventDefault() {} });
+  const registry = readRegistry(join(first.directory, 'profiles.json'), 'en'), windows = first.restoredWindows(first.directory, registry);
+  assert.deepEqual(new Map(windows.map(window => [window.id, window.profileId])), new Map([[first.browser.windowId, other], [second.browser.windowId, profile]]));
+  first.close(); second.close();
+  const restored = notebookBrowser(t, cipher, { directory: first.directory, browserOptions: { id: windows[0].id, profileId: windows[0].profileId } });
+  const peer = restored.addWindow({ id: windows[1].id, profileId: windows[1].profileId });
+  assert.equal(restored.state().tabs[0].url, 'https://work-one.example/'); assert.equal(peer.state().tabs[0].url, 'https://personal-two.example/');
+  restored.command({ type: 'switch-profile', id: profile }); assert.equal(restored.state().tabs[0].url, 'https://personal-one.example/');
+});
+
+test('closing a normal peer removes its saved ID from unopened parked profiles too', t => {
+  const cipher = authenticatedCipher(), first = notebookBrowser(t, cipher), peer = first.addWindow({ fresh: true }), unopened = first.state().profiles.find(profile => profile.id !== first.state().activeProfileId);
+  const { writeWindowSessions, readWindowSessions } = require('../dist/electron/session-store.js');
+  const path = join(first.directory, 'profiles', unopened.id, 'session.json');
+  writeWindowSessions(path, { version: 2, windows: [{ id: peer.browser.windowId, selected: false, session: { version: 1, tabs: [sessionTab('https://parked.example/')], active: 0, closed: [] } }] }, cipher);
+  peer.close(); assert.deepEqual(readWindowSessions(path, cipher, () => false, { readError: false, memoryOnly: false }).windows, []);
+});
+
+test('moving a tab preserves its ID and safe native history without recording a closed tab', async t => {
+  const cipher = authenticatedCipher(), first = notebookBrowser(t, cipher), second = first.addWindow({ fresh: true }); first.navigate();
+  const tab = first.state().activeId, contents = first.views[0].webContents;
+  contents.entries = sessionTab('https://example.com/', 'Moved').entries; contents.entryIndex = 1;
+  first.browser.moveTab(tab, second.browser.windowId);
+  assert.equal(first.state().canReopenTab, false); assert.equal(first.state().tabs[0].url, ''); assert.equal(second.state().activeId, tab);
+  assert.deepEqual(first.views.at(-1).webContents.restored, { entries: contents.entries, index: 1 }); assert.equal(contents.isDestroyed(), true);
+  const privatePeer = first.addWindow({ privateWindow: true }); assert.throws(() => second.browser.moveTab(tab, privatePeer.browser.windowId), /destination/);
+  const otherProfile = first.state().profiles.find(profile => profile.id !== first.state().activeProfileId).id, otherPrivate = first.addWindow({ privateWindow: true, profileId: otherProfile });
+  assert.throws(() => privatePeer.browser.moveTab(privatePeer.state().activeId, otherPrivate.browser.windowId), /profile/);
+  await new Promise(setImmediate);
+});
+
+test('moving an authorized local HTML tab carries only its exact file authorization', async t => {
+  const first = notebookBrowser(t, authenticatedCipher()), peer = first.addWindow({ fresh: true });
+  const html = join(first.directory, 'page.html'), other = join(first.directory, 'other.html');
+  writeFileSync(html, '<html></html>'); writeFileSync(other, '<html></html>');
+  const url = require('node:url').pathToFileURL(html).href, otherURL = require('node:url').pathToFileURL(other).href;
+  first.openLaunch(url);
+  const contents = first.views.at(-1).webContents, id = first.state().activeId;
+  contents.entries = [{ url: 'https://example.com/', title: 'Before' }, { url, title: 'Local' }]; contents.entryIndex = 1;
+  first.browser.moveTab(id, peer.browser.windowId);
+  const moved = first.views.at(-1).webContents;
+  assert.equal(peer.state().activeId, id); assert.equal(peer.state().tabs.at(-1).url, url); assert.equal(contents.isDestroyed(), true);
+  assert.deepEqual(moved.restored, { entries: contents.entries, index: 1 });
+  assert.equal(first.isLaunchNavigation(moved, url), true); assert.equal(first.isLaunchNavigation(moved, otherURL), false);
+  moved.session.onBeforeRequest({ id: 1, url, resourceType: 'mainFrame', webContentsId: moved.id }, result => assert.equal(result.cancel, false));
+  moved.session.onBeforeRequest({ id: 2, url: otherURL, resourceType: 'mainFrame', webContentsId: moved.id }, result => assert.equal(result.cancel, true));
+  await new Promise(setImmediate);
+});
+
+test('private windows share an ephemeral session, force strict handlers and never record browsing', async t => {
+  const cipher = authenticatedCipher(), blocker = { ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => ({ kind: 'trackers' }) };
+  const normal = notebookBrowser(t, cipher, { blocker }); normal.navigate('https://normal.example/'); normal.command({ type: 'set-block-ads', value: false }); normal.command({ type: 'set-block-third-party-cookies', value: false });
+  fireTimers(normal.timers, 500);
+  const profile = normal.state().activeProfileId, path = profileStorePath(normal.directory, profile), sessionPath = join(normal.directory, 'profiles', profile, 'session.json'), normalSession = require('../dist/electron/store.js').readStoreFile(sessionPath, cipher);
+  normal.command({ type: 'new-private-window' }); const first = normal.children[0], second = normal.addWindow({ profileId: profile, privateWindow: true, fresh: true });
+  assert.equal(first.state().privateWindow, true); assert.deepEqual(first.state().tabs.map(tab => tab.url), ['']);
+  first.navigate('https://private.example/typed'); const contents = normal.views.at(-1).webContents, target = contents.session;
+  second.navigate('https://private-two.example/'); assert.equal(normal.views.at(-1).webContents.session, target);
+  assert.ok([...normal.sessions].find(([, value]) => value === target)[0].startsWith('private-'));
+  assert.equal(first.state().blockAds, true); assert.equal(first.state().blockThirdPartyCookies, true);
+  for (const permission of ['media', 'geolocation', 'notifications', 'clipboard-read', 'unknown']) target.request(contents, permission, allowed => assert.equal(allowed, false), { mediaTypes: ['audio', 'video'] });
+  target.request(contents, 'fullscreen', allowed => assert.equal(allowed, true), {}); assert.equal(target.check(null, 'notifications', 'https://private.example', {}), false);
+  assert.equal(first.state().permissionPrompt, null); assert.deepEqual(first.state().siteSettings.permissions, { camera: 'block', microphone: 'block', location: 'block', notifications: 'block' });
+  target.onBeforeRequest({ id: 44, url: 'https://tracker.example/script', resourceType: 'script', webContentsId: contents.id }, result => assert.equal(result.cancel, true));
+  target.onBeforeSendHeaders({ id: 44, url: 'https://tracker.example/script', resourceType: 'script', webContentsId: contents.id, requestHeaders: { Cookie: 'a=1' } }, result => assert.deepEqual(result.requestHeaders, {}));
+  target.onHeadersReceived({ id: 44, url: 'https://tracker.example/script', resourceType: 'script', webContentsId: contents.id, responseHeaders: { 'Set-Cookie': ['a=1'] } }, result => assert.deepEqual(result.responseHeaders, {}));
+  contents.emit('page-title-updated', {}, 'Private title'); first.command({ type: 'new-tab', input: 'https://another-private.example/' }); first.command({ type: 'close-tab', id: first.state().activeId });
+  assert.equal(first.state().canReopenTab, false); assert.deepEqual(first.state().store.history, []); assert.deepEqual(first.state().store.siteSettings.permissions, []);
+  assert.throws(() => first.command({ type: 'switch-profile', id: profile }), /fixed/); assert.throws(() => first.command({ type: 'set-blocking', enabled: false }), /fixed/); assert.throws(() => first.command({ type: 'set-site-permission', permission: 'camera', decision: 'allow' }), /fixed/);
+  first.command({ type: 'open-settings', section: 'profiles' }); assert.equal(first.state().tabs.find(tab => tab.id === first.state().activeId).settings, 'general'); first.command({ type: 'close-tab', id: first.state().activeId });
+  const { EventEmitter } = require('node:events'), item = Object.assign(new EventEmitter(), { getURL: () => 'https://private.example/file', getFilename: () => 'private-file.txt', getTotalBytes: () => 1, getReceivedBytes: () => 1, setSavePath(path) { this.path = path; }, cancel() {} });
+  target.emit('will-download', { preventDefault() { assert.fail('Private intentional file download refused'); } }, item, contents);
+  writeFileSync(item.path, 'downloaded file'); item.emit('updated', {}, 'progressing'); item.emit('done', {}, 'completed');
+  assert.deepEqual(first.state().store.downloads, []); assert.deepEqual(normal.state().store.downloads, []);
+  first.command({ type: 'bookmark' }); assert.equal(normal.state().store.favorites.bar[0].url, 'https://private.example/typed');
+  const capture = await first.command({ type: 'take-capture' }); assert.ok(capture.id); assert.equal(normal.state().captures.length, 1);
+  fireTimers(normal.timers, 500);
+  assert.deepEqual(readStore(path, cipher).history.map(entry => entry.url), ['https://normal.example/']); assert.deepEqual(readStore(path, cipher).downloads, []); assert.deepEqual(readStore(path, cipher).siteSettings.permissions, []);
+  assert.deepEqual(require('../dist/electron/store.js').readStoreFile(sessionPath, cipher), normalSession);
+  first.close(); await new Promise(setImmediate); assert.deepEqual(target.cleared, []); assert.equal(normal.isProfileSession(target), true);
+  second.close(); await new Promise(setImmediate); assert.ok(target.cleared.some(([name]) => name === 'clearStorageData')); assert.ok(target.cleared.some(([name]) => name === 'clearCache')); assert.equal(normal.isProfileSession(target), false); assert.equal(existsSync(item.path), true);
+  const next = normal.addWindow({ privateWindow: true, profileId: profile }); next.navigate(); assert.notEqual(normal.views.at(-1).webContents.session, target);
+  normal.command({ type: 'new-tab' });
+});
+
+test('private requests fail closed until filter initialization and unknown workers keep strict cookies', t => {
+  const blocker = { ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }, normal = notebookBrowser(t, plainCipher, { blocker }), privatePeer = normal.addWindow({ privateWindow: true });
+  privatePeer.navigate(); const contents = normal.views.at(-1).webContents, target = contents.session;
+  target.onBeforeRequest({ id: 1, url: 'https://example.com/script', resourceType: 'script', webContentsId: contents.id }, result => assert.equal(result.cancel, true));
+  blocker.ready = true;
+  target.onBeforeSendHeaders({ id: 2, url: 'https://worker.example/', resourceType: 'script', requestHeaders: { Cookie: 'a=1', Accept: 'text/plain' } }, result => assert.deepEqual(result.requestHeaders, { Accept: 'text/plain' }));
+  target.onHeadersReceived({ id: 2, url: 'https://worker.example/', resourceType: 'script', responseHeaders: { 'Set-Cookie': ['a=1'], Vary: ['Accept'] } }, result => assert.deepEqual(result.responseHeaders, { Vary: ['Accept'] }));
+});
+
+test('history close setting clears only flagged encrypted stores and rolls back a failed write', t => {
+  const { clearStoredHistoryOnClose } = require('../dist/electron/store.js'), directory = temporaryDirectory(t, 'clear-history-on-close'), cipher = authenticatedCipher();
+  for (const history of [false, true]) for (const cache of [false, true]) {
+    const path = join(directory, `${history}-${cache}.json`), store = sampleStore(directory); store.clearHistoryOnClose = history; store.clearCacheOnClose = cache; writeStore(path, store, cipher);
+    clearStoredHistoryOnClose(path, store, cipher); assert.equal(readStore(path, cipher).history.length, history ? 0 : 1); assert.equal(readStore(path, cipher).clearCacheOnClose, cache); assert.equal(readFileSync(path).includes(Buffer.from('example.com')), false);
+  }
+  const path = join(directory, 'failed.json'), store = sampleStore(directory); store.clearHistoryOnClose = true; writeStore(path, store, cipher); const bytes = readFileSync(path), previous = structuredClone(store.history);
+  assert.throws(() => clearStoredHistoryOnClose(path, store, cipher, () => { throw new Error('Disk failure'); })); assert.deepEqual(store.history, previous); assert.deepEqual(readFileSync(path), bytes);
+});
+
+test('normal peer close leaves history and caches alone; app quit clears once and awaits private teardown', async t => {
+  let complete;
+  const cipher = authenticatedCipher();
+  const options = { clear: (name, target) => name === 'clearCache' && target.partition.startsWith('persist:') ? new Promise(resolve => { complete = resolve; }) : undefined }, normal = notebookBrowser(t, cipher, options), peer = normal.addWindow({ fresh: true });
+  normal.navigate(); normal.command({ type: 'set-clear-history-on-close', value: true }); normal.command({ type: 'set-clear-cache-on-close', value: true });
+  const target = normal.views[0].webContents.session, profile = normal.state().activeProfileId, path = profileStorePath(normal.directory, profile);
+  peer.close(); assert.equal(normal.state().store.history.length, 1); assert.deepEqual(target.cleared, []);
+  const privatePeer = normal.addWindow({ privateWindow: true }); privatePeer.navigate(); const privateTarget = normal.views.at(-1).webContents.session;
+  let prevented = 0; normal.app.emit('before-quit', { preventDefault() { prevented++; } });
+  await Promise.resolve(); await Promise.resolve(); assert.equal(prevented, 2); assert.equal(readStore(path, cipher).history.length, 0);
+  assert.equal(normal.app.quits, undefined); assert.equal(target.cleared.filter(([name]) => name === 'clearCache').length, 1); assert.ok(privateTarget.cleared.some(([name]) => name === 'clearStorageData'));
+  options.clear = undefined; complete(); await new Promise(setImmediate); assert.equal(normal.app.quits, 1);
+});
+
 test('default browser registers exact current-user arrays, opens fixed settings URI and refreshes status', async () => {
   const { createDefaultBrowser } = require('../dist/electron/default-browser.js');
   const calls = [], opened = [], changes = [], exe = 'C:\\Program Files\\Horizon\\Horizon.exe';
@@ -5410,17 +5686,23 @@ test('local HTML launch authorizes only its exact tab main-frame URL and survive
 function settingsMain(t, options) {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm'), filename = resolve('dist/electron/main.js'), localRequire = require('node:module').createRequire(filename), directory = temporaryDirectory(t, 'settings-main'), windows = [], launches = [], handlers = new Map();
   const app = Object.assign(new EventEmitter(), { isPackaged: true, requestSingleInstanceLock: () => options.lock !== false, getLocale: () => 'es-AR', getVersion: () => '0.1.0-test', getPath: () => directory, enableSandbox() {}, whenReady: async () => {}, commandLine: { appendSwitch() {}, removeSwitch() {} }, quit() { this.quits = (this.quits || 0) + 1; }, exit() { assert.fail('Mock main failed'); } });
-  const settings = { theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', migrationAllowed: false, language: 'en' };
+  const settings = { theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', migrationAllowed: false, language: 'en', onStart: options.onStart ?? 'restore' };
+  const primary = { workAreaSize: { width: 1440, height: 900 }, workArea: { x: 0, y: 0, width: 1440, height: 900 } }, secondary = options.display ?? primary;
   class Window extends EventEmitter {
-    constructor() { super(); windows.push(this); this.webContents = new EventEmitter(); this.minimized = true; }
-    isDestroyed() { return false; } isMinimized() { return this.minimized; } restore() { this.minimized = false; this.restored = true; }
+    constructor(windowOptions) { super(); windows.push(this); this.options = windowOptions; this.webContents = new EventEmitter(); this.webContents.mainFrame = { url: 'horizon://app/' }; this.minimized = true; }
+    isDestroyed() { return !!this.destroyed; } isMinimized() { return this.minimized; } restore() { this.minimized = false; this.restored = true; }
+    getBounds() { return this.bounds ?? { x: 20, y: 20, width: this.options.width, height: this.options.height }; }
+    close() { this.destroyed = true; this.emit('closed'); }
     removeMenu() {} setBackgroundColor() {} show() { this.shown = true; } focus() { this.focused = true; }
     async loadURL() { if (options.stall) await new Promise(done => { options.finish = done; }); this.loaded = true; }
   }
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname', 'process'])({}, name => {
-    if (name === 'electron') return { app, BrowserWindow: Window, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), protocol: { registerSchemesAsPrivileged() {} }, screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1440, height: 900 } }) }, session: { defaultSession: { protocol: {} } }, ipcMain: { handle(name, fn) { handlers.set(name, fn); } } };
+    if (name === 'electron') return { app, BrowserWindow: Window, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), protocol: { registerSchemesAsPrivileged() {} }, screen: { getPrimaryDisplay: () => primary, getDisplayMatching: () => secondary }, safeStorage: plainCipher, session: { defaultSession: { protocol: {} } }, ipcMain: { handle(name, fn) { handlers.set(name, fn); } } };
     if (name === './settings') return { ...localRequire(name), createSettings: () => settings };
-    if (name === './browser') return { createBrowser: () => ({ layout() {}, openLaunch(url) { if (options.launchFail) throw new Error('Tab limit reached'); launches.push(url); } }), isProfileSession: () => false, isLaunchNavigation: () => false };
+    if (name === './browser') return { restoredWindows: () => options.restoreWindows ?? [], createBrowser: (window, _userData, _downloads, _settings, registry, _defaultBrowser, browserOptions) => {
+      window.browserOptions = browserOptions;
+      return { privateWindow: browserOptions.privateWindow, activeProfile: () => browserOptions.profileId, registry: () => registry, layout() {}, openLaunch(url) { if (options.launchFail) throw new Error('Tab limit reached'); launches.push(url); } };
+    }, isProfileSession: () => false, isLaunchNavigation: () => false };
     if (name === './protocol') return { serveHorizon: async () => {} };
     if (name === './security') return { ...localRequire(name), secureSession() {}, validateSender() {} };
     return localRequire(name);
@@ -5440,7 +5722,25 @@ test('main holds startup and second-instance URLs until chrome loads, restores a
   const count = main.launches.length; main.app.emit('second-instance', {}, ['--flag', 'javascript:alert(1)'], main.directory); assert.equal(main.launches.length, count);
   main.windows[0].minimized = true; main.windows[0].focused = false; main.app.emit('second-instance', {}, ['--flag'], main.directory); assert.equal(main.windows[0].minimized, false); assert.equal(main.windows[0].focused, true);
   options.launchFail = true; main.windows[0].focused = false; assert.doesNotThrow(() => main.app.emit('second-instance', {}, ['https://capped.example/'], main.directory)); assert.equal(main.windows[0].focused, true);
-  assert.equal(main.handlers.get('horizon:language')({}), 'en'); main.settings.language = 'system'; assert.equal(main.handlers.get('horizon:language')({}), 'es');
+  const event = { sender: main.windows[0].webContents, senderFrame: main.windows[0].webContents.mainFrame };
+  assert.equal(main.handlers.get('horizon:language')(event), 'en'); main.settings.language = 'system'; assert.equal(main.handlers.get('horizon:language')(event), 'es');
+});
+test('main creates default-sized offset normal and private windows, routes chrome and restores every normal owner', async t => {
+  const main = settingsMain(t, {}); await new Promise(setImmediate);
+  const first = main.windows[0], profile = first.browserOptions.profileId;
+  first.browserOptions.openWindow(profile, false, first); await new Promise(setImmediate);
+  const second = main.windows[1]; assert.deepEqual([second.options.width, second.options.height], [1296, 810]); assert.deepEqual([second.options.x, second.options.y], [52, 52]); assert.equal(second.browserOptions.fresh, true); assert.equal(second.browserOptions.privateWindow, false);
+  first.browserOptions.openWindow(profile, true, first); await new Promise(setImmediate); const privateWindow = main.windows[2]; assert.equal(privateWindow.browserOptions.privateWindow, true); assert.equal(privateWindow.browserOptions.profileId, profile);
+  main.handlers.get('horizon:window-action')({ sender: second.webContents }, 'close'); assert.equal(second.destroyed, true); assert.equal(first.destroyed, undefined); assert.equal(privateWindow.destroyed, undefined);
+  assert.throws(() => main.handlers.get('horizon:language')({ sender: {} }), /Unknown/);
+  first.close(); main.app.emit('second-instance', {}, ['https://normal-launch.example/'], main.directory); await new Promise(setImmediate);
+  assert.equal(main.windows.at(-1).browserOptions.privateWindow, false); assert.equal(main.launches.at(-1), 'https://normal-launch.example/');
+  const ids = [{ id: randomUUID(), profileId: randomUUID() }, { id: randomUUID(), profileId: randomUUID() }], restored = settingsMain(t, { restoreWindows: ids }); await new Promise(setImmediate);
+  assert.deepEqual(restored.windows.map(window => [window.browserOptions.id, window.browserOptions.profileId, window.browserOptions.fresh]), ids.map(window => [window.id, window.profileId, false]));
+  const startup = settingsMain(t, { restoreWindows: ids, onStart: 'new-page' }); await new Promise(setImmediate); assert.equal(startup.windows.length, 1); assert.equal(startup.windows[0].browserOptions.id, ids[0].id); assert.equal(startup.windows[0].browserOptions.fresh, false);
+  const display = { workAreaSize: { width: 1000, height: 700 }, workArea: { x: 1440, y: 40, width: 1000, height: 700 } }, clamped = settingsMain(t, { display }); await new Promise(setImmediate);
+  const origin = clamped.windows[0]; origin.bounds = { x: 2430, y: 730, width: 1000, height: 700 }; origin.browserOptions.openWindow(origin.browserOptions.profileId, false, origin); await new Promise(setImmediate);
+  assert.deepEqual([clamped.windows[1].options.width, clamped.windows[1].options.height, clamped.windows[1].options.x, clamped.windows[1].options.y], [900, 630, 1540, 110]);
 });
 test('context selection searches use every chosen engine prefix', t => {
   const browser = notebookBrowser(t), { command, state } = browser; browser.navigate();

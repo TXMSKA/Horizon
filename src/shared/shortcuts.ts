@@ -6,6 +6,7 @@ export function browserShortcut(input: ShortcutInput): BrowserShortcut | null {
   const key = input.key.toLowerCase();
   if (input.meta) return null;
   if (input.control && !input.alt) {
+    if (key === 'n') return input.shift ? 'new-private-window' : 'new-window';
     if (key === 'tab') return input.shift ? 'previous-tab' : 'next-tab';
     if (!input.shift && key === 'pagedown') return 'next-tab';
     if (!input.shift && key === 'pageup') return 'previous-tab';
@@ -38,14 +39,14 @@ export function browserShortcut(input: ShortcutInput): BrowserShortcut | null {
 }
 
 export function browserReservedShortcut(shortcut: BrowserShortcut | null, fullscreen = false): boolean {
-  if (shortcut === 'fullscreen' || fullscreen && shortcut === 'stop') return true;
+  if (shortcut === 'new-window' || shortcut === 'new-private-window' || shortcut === 'fullscreen' || fullscreen && shortcut === 'stop') return true;
   if (!shortcut || fullscreen) return false;
   // Chromium keeps tab management outside the document's keyboard handlers.
   return ['new-tab', 'close-tab', 'reopen-tab', 'next-tab', 'previous-tab'].includes(shortcut) || /^tab-[1-9]$/.test(shortcut);
 }
 
 export function browserShortcutAccelerators() {
-  const keys = ['Tab', 'PageDown', 'PageUp', 'F5', 'R', 'G', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '=', '-', '0', 'S', 'O', 'T', 'Delete', 'L', 'E', 'K', 'F4', 'P', 'W', 'H', 'J', 'D', 'F', 'ArrowLeft', 'ArrowRight', 'Home', 'F3', 'F11', 'F6', 'Escape'];
+  const keys = ['Tab', 'PageDown', 'PageUp', 'F5', 'R', 'G', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '=', '-', '0', 'S', 'O', 'T', 'N', 'Delete', 'L', 'E', 'K', 'F4', 'P', 'W', 'H', 'J', 'D', 'F', 'ArrowLeft', 'ArrowRight', 'Home', 'F3', 'F11', 'F6', 'Escape'];
   const names: Record<string, string> = { '+': 'Plus', ArrowLeft: 'Left', ArrowRight: 'Right' };
   const accelerators: { accelerator: string; shortcut: BrowserShortcut; input: ShortcutInput }[] = [];
   for (const key of keys) for (const control of [false, true]) for (const alt of [false, true]) for (const shift of [false, true]) {

@@ -7,7 +7,7 @@ import { IPC, SEARCH_ENGINES } from '../src/shared/api';
 import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } from '../src/shared/shortcuts';
 import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName, settingsAddress, settingsSection } from './browsing';
-import { readStore, reserveDownloadPath, writeStore } from './store';
+import { clearStoredHistoryOnClose, readStore, recordsBrowsing, reserveDownloadPath, writeStore } from './store';
 import { validateSender } from './security';
 import { validateCommand, validateContentArea } from './commands';
 import { fetchFavicon } from './favicon';
@@ -15,11 +15,10 @@ import type { ThemeSettings } from './settings';
 import { resolvedDownloadsFolder, resolveLanguage } from './settings';
 import { createDefaultBrowser } from './default-browser';
 import { isLocalHTMLURL } from './launch';
-import { clearBeforeDeadline } from './browsing-data';
 import { PageMenuSession } from './context-menu';
 import { cleanupPartitions, isProfileId, makeProfile, migrateStore, PROFILE_LIMIT, profileName, profileStorePath, readRegistry, removeProfileDirectory, writeRegistry } from './profiles';
 import type { ProfileRegistry } from './profiles';
-import { createBlockingEngine } from './blocking';
+import { blockingPolicy, createBlockingEngine } from './blocking';
 import { listSites, PermissionQueue, requestedPermissions, resetSite, secureOrigin, setBlocking, setPermission, setSiteDark, siteHost, siteSettings, stripCookieHeaders } from './site-settings';
 import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages';
 import { desktopInputText } from '../src/shared/desktop-input';
@@ -28,26 +27,107 @@ import { captureWholePage, deadline, pngSize } from './captures';
 import { validCaptureRect } from '../src/shared/capture';
 import { addFavorite, createFavoriteFolder, deletedFavorite, favoriteDestination, favoriteLinks, favoriteLocation, favoriteName, favoriteTitle, moveFavorite, restoreFavorite } from './favorites';
 import type { DeletedFavorite } from './favorites';
-import { lazySession, readSession, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeSession } from './session-store';
-import type { SessionTab } from './session-store';
+import { emptySession, lazySession, LEGACY_WINDOW_ID, readWindowSessions, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeWindowSessions } from './session-store';
+import type { SessionTab, WindowSessions } from './session-store';
 
 interface Tab { restore?: SessionTab; restoring?: SessionTab; state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
 
 
 const profileSessions = new Set<Session>();
+const downloadPaths = new Set<string>();
 export const isProfileSession = (target: Session): boolean => profileSessions.has(target);
 const launchURLs = new WeakMap<WebContents, string>();
 export const isLaunchNavigation = (contents: WebContents, url: string): boolean => launchURLs.get(contents) === url && isLocalHTMLURL(url);
 
-export function createBrowser(window: BrowserWindow, userData: string, downloads: string, settings: ThemeSettings, initialRegistry?: ProfileRegistry, defaultBrowserOverride?: ReturnType<typeof createDefaultBrowser>) {
+interface SessionOwner {
+  owns(contents: WebContents | number | null | undefined): boolean;
+  request?: NonNullable<Parameters<Session['setPermissionRequestHandler']>[0]>;
+  check?: NonNullable<Parameters<Session['setPermissionCheckHandler']>[0]>;
+  before?: NonNullable<Parameters<Session['webRequest']['onBeforeRequest']>[0]>;
+  send?: NonNullable<Parameters<Session['webRequest']['onBeforeSendHeaders']>[0]>;
+  receive?: NonNullable<Parameters<Session['webRequest']['onHeadersReceived']>[0]>;
+  completed?: NonNullable<Parameters<Session['webRequest']['onCompleted']>[0]>;
+  failed?: NonNullable<Parameters<Session['webRequest']['onErrorOccurred']>[0]>;
+}
+const sessionOwners = new WeakMap<Session, Set<SessionOwner>>();
+function attachSession(target: Session, owner: SessionOwner) {
+  let owners = sessionOwners.get(target);
+  if (!owners) {
+    owners = new Set(); sessionOwners.set(target, owners); profileSessions.add(target);
+    const select = (contents: WebContents | number | null | undefined) => [...owners!].find(owner => owner.owns(contents)) ?? (!contents ? owners!.values().next().value : undefined);
+    const requests = new Map<number, SessionOwner>();
+    const requestOwner = (details: { id: number; webContentsId?: number }) => {
+      const saved = requests.get(details.id);
+      const owner = saved && owners!.has(saved) ? saved : select(details.webContentsId);
+      if (owner) requests.set(details.id, owner);
+      return owner;
+    };
+    target.setPermissionRequestHandler((contents, permission, callback, details) => {
+      const owner = select(contents);
+      if (owner?.request) owner.request(contents, permission, callback, details); else callback(false);
+    });
+    target.setPermissionCheckHandler((...args) => select(args[0])?.check?.(...args) ?? false);
+    target.setDevicePermissionHandler(() => false);
+    target.webRequest.onBeforeRequest((details, callback) => { const owner = requestOwner(details); if (owner?.before) owner.before(details, callback); else callback({ cancel: true }); });
+    target.webRequest.onBeforeSendHeaders((details, callback) => { const owner = requestOwner(details); if (owner?.send) owner.send(details, callback); else callback({ requestHeaders: details.requestHeaders }); });
+    target.webRequest.onHeadersReceived((details, callback) => { const owner = requestOwner(details); if (owner?.receive) owner.receive(details, callback); else callback({ responseHeaders: details.responseHeaders }); });
+    target.webRequest.onCompleted(details => { requests.get(details.id)?.completed?.(details); requests.delete(details.id); });
+    target.webRequest.onErrorOccurred(details => { requests.get(details.id)?.failed?.(details); requests.delete(details.id); });
+  }
+  owners.add(owner);
+  return () => { owners!.delete(owner); if (!owners!.size) { sessionOwners.delete(target); profileSessions.delete(target); } };
+}
+
+type BrowserOwner = { window: BrowserWindow; privateWindow: boolean; activeProfile(): string; publish(): void; flush(): void; stop(): void; releasePrivate(): void; persistSessions(): void; settingsChanged(): void; disposeProfile(id: string): void; registryChanged(): void; runtime(id: string): unknown };
+interface ProfileData { store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number }
+export interface BrowserGroup {
+  registry: ProfileRegistry; owners: Map<string, BrowserOwner>; profiles: Map<string, ProfileData>;
+  privatePartition?: string; privateCount: number; privateCleanup: Set<Promise<unknown>>; quitting?: Promise<void>; quitCleared: boolean; quitRequested?: boolean;
+}
+const groups = new Map<string, BrowserGroup>();
+const chromeHandlers = new Map<WebContents, Map<string, (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown>>();
+function handleChrome(window: BrowserWindow, channel: string, handler: (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown) {
+  let handlers = chromeHandlers.get(window.webContents);
+  if (!handlers) { handlers = new Map(); chromeHandlers.set(window.webContents, handlers); }
+  if (![...chromeHandlers.values()].some(map => map.has(channel))) ipcMain.handle(channel, (event, ...args: unknown[]) => {
+    const handler = chromeHandlers.get(event.sender)?.get(channel);
+    if (!handler) throw new Error('Unknown browser window');
+    return handler(event, ...args);
+  });
+  handlers.set(channel, handler);
+}
+export function restoredWindows(userData: string, registry: ProfileRegistry) {
+  const windows = new Map<string, string>();
+  for (const profile of registry.profiles) {
+    const saved = readWindowSessions(resolve(dirname(profileStorePath(userData, profile.id)), 'session.json'), safeStorage, url => url.startsWith('horizon://desktop/'), { readError: false, memoryOnly: false });
+    for (const window of saved.windows) if (!windows.has(window.id) || window.selected) windows.set(window.id, window.selected ? profile.id : windows.get(window.id) ?? registry.activeId);
+  }
+  return [...windows].map(([id, profileId]) => ({ id, profileId }));
+}
+export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void }
+
+export function createBrowser(window: BrowserWindow, userData: string, downloads: string, settings: ThemeSettings, initialRegistry?: ProfileRegistry, defaultBrowserOverride?: ReturnType<typeof createDefaultBrowser>, options: BrowserOptions = {}) {
   const registryPath = resolve(userData, 'profiles.json');
   const language = resolveLanguage(settings.language, app.getLocale());
-  let registry = initialRegistry ?? cleanupPartitions(app.getPath('sessionData'), registryPath, readRegistry(registryPath, language), userData);
+  let group = groups.get(userData);
+  if (!group) {
+    group = { registry: initialRegistry ?? cleanupPartitions(app.getPath('sessionData'), registryPath, readRegistry(registryPath, language), userData), owners: new Map(), profiles: new Map(), privateCount: 0, privateCleanup: new Set(), quitCleared: false };
+    groups.set(userData, group);
+  }
+  const shared = group;
+  let registry = shared.registry;
+  const privateWindow = options.privateWindow === true;
+  const windowId = options.id ?? (shared.owners.size ? randomUUID() : LEGACY_WINDOW_ID);
+  let selectedProfile = options.profileId ?? registry.activeId;
+  if (!registry.profiles.some(profile => profile.id === selectedProfile)) selectedProfile = registry.activeId;
+  if (privateWindow) { shared.privatePartition ??= `private-${randomUUID()}`; shared.privateCount++; }
   let registryError = false;
   const storageFailure = (error: unknown) => { registryError = true; console.error('Profile storage error', error); };
   try { migrateStore(userData, registry, safeStorage); } catch { registryError = true; }
   const runtimes = new Map<string, ReturnType<typeof createRuntime>>();
   let darkActive = darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors);
+  let blockingEnabled = settings.blockAds;
+  let cookiesBlocked = settings.blockThirdPartyCookies;
   let closing = false;
   let deleting = false;
   let clearingBrowsingData = false;
@@ -56,16 +136,16 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const invalidateMenu = (tabId?: string) => {
     if (pageMenu.invalidate(tabId) && !window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send(IPC.contextMenu, null);
   };
-  const current = () => runtimes.get(registry.activeId)!;
+  const current = () => runtimes.get(selectedProfile)!;
   const state = (): BrowserState => ({
-    ...current().state(), version: app.getVersion(), activeProfileId: registry.activeId,
+    ...current().state(), version: app.getVersion(), activeProfileId: selectedProfile, privateWindow,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
     quickAccess: settings.quickAccess, showCapture: settings.showCapture,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
     onStart: settings.onStart, searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
     ...resolvedDownloadsFolder(settings, downloads), askWhereToSave: settings.askWhereToSave,
-    blockAds: settings.blockAds, blockThirdPartyCookies: settings.blockThirdPartyCookies, clearingBrowsingData, defaultBrowser: defaultBrowser.status,
+    blockAds: privateWindow || settings.blockAds, blockThirdPartyCookies: privateWindow || settings.blockThirdPartyCookies, clearingBrowsingData, defaultBrowser: defaultBrowser.status,
   });
   const publish = () => {
     if (!current() || closing || window.isDestroyed() || window.webContents.isDestroyed()) return;
@@ -78,7 +158,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const refreshDefaultBrowser = () => { void defaultBrowser.refresh().then(publish); };
   window.on('focus', refreshDefaultBrowser);
   const layout = () => { for (const runtime of runtimes.values()) runtime.layout(); };
-  const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); registry = next; };
+  const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); shared.registry = next; registry = next; for (const owner of shared.owners.values()) owner.registryChanged(); };
   const runtimeFor = (profile: Profile) => {
     let runtime = runtimes.get(profile.id);
     if (!runtime) { runtime = createRuntime(profile); runtimes.set(profile.id, runtime); }
@@ -88,12 +168,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const profile = registry.profiles.find(profile => profile.id === id);
     if (!profile) throw new Error('Unknown profile');
     const next = runtimeFor(profile);
-    if (id !== registry.activeId) {
+    if (id !== selectedProfile) {
+      selectedProfile = id;
       saveRegistry({ ...registry, activeId: id });
       invalidateMenu();
       for (const runtime of runtimes.values()) runtime.suspend();
     }
     if (!next.tabs.length) next.newTab();
+    for (const runtime of runtimes.values()) runtime.persistSession();
     layout(); publish();
   };
   const updateDarkPages = () => {
@@ -107,7 +189,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const systemDarkPages = () => { if (settings.darkPages === 'system') updateDarkPages(); };
   nativeTheme.on('updated', systemDarkPages);
   const run = (command: BrowserCommand) => {
+    if (closing || shared.quitting) throw new Error('Browser is closing');
+    if (privateWindow && ['switch-profile', 'create-profile', 'update-profile', 'delete-profile', 'set-blocking', 'set-site-permission', 'answer-permission', 'reset-site', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].includes(command.type)) throw new Error('Private window settings are fixed');
     switch (command.type) {
+      case 'new-window': case 'new-private-window':
+        if (!options.openWindow) throw new Error('Window creation is unavailable');
+        options.openWindow(selectedProfile, command.type === 'new-private-window', window); return;
       case 'pin-app': case 'unpin-app': settings.setAppPinned(command.id, command.type === 'pin-app'); publish(); return;
       case 'register-default-browser': return defaultBrowser.register().then(publish);
       case 'set-search-engine': settings.setSearchEngine(command.value); publish(); return;
@@ -155,10 +242,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const profile = registry.profiles.find(profile => profile.id === command.id)!;
         const profiles = registry.profiles.filter(other => other.id !== profile.id);
         saveRegistry({ ...registry, activeId: registry.activeId === profile.id ? profiles[0]!.id : registry.activeId, profiles, tombstones: [...registry.tombstones, profile.partition] });
+        shared.profiles.get(profile.id)?.desktop.dispose(true); shared.profiles.delete(profile.id);
         deleting = true;
         return (async () => {
           try {
-            const next = runtimeFor(registry.profiles.find(other => other.id === registry.activeId)!);
+            const next = runtimeFor(registry.profiles.find(other => other.id === selectedProfile)!);
             if (!next.tabs.length) next.newTab();
             const attempt = async (cleanup: () => unknown) => { try { await cleanup(); } catch (error: unknown) { storageFailure(error); } };
             const runtime = runtimes.get(profile.id);
@@ -172,7 +260,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           } finally {
             runtimes.delete(profile.id);
             invalidateMenu();
-            const next = runtimeFor(registry.profiles.find(other => other.id === registry.activeId)!);
+            const next = runtimeFor(registry.profiles.find(other => other.id === selectedProfile)!);
             if (!next.tabs.length) next.newTab();
             deleting = false; layout(); publish();
           }
@@ -183,20 +271,30 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   };
   function createRuntime(profile: Profile) {
     const storePath = profileStorePath(userData, profile.id);
-    const readStatus = { readError: false, memoryOnly: false };
-    const store = readStore(storePath, safeStorage, readStatus);
-    const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { persistSession(); publish(); });
+    let data = shared.profiles.get(profile.id);
+    if (!data) {
+      const status = { readError: false, memoryOnly: false }, sessionStatus = { readError: false, memoryOnly: false };
+      const store = readStore(storePath, safeStorage, status);
+      const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { for (const owner of shared.owners.values()) { owner.persistSessions(); owner.publish(); } });
+      const own = (url: string) => url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
+      data = { store, status, desktop, sessions: readWindowSessions(resolve(dirname(storePath), 'session.json'), safeStorage, own, sessionStatus), sessionStatus, favoritesVersion: 0 };
+      shared.profiles.set(profile.id, data);
+    }
+    const profileData = data;
+    const readStatus = profileData.status;
+    const store: BrowserStore = privateWindow ? { version: 5, history: [], favorites: profileData.store.favorites, downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] }, clearHistoryOnClose: false, clearCacheOnClose: false } : profileData.store;
+    if (privateWindow) Object.defineProperty(store, 'favorites', { enumerable: true, get: () => profileData.store.favorites, set: value => { profileData.store.favorites = value; } });
+    const desktop = profileData.desktop;
     const ownAddress = (url: string) => url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
     const sessionPath = resolve(dirname(storePath), 'session.json');
-    const sessionStatus = { readError: false, memoryOnly: false };
-    const savedSession = readSession(sessionPath, safeStorage, ownAddress, sessionStatus);
+    const sessionStatus = profileData.sessionStatus;
+    const savedSession = privateWindow || options.fresh ? emptySession() : profileData.sessions.windows.find(saved => saved.id === windowId)?.session ?? emptySession();
     let sessionWrite: ReturnType<typeof setTimeout> | undefined;
     let sessionError = false;
     const desktopPanel: DesktopPanelState = { open: false, page: { kind: 'home' } };
     const tabs: Tab[] = [];
     let activeId = '';
     let storageError = false;
-    let favoritesVersion = 0;
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
     let clearingData = false;
@@ -204,7 +302,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const captureRequests = new Set<AbortController>();
     let screenCapture: { id: string; bytes: Buffer; width: number; height: number; generation: number } | undefined;
     const invalidateCaptures = () => { captureGeneration++; for (const request of captureRequests) request.abort(); captureRequests.clear(); };
-    const isCurrent = () => registry.activeId === profile.id;
+    const isCurrent = () => selectedProfile === profile.id;
     let kept: { kind: 'history'; entries: BrowserStore['history'] } | { kind: 'bookmarks'; deleted: DeletedFavorite } | { kind: 'downloads'; entries: BrowserStore['downloads'] } | undefined;
     let restoreTimeout: ReturnType<typeof setTimeout> | undefined;
     const forget = () => { clearTimeout(restoreTimeout); restoreTimeout = undefined; kept = undefined; };
@@ -223,31 +321,33 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const trustedDownloads = new Map(store.downloads.filter(entry => basename(entry.path) === entry.filename && !/[\x00-\x1f\x7f-\x9f]/.test(entry.path)).map(entry => [entry.id, entry.path]));
     const reserved = new Set<string>();
     const webPreferences: WebPreferences = {
-      partition: profile.partition, sandbox: true, contextIsolation: true, nodeIntegration: false,
+      partition: privateWindow ? shared.privatePartition! : profile.partition, sandbox: true, contextIsolation: true, nodeIntegration: false,
       nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true,
       allowRunningInsecureContent: false, experimentalFeatures: false, webviewTag: false,
       devTools: false, navigateOnDragDrop: false,
     };
-    const webSession = session.fromPartition(profile.partition);
-    profileSessions.add(webSession);
+    const webSession = session.fromPartition(webPreferences.partition!);
     const permissions = new PermissionQueue(store.siteSettings, publish, () => persist());
     const tabFor = (contents: WebContents | null | undefined) => contents && tabs.find(tab => tab.view?.webContents === contents);
+    const sessionOwner: SessionOwner = { owns: contents => tabs.some(tab => typeof contents === 'number' ? tab.view?.webContents.id === contents : tab.view?.webContents === contents) };
+    const detachSession = attachSession(webSession, sessionOwner);
     // Frame requests inherit the top-level origin; a frame cannot choose the origin shown by chrome.
-    webSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    sessionOwner.request = (contents, permission, callback, details) => {
       if (permission === 'fullscreen') { callback(true); return; }
+      if (privateWindow) { callback(false); return; }
       const tab = tabFor(contents), origin = tab && siteSettings(store.siteSettings, contents.mainFrame.origin ?? contents.mainFrame.url)?.origin;
       if (!tab || !origin || tab.navigating || disposed || closing) { callback(false); return; }
       permissions.request(tab.state.id, origin, requestedPermissions(permission, details), callback);
-    });
-    webSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => {
+    };
+    sessionOwner.check = (contents, permission, requestingOrigin, details) => {
       if (permission === 'fullscreen') return true;
+      if (privateWindow) return false;
       const tab = tabFor(contents);
       const url = tab ? contents!.mainFrame.origin ?? contents!.mainFrame.url : !contents ? details?.embeddingOrigin ?? requestingOrigin : '';
       const site = siteSettings(store.siteSettings, url ?? '');
       const requested = requestedPermissions(permission, details);
       return !!site && secureOrigin(site.origin) && requested.length > 0 && requested.every(permission => site.permissions[permission] === 'allow');
-    });
-    webSession.setDevicePermissionHandler(() => false);
+    };
     const requests = new Map<number, { tab: Tab; pageLoad: number; topURL: string }>();
     const requestContext = (details: { id: number; webContentsId?: number; url: string; resourceType: string }) => {
       const existing = requests.get(details.id);
@@ -264,7 +364,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const context = { tab, pageLoad: tab.pageLoad, topURL: details.resourceType === 'mainFrame' ? details.url : tab.topURL ?? tab.state.url };
       requests.set(details.id, context); return context;
     };
-    webSession.webRequest.onBeforeRequest((details, callback) => {
+    sessionOwner.before = (details, callback) => {
       const scheme = new URL(details.url).protocol;
       const tab = details.webContentsId === undefined ? undefined : tabs.find(tab => tab.view?.webContents.id === details.webContentsId);
       const cancel = details.resourceType === 'mainFrame' ? !(isAllowedURL(details.url) || !!tab?.view && isLaunchNavigation(tab.view.webContents, details.url))
@@ -272,34 +372,42 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         : !['http:', 'https:', 'data:', 'blob:', 'ws:', 'wss:'].includes(scheme);
       if (cancel || disposed || closing || clearingData) { callback({ cancel: true }); return; }
       const context = requestContext(details);
-      const enabled = settings.blockAds && context && siteSettings(store.siteSettings, context.topURL)?.blocking;
-      const match = enabled ? blocker.match(details.url, details.resourceType, context.topURL) : undefined;
+      if (privateWindow && !blocker.ready && /^(?:https?|wss?):/.test(scheme)) { callback({ cancel: true }); return; }
+      const origin = [details.frame?.top?.url, details.initiatorOrigin, details.referrer].find(url => typeof url === 'string' && isWebURL(url));
+      if (privateWindow && !context && !origin && /^(?:https?|wss?):/.test(scheme)) { callback({ cancel: true }); return; }
+      const topURL = context?.topURL ?? origin ?? details.url;
+      const enabled = blockingPolicy(privateWindow, settings.blockAds, settings.blockThirdPartyCookies, siteSettings(store.siteSettings, topURL)?.blocking ?? true).filters;
+      const match = enabled && (context || privateWindow) ? blocker.match(details.url, details.resourceType, topURL) : undefined;
       if (!match) { callback({ cancel: false }); return; }
-      if (context!.pageLoad === context!.tab.pageLoad) { context!.tab.state.blocked[match.kind]++; publish(); }
+      if (context && context.pageLoad === context.tab.pageLoad) { context.tab.state.blocked[match.kind]++; publish(); }
       if (match.redirectURL) callback({ redirectURL: match.redirectURL });
       else callback({ cancel: true });
-    });
-    webSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    };
+    sessionOwner.send = (details, callback) => {
       const context = requestContext(details);
       const headers = context ? stripCookieHeaders(details.requestHeaders, false, details.url, context.topURL,
-        settings.blockThirdPartyCookies && (siteSettings(store.siteSettings, context.topURL)?.blocking ?? true), context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : details.requestHeaders;
+        blockingPolicy(privateWindow, settings.blockAds, settings.blockThirdPartyCookies, siteSettings(store.siteSettings, context.topURL)?.blocking ?? true).thirdPartyCookies, context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : privateWindow ? Object.fromEntries(Object.entries(details.requestHeaders).filter(([key]) => key.toLowerCase() !== 'cookie')) : details.requestHeaders;
       if (context && context.pageLoad === context.tab.pageLoad && context.tab.state.blocked.cookies !== context.tab.refusedCookies.size) { context.tab.state.blocked.cookies = context.tab.refusedCookies.size; publish(); }
       callback({ requestHeaders: headers });
-    });
-    webSession.webRequest.onHeadersReceived((details, callback) => {
+    };
+    sessionOwner.receive = (details, callback) => {
       const context = requestContext(details);
       const headers = context ? stripCookieHeaders(details.responseHeaders ?? {}, true, details.url, context.topURL,
-        settings.blockThirdPartyCookies && (siteSettings(store.siteSettings, context.topURL)?.blocking ?? true), context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : details.responseHeaders;
+        blockingPolicy(privateWindow, settings.blockAds, settings.blockThirdPartyCookies, siteSettings(store.siteSettings, context.topURL)?.blocking ?? true).thirdPartyCookies, context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : privateWindow ? Object.fromEntries(Object.entries(details.responseHeaders ?? {}).filter(([key]) => key.toLowerCase() !== 'set-cookie')) : details.responseHeaders;
       if (context && context.pageLoad === context.tab.pageLoad && context.tab.state.blocked.cookies !== context.tab.refusedCookies.size) { context.tab.state.blocked.cookies = context.tab.refusedCookies.size; publish(); }
       callback({ responseHeaders: headers });
-    });
-    webSession.webRequest.onCompleted(details => { requests.delete(details.id); });
-    webSession.webRequest.onErrorOccurred(details => { requests.delete(details.id); });
+    };
+    sessionOwner.completed = details => { requests.delete(details.id); };
+    sessionOwner.failed = details => { requests.delete(details.id); };
 
-    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
+    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
-      blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : siteSettings(store.siteSettings, active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: permissions.prompt(activeId) });
+      blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
+    function privateSite(url: string) {
+      const site = siteSettings(store.siteSettings, url);
+      return privateWindow && site ? { ...site, blocking: true, permissions: { camera: 'block' as const, microphone: 'block' as const, location: 'block' as const, notifications: 'block' as const } } : site;
+    }
     const snapshotTab = (tab: Tab): SessionTab => {
       if (tab.restore || tab.restoring) return structuredClone((tab.restore ?? tab.restoring)!);
       const history = !tab.state.settings && !tab.state.desktop ? page(tab.view)?.navigationHistory : undefined;
@@ -311,29 +419,33 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const flushSession = () => {
       clearTimeout(sessionWrite); sessionWrite = undefined;
-      if (sessionStatus.memoryOnly || disposed) return;
+      if (!recordsBrowsing(privateWindow) || sessionStatus.memoryOnly || disposed) return;
       try {
         const open = tabs.filter(tab => !tab.retryDownload);
         const next = restoreSession({ ...savedSession, tabs: open.map(snapshotTab), active: open.findIndex(tab => tab.state.id === activeId) }, ownAddress);
-        writeSession(sessionPath, next, safeStorage); sessionError = false;
+        const saved = { id: windowId, selected: isCurrent(), session: next };
+        const index = profileData.sessions.windows.findIndex(saved => saved.id === windowId);
+        if (index < 0) profileData.sessions.windows.push(saved); else profileData.sessions.windows[index] = saved;
+        writeWindowSessions(sessionPath, profileData.sessions, safeStorage); sessionError = false;
       } catch { sessionError = true; }
     };
     const persistSession = () => {
-      if (disposed || closing || sessionStatus.memoryOnly) return;
+      if (!recordsBrowsing(privateWindow) || disposed || closing || sessionStatus.memoryOnly) return;
       clearTimeout(sessionWrite); sessionWrite = setTimeout(() => { flushSession(); publish(); }, 500);
     };
     const flush = () => {
       flushSession();
-      if (pendingWrite === undefined) return;
+      if (pendingWrite === undefined || !recordsBrowsing(privateWindow)) return;
       clearTimeout(pendingWrite); pendingWrite = undefined;
       try { writeStore(storePath, store, safeStorage); storageError = false; }
       catch { storageError = true; }
       publish();
     };
     const persist = () => {
-      if (!disposed && !readStatus.memoryOnly && pendingWrite === undefined) pendingWrite = setTimeout(flush, 500);
+      if (recordsBrowsing(privateWindow) && !disposed && !readStatus.memoryOnly && pendingWrite === undefined) pendingWrite = setTimeout(flush, 500);
     };
     const saveNow = () => {
+      if (privateWindow) return;
       clearTimeout(pendingWrite); pendingWrite = undefined;
       if (readStatus.memoryOnly) { storageError = true; throw new Error('PROFILE_SETTINGS_SAVE_FAILED'); }
       try { writeStore(storePath, store, safeStorage); storageError = false; }
@@ -345,14 +457,15 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         edit();
         try {
           if (readStatus.memoryOnly) throw new Error('Store encryption is unavailable');
-          writeStore(storePath, store, safeStorage);
+          writeStore(storePath, profileData.store, safeStorage);
         } catch {
           storageError = true;
           throw new Error('FAVORITE_STORAGE_FAILED');
         }
       } catch (error) { store.favorites = previous; publish(); throw error; }
       clearTimeout(pendingWrite); pendingWrite = undefined;
-      storageError = false; favoritesVersion++;
+      storageError = false; profileData.favoritesVersion++;
+      for (const owner of shared.owners.values()) owner.publish();
     };
     const deleteFavorite = (id: string) => {
       const deleted = deletedFavorite(store.favorites, id);
@@ -377,7 +490,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const clearOnClose = () => {
       if (closeClear) return closeClear;
       stopForClear(); forget();
-      if (store.clearHistoryOnClose) { const previous = store.history; store.history = []; try { saveNow(); } catch { store.history = previous; storageError = true; } }
+      if (store.clearHistoryOnClose) { try { clearStoredHistoryOnClose(storePath, store, safeStorage); } catch { storageError = true; } }
       closeClear = store.clearCacheOnClose ? Promise.resolve().then(() => webSession.clearCache()).catch(() => { storageError = true; }) : Promise.resolve();
       return closeClear;
     };
@@ -467,7 +580,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       tab.state.title = url === 'about:blank' ? '' : page(tab.view)?.getTitle().slice(0, 1024) || url;
       tab.state.find = { active: 0, total: 0 };
       tab.findRequest = undefined;
-      if (isWebURL(url) && !clearingData && !closing && !disposed) {
+      if (recordsBrowsing(privateWindow) && isWebURL(url) && !clearingData && !closing && !disposed) {
         const existing = store.history.find(entry => entry.url === url);
         if (existing) { existing.lastVisit = Date.now(); existing.visitCount++; existing.title = tab.state.title; }
         else store.history.push({ url, title: tab.state.title, lastVisit: Date.now(), visitCount: 1 });
@@ -553,6 +666,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       return tab;
     };
     const openSettings = (section: SettingsSection) => {
+      if (privateWindow && section === 'profiles') section = 'general';
       let target = tabs.find(tab => tab.state.settings !== null);
       if (!target) {
         if (tabs.length >= 200) throw new Error('SETTINGS_TAB_LIMIT');
@@ -563,10 +677,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       target.restore = undefined; target.restoring = undefined;
       activate(target); update(); return target;
     };
-    const closeTab = (tab: Tab) => {
+    const closeTab = (tab: Tab, remember = true) => {
       const index = tabs.indexOf(tab);
       if (index < 0 || closing || disposed) return;
-      if (!tab.retryDownload) { const saved = restorableTab(snapshotTab(tab), ownAddress); if (saved) rememberClosed(savedSession, saved, index); }
+      if (remember && recordsBrowsing(privateWindow) && !tab.retryDownload) { const saved = restorableTab(snapshotTab(tab), ownAddress); if (saved) rememberClosed(savedSession, saved, index); }
       invalidateMenu(tab.state.id);
       permissions.drop(tab.state.id);
       leaveFullscreen(tab); clearFavicon(tab);
@@ -678,7 +792,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           tab.pageLoad++; tab.topURL = url; tab.refusedCookies = new Set(); tab.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
           pendingNavigation = tab.pageLoad;
           navigations.push({ generation: tab.pageLoad, urls: new Set([url]) });
-          tab.cosmeticPending = settings.blockAds && blocker.ready && !!siteSettings(store.siteSettings, url)?.blocking;
+          tab.cosmeticPending = blockingPolicy(privateWindow, settings.blockAds, settings.blockThirdPartyCookies, siteSettings(store.siteSettings, url)?.blocking ?? true).filters && blocker.ready;
           clearFavicon(tab, url); tab.state.error = null; tab.state.find = { active: 0, total: 0 }; tab.findRequest = undefined; update();
         }
       });
@@ -695,7 +809,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         permissions.drop(tab.state.id); tab.navigating = false;
         tab.topURL = url;
         const generation = tab.pageLoad;
-        const css = settings.blockAds && siteSettings(store.siteSettings, url)?.blocking ? blocker.cosmeticCSS(url) : '';
+        const css = blockingPolicy(privateWindow, settings.blockAds, settings.blockThirdPartyCookies, siteSettings(store.siteSettings, url)?.blocking ?? true).filters ? blocker.cosmeticCSS(url) : '';
         // Keep the view hidden until styles are installed, so the new document cannot flash unhidden ads.
         if (css) {
           tab.cosmeticPending = true;
@@ -724,7 +838,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (tab.view !== view) return;
         tab.state.title = title.slice(0, 1024);
         const entry = store.history.find(entry => entry.url === tab.state.url);
-        if (entry && !clearingData && !closing && !disposed) { entry.title = tab.state.title; persist(); }
+        if (recordsBrowsing(privateWindow) && entry && !clearingData && !closing && !disposed) { entry.title = tab.state.title; persist(); }
         persistSession(); publish();
       });
       contents.on('did-fail-load', (_event, code, description, url, mainFrame) => {
@@ -766,7 +880,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         run({ type: shortcut === 'fullscreen' ? 'fullscreen' : 'stop' }); return;
       }
       if (shortcut === 'stop' && !contents.isLoading()) return;
-      if (['capture', 'focus-address', 'focus-search', 'find', 'find-next', 'find-previous', 'menu', 'clear-browsing-data', 'reopen-tab', 'home', 'favorites', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
+      if (['capture', 'focus-address', 'focus-search', 'find', 'find-next', 'find-previous', 'menu', 'clear-browsing-data', 'reopen-tab', 'home', 'favorites', 'history', 'downloads', 'new-tab', 'new-window', 'new-private-window', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
       window.webContents.send(IPC.shortcut, shortcut);
     };
 
@@ -775,28 +889,33 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const retry = Boolean(tab?.retryDownload);
       let accepted = false;
       try {
-        if (!tab || disposed || closing) { event.preventDefault(); return; }
+        if (!tab) {
+          if (![...(sessionOwners.get(webSession) ?? [])].some(owner => owner.owns(contents))) event.preventDefault();
+          return;
+        }
+        if (disposed || closing) { event.preventDefault(); return; }
         const url = isWebURL(item.getURL()) ? item.getURL() : tab.state.url;
         if (!isWebURL(url)) { event.preventDefault(); return; }
         const folder = resolvedDownloadsFolder(settings, downloads).downloadsFolder;
         mkdirSync(folder, { recursive: true });
-        const proposed = reserveDownloadPath(folder, item.getFilename(), new Set([...reserved, ...[...runtimes.values()].flatMap(runtime => [...runtime.reserved])]));
+        const proposed = reserveDownloadPath(folder, item.getFilename(), downloadPaths);
         const selected = settings.askWhereToSave ? dialog.showSaveDialogSync(window, { defaultPath: proposed }) : proposed;
         if (!selected) { event.preventDefault(); item.cancel(); return; }
         const path = selected;
-        reserved.add(path);
+        reserved.add(path); downloadPaths.add(path);
         item.setSavePath(path);
         const retryIndex = tab.retryDownload ? store.downloads.findIndex(entry => entry.id === tab.retryDownload) : -1;
         const entry = { id: retryIndex >= 0 ? tab.retryDownload! : randomUUID(), url, filename: basename(path), path, received: 0, total: item.getTotalBytes(), status: 'progressing' as const, startedAt: Date.now() };
-        if (retryIndex >= 0) store.downloads.splice(retryIndex, 1, entry); else store.downloads.unshift(entry);
+        if (recordsBrowsing(privateWindow)) { if (retryIndex >= 0) store.downloads.splice(retryIndex, 1, entry); else store.downloads.unshift(entry); }
         tab.retryDownload = undefined;
-        trustedDownloads.set(entry.id, entry.path);
+        if (recordsBrowsing(privateWindow)) trustedDownloads.set(entry.id, entry.path);
         store.downloads.splice(10000);
         items.set(entry.id, item); persist(); publish();
         let lastUpdate = 0;
         let interrupted = false;
         item.on('updated', (_event, status) => {
           if (disposed) return;
+          if (privateWindow) return;
           entry.received = item.getReceivedBytes(); entry.total = item.getTotalBytes();
           const stored = store.downloads.find(download => download.id === entry.id);
           if (stored && status === 'interrupted') { interrupted = true; stored.status = 'failed'; item.cancel(); }
@@ -806,7 +925,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (disposed) return;
           const stored = store.downloads.find(download => download.id === entry.id);
           if (stored) { stored.status = interrupted ? 'failed' : status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed'; stored.received = item.getReceivedBytes(); }
-          items.delete(entry.id); reserved.delete(path); persist(); publish();
+          items.delete(entry.id); reserved.delete(path); downloadPaths.delete(path); persist(); publish();
         });
         accepted = true;
         if (!tab.committed && tabs.length > 1) setImmediate(() => { if (!tab.committed && tabs.length > 1) closeTab(tab); });
@@ -1210,6 +1329,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (tab) { leaveFullscreen(tab); page(tab.view)?.setIgnoreMenuShortcuts(true); page(tab.view)?.stopFindInPage('clearSelection'); tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; }
     };
     const dispose = (discard = false) => {
+      if (disposed) return;
       if (!discard) flushSession();
       clearTimeout(sessionWrite); sessionWrite = undefined;
       screenCapture = undefined;
@@ -1218,7 +1338,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         try { cleanup(); } catch (error: unknown) { storageFailure(error); }
       };
       if (discard) disposed = true;
-      invalidateCaptures(); desktop.dispose(discard);
+      invalidateCaptures();
       forget();
       if (!discard) for (const item of items.values()) item.cancel();
       disposed = true;
@@ -1234,25 +1354,52 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         attempt(() => page(tab.view)?.close());
       }
       if (discard) for (const item of items.values()) attempt(() => item.cancel());
-      tabs.length = 0; items.clear(); reserved.clear();
+      tabs.length = 0; items.clear(); for (const path of reserved) downloadPaths.delete(path); reserved.clear();
       if (discard) { clearTimeout(pendingWrite); pendingWrite = undefined; } else flush();
       attempt(() => webSession.removeListener('will-download', downloadHandler));
-      profileSessions.delete(webSession);
+      detachSession();
       requests.clear();
-      if (!discard && (store.clearHistoryOnClose || store.clearCacheOnClose)) return clearBeforeDeadline([clearOnClose]);
     };
-    for (const { tab: saved, active: selected } of lazySession(savedSession, settings.onStart)) {
+    for (const { tab: saved, active: selected } of lazySession(savedSession, privateWindow || options.fresh ? 'new-page' : settings.onStart)) {
       const tab = restoredTab(saved); tabs.push(tab); if (selected) activeId = tab.state.id;
     }
-    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear };
+    const exportTab = (id: string) => {
+      const tab = tabs.find(tab => tab.state.id === id);
+      if (!tab) throw new Error('Unknown tab');
+      const contents = page(tab.view), launch = contents && launchURLs.get(contents);
+      return { saved: snapshotTab(tab), id: tab.state.id, launch: launch && isLocalHTMLURL(launch) ? launch : undefined };
+    };
+    const importTab = (saved: SessionTab, id: string, launch?: string) => {
+      if (disposed || closing) throw new Error('Profile is closed');
+      if (tabs.length >= 200) throw new Error('Tab limit reached');
+      const tab = restoredTab(saved); tab.state.id = id;
+      if (launch) tab.restore = undefined;
+      tabs.push(tab);
+      if (launch) {
+        ensureView(tab);
+        const contents = page(tab.view)!;
+        launchURLs.set(contents, launch);
+        const entries = saved.entries.filter(entry => isWebURL(entry.url) || entry.url === 'about:blank' || entry.url === launch);
+        const index = entries.indexOf(saved.entries[saved.index]!);
+        if (index >= 0 && entries[index]!.url === (saved.url || 'about:blank')) {
+          const restoring = { ...saved, entries, index };
+          tab.restoring = restoring; tab.navigating = true; tab.state.loading = Boolean(saved.url);
+          void contents.navigationHistory.restore({ entries, index }).catch(() => {
+            if (!disposed && !closing && tabs.includes(tab) && page(tab.view) === contents && tab.restoring === restoring) fail(tab, 'ERR_FAILED');
+          }).finally(() => { if (tab.restoring === restoring) { tab.restoring = undefined; if (!disposed && !closing && tabs.includes(tab)) update(); } });
+        } else load(tab, saved.url || 'about:blank', saved.url === launch);
+      }
+      activate(tab); update();
+    };
+    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear, exportTab, importTab, closeTab };
 
   }
-  ipcMain.handle(IPC.state, (event, ...args: unknown[]) => {
+  handleChrome(window, IPC.state, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length) throw new Error('Unexpected state argument');
     return state();
   });
-  ipcMain.handle(IPC.favicon, (event, ...args: unknown[]) => {
+  handleChrome(window, IPC.favicon, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     const [id, hash] = args;
     if (args.length !== 2 || typeof id !== 'string' || !id || id.length > 128 || id.includes('\0') || typeof hash !== 'string' || !/^[a-f0-9]{32}$/.test(hash)) throw new Error('Invalid favicon arguments');
@@ -1260,22 +1407,22 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!tab) throw new Error('Unknown tab');
     return tab.state.favicon === hash ? tab.faviconBytes ?? null : null;
   });
-  ipcMain.handle(IPC.project, (event, ...args: unknown[]) => {
+  handleChrome(window, IPC.project, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length !== 1 || !isProfileId(args[0])) throw new Error('Invalid project arguments');
     return current().desktop.content(args[0]);
   });
-  ipcMain.handle(IPC.captureImage, (event, ...args: unknown[]) => {
+  handleChrome(window, IPC.captureImage, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length !== 2 || args[0] !== null && !isProfileId(args[0]) || !isProfileId(args[1])) throw new Error('Invalid capture image arguments');
     return current().desktop.image(args[0], args[1]);
   });
-  ipcMain.handle(IPC.captures, (event, ...args: unknown[]) => {
+  handleChrome(window, IPC.captures, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length) throw new Error('Invalid captures arguments');
     return current().desktop.captures();
   });
-  ipcMain.handle(IPC.capture, async (event, ...args: unknown[]) => {
+  handleChrome(window, IPC.capture, async (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length) throw new Error('Unexpected capture argument');
     const runtime = current();
@@ -1296,13 +1443,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       return image.toJPEG(80);
     } catch { return null; }
   });
-  ipcMain.handle(IPC.command, (event, ...args: unknown[]) => {
+  handleChrome(window, IPC.command, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length !== 1) throw new Error('Invalid command arguments');
     if (deleting) throw new Error('Profile deletion is in progress');
     return run(validateCommand(args[0], new Set(registry.profiles.map(profile => profile.id)), current().desktop.list(), current().desktop.captureList(), current().state().store.favorites));
   });
-  ipcMain.handle(IPC.contentArea, (event, ...args: unknown[]) => {
+  handleChrome(window, IPC.contentArea, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length !== 1) throw new Error('Invalid content area arguments');
     const next = validateContentArea(args[0]);
@@ -1312,41 +1459,103 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (covering && window.isFocused()) window.webContents.focus();
   });
   const flush = () => { for (const runtime of runtimes.values()) { runtime.flush(); runtime.desktop.flush(); } };
-  let quitting: Promise<void> | undefined;
-  let quitCleared = false;
   const needsClearOnClose = () => registry.profiles.some(profile => {
-    const runtime = runtimes.get(profile.id);
-    const store = runtime?.state().store ?? readStore(profileStorePath(userData, profile.id), safeStorage);
+    const store = shared.profiles.get(profile.id)?.store ?? readStore(profileStorePath(userData, profile.id), safeStorage);
     return store.clearHistoryOnClose || store.clearCacheOnClose;
   });
   const finishClearing = () => {
-    if (!quitting) {
-      closing = true; blocker.stop();
-      const all = registry.profiles.map(runtimeFor);
-      for (const runtime of all) runtime.stopForClear();
-      quitting = clearBeforeDeadline(all.map(runtime => runtime.clearOnClose)).then(() => { quitCleared = true; });
+    if (!shared.quitting) {
+      for (const owner of shared.owners.values()) { owner.flush(); owner.stop(); }
+      for (const owner of shared.owners.values()) if (owner.privateWindow) owner.releasePrivate();
+      shared.quitting = Promise.allSettled(registry.profiles.map(async profile => {
+        const storePath = profileStorePath(userData, profile.id);
+        const store = shared.profiles.get(profile.id)?.store ?? readStore(storePath, safeStorage);
+        try { clearStoredHistoryOnClose(storePath, store, safeStorage, writeStore); } catch { storageFailure(new Error('History clearing failed')); }
+        if (store.clearCacheOnClose) try { await session.fromPartition(profile.partition).clearCache(); } catch { storageFailure(new Error('Cache clearing failed')); }
+      })).then(async () => {
+        await Promise.allSettled([...shared.privateCleanup]);
+        shared.quitCleared = true;
+      });
     }
-    return quitting;
+    return shared.quitting;
   };
   const beforeQuit = (event?: Electron.Event) => {
-    flush();
-    if (!quitCleared && needsClearOnClose()) { event?.preventDefault(); void finishClearing().then(() => app.quit()); }
+    for (const owner of shared.owners.values()) owner.flush();
+    if (!shared.quitCleared) {
+      event?.preventDefault();
+      const clearing = finishClearing();
+      if (!shared.quitRequested) { shared.quitRequested = true; void clearing.then(() => app.quit()); }
+    }
   };
   window.on('close', (event: Electron.Event) => {
     flush();
-    if (!quitCleared && needsClearOnClose()) { event.preventDefault(); void finishClearing().then(() => window.close()); }
+    if (shared.owners.size === 1 && !shared.quitCleared && (needsClearOnClose() || privateWindow || shared.privateCleanup.size)) {
+      event.preventDefault();
+      if (privateWindow) cleanupPrivate();
+      void finishClearing().then(() => window.close());
+    }
   });
   window.on('closed', () => {
     closing = true; invalidateMenu();
     blocker.stop();
     nativeTheme.removeListener('updated', systemDarkPages);
     for (const runtime of runtimes.values()) runtime.dispose();
+    shared.owners.delete(windowId);
+    if (!privateWindow && shared.owners.size && !shared.quitting) for (const profile of registry.profiles) {
+      const data = shared.profiles.get(profile.id), path = resolve(dirname(profileStorePath(userData, profile.id)), 'session.json');
+      const status = data?.sessionStatus ?? { readError: false, memoryOnly: false };
+      const saved = data?.sessions ?? readWindowSessions(path, safeStorage, url => url.startsWith('horizon://desktop/'), status);
+      if (!saved.windows.some(window => window.id === windowId)) continue;
+      saved.windows = saved.windows.filter(window => window.id !== windowId);
+      if (!status.memoryOnly) try { writeWindowSessions(path, saved, safeStorage); } catch { registryError = true; }
+    }
+    if (privateWindow) cleanupPrivate();
+    if (!shared.owners.size) { for (const data of shared.profiles.values()) data.desktop.dispose(); groups.delete(userData); }
     app.removeListener('before-quit', beforeQuit);
     window.removeListener('focus', refreshDefaultBrowser);
-    for (const channel of [IPC.state, IPC.capture, IPC.favicon, IPC.project, IPC.captures, IPC.captureImage, IPC.command, IPC.contentArea]) ipcMain.removeHandler(channel);
+    const handlers = chromeHandlers.get(window.webContents); chromeHandlers.delete(window.webContents);
+    for (const channel of handlers?.keys() ?? []) if (![...chromeHandlers.values()].some(map => map.has(channel))) ipcMain.removeHandler(channel);
   });
+  let privateReleased = false;
+  const cleanupPrivate = () => {
+    if (privateReleased) return;
+    privateReleased = true;
+    for (const runtime of runtimes.values()) runtime.dispose();
+    if (--shared.privateCount) return;
+    const partition = shared.privatePartition!; shared.privatePartition = undefined;
+    const target = session.fromPartition(partition);
+    const cleanup = (async () => {
+      for (const clear of [() => target.clearStorageData(), () => target.closeAllConnections(), () => target.clearCache(), () => target.clearAuthCache(), () => target.clearCodeCaches({})]) {
+        try { await clear(); } catch { storageFailure(new Error('Private session clearing failed')); }
+      }
+    })();
+    shared.privateCleanup.add(cleanup); void cleanup.finally(() => shared.privateCleanup.delete(cleanup));
+  };
+  const owner: BrowserOwner = { window, privateWindow, activeProfile: () => selectedProfile, publish, flush, stop: () => { closing = true; blocker.stop(); for (const runtime of runtimes.values()) runtime.stopForClear(); },
+    releasePrivate: cleanupPrivate,
+    persistSessions: () => { for (const runtime of runtimes.values()) runtime.persistSession(); },
+    settingsChanged: () => {
+      updateDarkPages();
+      for (const runtime of runtimes.values()) {
+        if (blockingEnabled !== settings.blockAds) runtime.resetCounts();
+        else if (cookiesBlocked !== settings.blockThirdPartyCookies) runtime.resetCookies();
+      }
+      blockingEnabled = settings.blockAds; cookiesBlocked = settings.blockThirdPartyCookies;
+    },
+    disposeProfile: id => { runtimes.get(id)?.dispose(true); runtimes.delete(id); },
+    registryChanged: () => {
+      registry = shared.registry;
+      for (const id of runtimes.keys()) if (!registry.profiles.some(profile => profile.id === id)) owner.disposeProfile(id);
+      if (!registry.profiles.some(profile => profile.id === selectedProfile)) {
+        if (privateWindow) { window.close(); return; }
+        selectedProfile = registry.activeId;
+        const next = runtimeFor(registry.profiles.find(profile => profile.id === selectedProfile)!); if (!next.tabs.length) next.newTab();
+      }
+      layout(); publish();
+    }, runtime: id => runtimeFor(registry.profiles.find(profile => profile.id === id)!) };
+  shared.owners.set(windowId, owner);
   app.on('before-quit', beforeQuit);
-  const initial = runtimeFor(registry.profiles.find(profile => profile.id === registry.activeId)!);
+  const initial = runtimeFor(registry.profiles.find(profile => profile.id === selectedProfile)!);
   // Electron runs menu accelerators only after Chromium returns an unhandled page key.
   window.setMenu(Menu.buildFromTemplate(browserShortcutAccelerators().map(({ accelerator, shortcut }) => ({
     label: accelerator, accelerator, visible: false,
@@ -1359,5 +1568,20 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   initial.persist(); if (!initial.tabs.length) initial.newTab(); else layout();
   void blocker.start();
   refreshDefaultBrowser();
-  return { layout, openLaunch: (url: string) => { if (isWebURL(url) || isLocalHTMLURL(url)) current().newTab(url, true, undefined, true); } };
+  return { layout, flush, windowId, privateWindow, activeProfile: () => selectedProfile, registry: () => shared.registry, settingsChanged: () => { for (const owner of shared.owners.values()) owner.settingsChanged(); }, openLaunch: (url: string) => { if (!privateWindow && (isWebURL(url) || isLocalHTMLURL(url))) current().newTab(url, true, undefined, true); },
+    moveTab: (id: string, destinationId: string) => {
+      if (closing || shared.quitting) throw new Error('Profile is closed');
+      const destination = shared.owners.get(destinationId);
+      if (!destination || destination === owner || destination.privateWindow !== privateWindow) throw new Error('Invalid tab destination');
+      const source = [...runtimes.values()].find(runtime => runtime.tabs.some(tab => tab.state.id === id));
+      if (!source) throw new Error('Unknown tab');
+      const profile = registry.profiles.find(profile => runtimes.get(profile.id) === source)!;
+      if (privateWindow && destination.activeProfile() !== profile.id) throw new Error('Private profile mismatch');
+      const target = destination.runtime(profile.id) as ReturnType<typeof createRuntime>;
+      if (target.webSession !== source.webSession) throw new Error('Tab session mismatch');
+      const exported = source.exportTab(id);
+      if (!sessionAddress(exported.saved.url, url => url.startsWith('horizon://desktop/')) && exported.saved.url !== exported.launch) throw new Error('Tab cannot be moved');
+      target.importTab(exported.saved, exported.id, exported.launch);
+      const tab = source.tabs.find(tab => tab.state.id === id)!; source.closeTab(tab, false);
+    } };
 }

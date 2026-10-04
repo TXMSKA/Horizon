@@ -183,14 +183,21 @@ function PrivacySettings({ state, language, onOpen, openClearDialog, onClearDial
   useEffect(() => { if (openClearDialog) { setDialog(true); onClearDialogOpened?.(); } }, [openClearDialog, onClearDialogOpened]);
   return <>
     <SettingsGroup title="blocking" language={language}>
-      <SettingsToggle title="blockAdsTrackers" hint={t('blockAdsHint')} value={state.blockAds} command="set-block-ads" language={language} />
-      <SettingsToggle title="blockThirdPartyCookies" hint={t('blockThirdPartyCookiesHint')} value={state.blockThirdPartyCookies} command="set-block-third-party-cookies" language={language} />
-      <SettingRow title="sitesOwnSettings" hint={t(count === 0 ? 'sitesOwnSettingsNone' : count === 1 ? 'siteOwnSettingsCount' : 'sitesOwnSettingsCount').replace('{count}', String(count))} language={language}>{() => <button className="settings-button" type="button" onClick={() => onOpen('privacy/sites')}>{t('manage')}</button>}</SettingRow>
+      {state.privateWindow ? <>
+        <SettingRow title="blockAdsTrackers" hint={t('privateBlockingHint')} language={language}>{() => <span>{t('on')}</span>}</SettingRow>
+        <SettingRow title="blockThirdPartyCookies" language={language}>{() => <span>{t('on')}</span>}</SettingRow>
+      </> : <>
+        <SettingsToggle title="blockAdsTrackers" hint={t('blockAdsHint')} value={state.blockAds} command="set-block-ads" language={language} />
+        <SettingsToggle title="blockThirdPartyCookies" hint={t('blockThirdPartyCookiesHint')} value={state.blockThirdPartyCookies} command="set-block-third-party-cookies" language={language} />
+        <SettingRow title="sitesOwnSettings" hint={t(count === 0 ? 'sitesOwnSettingsNone' : count === 1 ? 'siteOwnSettingsCount' : 'sitesOwnSettingsCount').replace('{count}', String(count))} language={language}>{() => <button className="settings-button" type="button" onClick={() => onOpen('privacy/sites')}>{t('manage')}</button>}</SettingRow>
+      </>}
     </SettingsGroup>
     <SettingsGroup title="browsingData" language={language}>
       <SettingRow title="clearBrowsingData" hint={t('clearBrowsingDataHint')} language={language}>{() => <button className="settings-button" ref={opener} type="button" onClick={() => setDialog(true)}>{t('clear')}</button>}</SettingRow>
-      <SettingsToggle title="clearHistoryOnClose" value={state.clearHistoryOnClose} command="set-clear-history-on-close" language={language} />
-      <SettingsToggle title="clearCacheOnClose" value={state.clearCacheOnClose} command="set-clear-cache-on-close" language={language} />
+      {!state.privateWindow && <>
+        <SettingsToggle title="clearHistoryOnClose" value={state.clearHistoryOnClose} command="set-clear-history-on-close" language={language} />
+        <SettingsToggle title="clearCacheOnClose" value={state.clearCacheOnClose} command="set-clear-cache-on-close" language={language} />
+      </>}
     </SettingsGroup>
     <div className="settings-feedback" role="status" aria-live="polite">{result}</div>
     {dialog && <ClearBrowsingDataDialog language={language} clearing={state.clearingBrowsingData} opener={opener} onDismiss={() => { setDialog(false); requestAnimationFrame(() => opener.current?.focus()); }} onCleared={result => {
@@ -231,9 +238,10 @@ export function Settings({ state, section, language, onOpen, openClearDialog, on
   state: BrowserState; section: SettingsSection; language: Language; onOpen: (section: SettingsSection) => void; openClearDialog?: boolean; onClearDialogOpened?: () => void;
 }) {
   const t = (key: CopyKey) => text(key, language);
+  if (state.privateWindow && (section === 'profiles' || section === 'privacy/sites')) section = section === 'profiles' ? 'general' : 'privacy';
   const current = section === 'privacy/sites' ? 'privacy' : section;
   return <section className="settings-page" aria-label={t('settings')}><nav className="settings-rail" aria-label={t('settingsSections')}><div className="settings-rail-heading"><HorizonMark /><span>{t('settings')}</span></div>
-    {SETTINGS_SECTIONS.map(({ section: target, label, icon: Icon }) => <button className={`settings-rail-row${target === current ? ' selected' : ''}`} type="button" key={target} aria-label={t(label)} title={t(label)} aria-current={target === current ? 'page' : undefined} onClick={() => onOpen(target)}><Icon aria-hidden="true" /><span>{t(label)}</span></button>)}
+    {SETTINGS_SECTIONS.filter(({ section }) => !state.privateWindow || section !== 'profiles').map(({ section: target, label, icon: Icon }) => <button className={`settings-rail-row${target === current ? ' selected' : ''}`} type="button" key={target} aria-label={t(label)} title={t(label)} aria-current={target === current ? 'page' : undefined} onClick={() => onOpen(target)}><Icon aria-hidden="true" /><span>{t(label)}</span></button>)}
   </nav><div className="settings-content"><div className="settings-column"><div className="settings-page-heading">{section === 'privacy/sites' && <button className="settings-back" type="button" onClick={() => onOpen('privacy')}><ChevronLeft aria-hidden="true" />{t('privacy')}</button>}<h1 id="settings-title" tabIndex={-1}>{t(section === 'privacy/sites' ? 'sitesOwnSettings' : current)}</h1></div>
     {section === 'general' && <GeneralSettings state={state} language={language} />}
     {section === 'appearance' && <AppearanceSettings state={state} language={language} />}

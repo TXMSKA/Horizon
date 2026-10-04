@@ -9,6 +9,10 @@ export interface SessionEntry { url: string; title: string }
 export interface SessionTab { url: string; title: string; zoom: number; entries: SessionEntry[]; index: number }
 export interface ClosedTab extends SessionTab { position: number }
 export interface SessionStore { version: 1; tabs: SessionTab[]; active: number; closed: ClosedTab[] }
+export interface WindowSession { id: string; selected: boolean; session: SessionStore }
+export interface WindowSessions { version: 2; windows: WindowSession[] }
+export const LEGACY_WINDOW_ID = '00000000-0000-4000-8000-000000000001';
+export const emptyWindowSessions = (): WindowSessions => ({ version: 2, windows: [] });
 export const CLOSED_TAB_LIMIT = 25;
 export const SESSION_TAB_LIMIT = 200;
 const HISTORY_LIMIT = 2000;
@@ -27,6 +31,40 @@ export function validateSession(value: unknown): value is SessionStore {
   return shape(value, ['version', 'tabs', 'active', 'closed']) && value.version === 1
     && Array.isArray(value.tabs) && value.tabs.length <= SESSION_TAB_LIMIT && Array.from(value.tabs).every(tab => tabShape(tab)) && index(value.active, value.tabs.length)
     && Array.isArray(value.closed) && value.closed.length <= CLOSED_TAB_LIMIT && Array.from(value.closed).every(tab => tabShape(tab, true));
+}
+export function validateWindowSessions(value: unknown): value is WindowSessions {
+  if (!shape(value, ['version', 'windows']) || value.version !== 2 || !Array.isArray(value.windows) || value.windows.length > 200) return false;
+  const ids = new Set<string>();
+  return Array.from(value.windows).every(window => {
+    if (!shape(window, ['id', 'selected', 'session']) || typeof window.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(window.id)
+      || ids.has(window.id) || typeof window.selected !== 'boolean' || !validateSession(window.session)) return false;
+    ids.add(window.id); return true;
+  });
+}
+export function writeWindowSessions(path: string, store: WindowSessions, cipher: StoreCipher): void {
+  if (!validateWindowSessions(store)) throw new Error('Invalid window sessions');
+  if (!cipher.isEncryptionAvailable()) throw new Error('Store encryption is unavailable');
+  writeStoreFile(path, store, cipher);
+}
+export function readWindowSessions(path: string, cipher: StoreCipher, ownAddress: (url: string) => boolean, status: StoreReadStatus): WindowSessions {
+  if (!cipher.isEncryptionAvailable()) { status.memoryOnly = true; status.readError = existsSync(path); return emptyWindowSessions(); }
+  try {
+    if (!existsSync(path)) return emptyWindowSessions();
+    const value = readStoreFile(path, cipher);
+    const migrated = validateSession(value);
+    const store = migrated ? { version: 2 as const, windows: [{ id: LEGACY_WINDOW_ID, selected: false, session: value }] } : value;
+    if (!validateWindowSessions(store)) throw new Error('Invalid window sessions');
+    const restored: WindowSessions = { version: 2, windows: store.windows.map(window => ({ ...window, session: restoreSession(window.session, ownAddress) })) };
+    if (migrated || !encryptedStore(path)) {
+      try { writeWindowSessions(path, restored, cipher); }
+      catch { status.readError = true; status.memoryOnly = true; }
+    }
+    return restored;
+  } catch {
+    status.readError = true;
+    try { if (existsSync(path)) renameSync(path, `${path}.corrupt-${randomUUID()}`); } catch { status.memoryOnly = true; }
+    return emptyWindowSessions();
+  }
 }
 export function sessionAddress(url: string, ownAddress: (url: string) => boolean): boolean {
   return url === '' || url === 'about:blank' || isWebURL(url) || settingsSection(url) !== null || ownAddress(url);
@@ -75,9 +113,12 @@ export function readSession(path: string, cipher: StoreCipher, ownAddress: (url:
   try {
     if (!existsSync(path)) return emptySession();
     const value = readStoreFile(path, cipher);
-    if (!validateSession(value)) throw new Error('Invalid session store');
-    const restored = restoreSession(value, ownAddress);
-    if (!encryptedStore(path)) writeSession(path, restored, cipher);
+    if (!validateSession(value) && !validateWindowSessions(value)) throw new Error('Invalid session store');
+    const restored = restoreSession(validateSession(value) ? value : value.windows[0]?.session ?? emptySession(), ownAddress);
+    if (!encryptedStore(path)) {
+      if (validateWindowSessions(value)) writeWindowSessions(path, { version: 2, windows: value.windows.map(window => ({ ...window, session: restoreSession(window.session, ownAddress) })) }, cipher);
+      else writeSession(path, restored, cipher);
+    }
     return restored;
   } catch {
     status.readError = true;

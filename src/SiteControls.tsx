@@ -45,6 +45,7 @@ function SitePopover({ id, label, labelledBy, describedBy, opener, onDismiss, on
   const ref = useRef<HTMLDivElement>(null);
   const dismiss = useRef(onDismiss);
   useLayoutEffect(() => { dismiss.current = onDismiss; });
+  useEffect(() => { if (!ref.current?.querySelector('button:not(:disabled)')) ref.current?.focus(); }, []);
   useEffect(() => {
     const outside = (event: PointerEvent) => {
       const target = event.target as Node;
@@ -53,19 +54,20 @@ function SitePopover({ id, label, labelledBy, describedBy, opener, onDismiss, on
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
   }, [opener]);
-  return <div className="site-popover" ref={ref} id={id} role="dialog" aria-label={label} aria-labelledby={labelledBy} aria-describedby={describedBy} onKeyDown={event => {
+  return <div className="site-popover" ref={ref} id={id} role="dialog" tabIndex={-1} aria-label={label} aria-labelledby={labelledBy} aria-describedby={describedBy} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss.current('escape'); return; }
     // The popover is mounted after the chrome, so leaving it by Tab would land at the start of the document.
     if (event.key !== 'Tab' || (event.target as HTMLElement).closest('[role=menu]')) { if (event.key === 'Tab') event.preventDefault(); return; }
     const stops = [...(ref.current?.querySelectorAll<HTMLElement>('button:not(:disabled):not([tabindex="-1"])') ?? [])];
+    if (!stops.length) { event.preventDefault(); onTabOut?.(event.shiftKey); return; }
     if (document.activeElement !== (event.shiftKey ? stops[0] : stops.at(-1))) return;
     event.preventDefault();
     if (onTabOut) onTabOut(event.shiftKey); else (event.shiftKey ? stops.at(-1) : stops[0])?.focus();
   }}>{children}</div>;
 }
 
-export function ShieldPopover({ site, counts, ready, blockAds, darkPages, language, favicon, initial, opener, onDismiss, onTabOut, run }: {
-  site: SiteSettings; counts: BlockedCounts; ready: boolean; blockAds: boolean; darkPages: DarkPagesState; language: Language; favicon?: string; initial: string;
+export function ShieldPopover({ site, privateWindow, counts, ready, blockAds, darkPages, language, favicon, initial, opener, onDismiss, onTabOut, run }: {
+  site: SiteSettings; privateWindow: boolean; counts: BlockedCounts; ready: boolean; blockAds: boolean; darkPages: DarkPagesState; language: Language; favicon?: string; initial: string;
   opener: RefObject<HTMLButtonElement | null>; onDismiss: (reason: 'escape' | 'outside') => void; onTabOut: (backward: boolean) => void; run: (command: BrowserCommand) => Promise<boolean>;
 }) {
   const t = (key: CopyKey) => text(key, language);
@@ -82,12 +84,12 @@ export function ShieldPopover({ site, counts, ready, blockAds, darkPages, langua
   return <SitePopover id="shield-popover" label={t('blockingOnSite')} opener={opener} onDismiss={onDismiss} onTabOut={onTabOut}>
     <SiteHeading host={site.host} favicon={favicon} initial={initial} />
     <hr />
-    <div className="site-blocking-row"><div className="site-blocking-copy"><span id={`${id}-blocking`}>{t('blockAdsTrackers')}</span><small id={`${id}-breakdown`}>{hint}</small></div><Switch checked={blockAds && site.blocking} disabled={!blockAds} labelledBy={`${id}-blocking`} describedBy={`${id}-breakdown`} buttonRef={switchRef} onChange={enabled => {
+    <div className="site-blocking-row"><div className="site-blocking-copy"><span id={`${id}-blocking`}>{t('blockAdsTrackers')}</span><small id={`${id}-breakdown`}>{hint}</small>{privateWindow && <small>{t('privateBlockingHint')}</small>}</div>{privateWindow ? <span>{t('on')}</span> : <Switch checked={blockAds && site.blocking} disabled={!blockAds} labelledBy={`${id}-blocking`} describedBy={`${id}-breakdown`} buttonRef={switchRef} onChange={enabled => {
       if (pending.current) return;
       pending.current = true;
       void run({ type: 'set-blocking', enabled }).finally(() => { pending.current = false; });
-    }} /></div>
-    <div className={`site-dark-row${darkHint ? ' with-hint' : ''}`}><div className="site-blocking-copy"><span id={`${id}-dark`}>{t('darkModeOnSite')}</span>{darkHint && <small id={`${id}-dark-hint`}>{darkHint}</small>}</div><Switch checked={darkPages.active && site.dark} disabled={!darkPages.active} labelledBy={`${id}-dark`} describedBy={darkHint ? `${id}-dark-hint` : undefined} onChange={enabled => {
+    }} />}</div>
+    <div className={`site-dark-row${darkHint ? ' with-hint' : ''}`}><div className="site-blocking-copy"><span id={`${id}-dark`}>{t('darkModeOnSite')}</span>{darkHint && <small id={`${id}-dark-hint`}>{darkHint}</small>}</div><Switch checked={darkPages.active && site.dark} disabled={!darkPages.active} buttonRef={privateWindow ? switchRef : undefined} labelledBy={`${id}-dark`} describedBy={darkHint ? `${id}-dark-hint` : undefined} onChange={enabled => {
       if (pending.current) return;
       pending.current = true;
       void run({ type: 'set-site-dark', enabled }).finally(() => { pending.current = false; });
@@ -96,12 +98,13 @@ export function ShieldPopover({ site, counts, ready, blockAds, darkPages, langua
     <span className="site-permissions-label">{t('sitePermissions')}</span>
     {SITE_PERMISSIONS.map(choice => {
       const row = permissionRows[choice], Icon = row.icon;
+      if (privateWindow) return <div className="site-permission-row" key={choice}><Icon aria-hidden="true" /><span>{t(row.name)}</span><small>{t('permissionBlocked')}</small></div>;
       return <button className="site-permission-row" key={choice} type="button" aria-haspopup="menu" aria-expanded={permission === choice} aria-controls={permission === choice ? 'site-permission-menu' : undefined} onClick={event => {
         if (pending.current) return;
         rowRef.current = event.currentTarget; setPermission(previous => previous === choice ? null : choice);
       }}><Icon aria-hidden="true" /><span>{t(row.name)}</span><small>{t(decisionLabels[site.permissions[choice]])}</small></button>;
     })}
-    {permission && <Menu key={permission} id="site-permission-menu" className="site-permission-menu" label={t(permissionRows[permission].name)} keyboard initialFocus="[aria-checked=true]" opener={rowRef} onDismiss={reason => { setPermission(null); if (reason !== 'outside') rowRef.current?.focus(); }}>
+    {permission && !privateWindow && <Menu key={permission} id="site-permission-menu" className="site-permission-menu" label={t(permissionRows[permission].name)} keyboard initialFocus="[aria-checked=true]" opener={rowRef} onDismiss={reason => { setPermission(null); if (reason !== 'outside') rowRef.current?.focus(); }}>
       {decisions.map(decision => <button type="button" role="menuitemradio" tabIndex={-1} key={decision} aria-checked={site.permissions[permission] === decision} onClick={() => {
         if (pending.current) return;
         pending.current = true;
