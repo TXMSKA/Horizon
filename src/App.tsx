@@ -10,7 +10,7 @@ import { text } from './copy';
 import type { CopyKey } from './copy';
 import { SEARCH_ENGINES } from './shared/api';
 import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureShot, ContextMenuItemId, DesktopPanelPage, Language, ProjectSummary, PageContextMenu, SettingsSection, WindowAction } from './shared/api';
-import { browserShortcut } from './shared/shortcuts';
+import { browserShortcut, completeAddress, shortcutTabIndex } from './shared/shortcuts';
 import { applyTheme } from './theme';
 import { Menu } from './Menu';
 import { Hub, hubApps } from './Hub';
@@ -305,6 +305,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const navigate = (input: string) => {
     setDirty(false);
     if (!input.trim()) return;
+    if (/^\?\s/.test(input)) { const query = input.slice(2).trim(); if (!query) return; input = SEARCH_ENGINES[state?.searchEngine ?? 'duckduckgo'].searchPrefix + encodeURIComponent(query); }
     dismissUndo();
     closeContextMenu();
     setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setSuggestionsOpen(false); setMenuOpen(false); setPanel(null); setStartSearch('');
@@ -462,17 +463,26 @@ export function App({ language: initialLanguage }: { language: Language }) {
     const index = tabs.findIndex(tab => tab.id === state?.activeId);
     if (action === 'capture') void openCapture();
     else if (action === 'focus-address') focusAddress();
+    else if (action === 'focus-search') { focusAddress(); setAddress('? '); setDirty(true); setSuggestionsOpen(false); requestAnimationFrame(() => addressRef.current?.setSelectionRange(2, 2)); }
+    else if (action === 'reopen-tab') { if (state?.canReopenTab) void run({ type: 'reopen-tab' }); }
+    else if (action === 'home') { closeFind(); openPanel(null); setDirty(false); setSuggestionsOpen(false); void run({ type: 'home' }).then(success => { if (success) requestAnimationFrame(focusAddress); }); }
+    else if (action === 'clear-browsing-data') openSettings('privacy', true);
+    else if (action === 'menu') { openPanel(null); setSuggestionsOpen(false); menuByKeyboard.current = true; setMenuOpen(true); }
+    else if (action === 'print') { openPanel(null); void run({ type: 'print' }); }
     else if (action === 'new-tab') { openPanel(null); setDirty(false); setSuggestionsOpen(false); closeFind(); void run({ type: 'new-tab' }).then(success => { if (success) requestAnimationFrame(focusAddress); }); }
     else if (action === 'close-tab' && active) { closeFind(); setDirty(false); setSuggestionsOpen(false); void run({ type: 'close-tab', id: active.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); }); }
     else if (action === 'next-tab' || action === 'previous-tab') {
-      const tab = tabs[(index + (action === 'next-tab' ? 1 : tabs.length - 1)) % tabs.length];
+      const tab = tabs[shortcutTabIndex(action, tabs.length, index)];
       if (tab) { closeFind(); openPanel(null); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); }); }
     } else if (action.startsWith('tab-')) {
-      const number = Number(action.slice(4)); const tab = tabs[number === 9 ? tabs.length - 1 : number - 1];
+      const tab = tabs[shortcutTabIndex(action, tabs.length, index)];
       if (tab) { closeFind(); openPanel(null); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); }); }
     } else if (action === 'history' || action === 'downloads' || action === 'favorites') openPanel(action === 'favorites' ? 'bookmarks' : action);
     else if (action === 'fullscreen') { openPanel(null); closeFind(); void run({ type: 'fullscreen' }); }
-    else if (action === 'find' && activeUrl && !active?.desktop && !active?.settings && !active?.error) { openPanel(null); setSuggestionsOpen(false); setFindOpen(true); requestAnimationFrame(() => { findRef.current?.focus(); findRef.current?.select(); }); }
+    else if ((action === 'find' || action === 'find-next' || action === 'find-previous') && activeUrl && !active?.desktop && !active?.settings && !active?.error) {
+      if (action !== 'find' && findOpen && findText) void run({ type: 'find', text: findText, forward: action === 'find-next', next: true });
+      else { openPanel(null); setSuggestionsOpen(false); setFindOpen(true); requestAnimationFrame(() => { findRef.current?.focus(); findRef.current?.select(); }); }
+    }
     else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') void run({ type: 'zoom', delta: action === 'zoom-in' ? 1 : action === 'zoom-out' ? -1 : 0 });
     else if (action === 'stop') {
       if (aboutOpen) setAboutOpen(false);
@@ -488,10 +498,10 @@ export function App({ language: initialLanguage }: { language: Language }) {
       else if (panel || menuOpen) { openPanel(null); setMenuOpen(false); menuButtonRef.current?.focus(); }
       else if (suggestionsOpen) { setSuggestionsOpen(false); addressRef.current?.focus(); }
       else void run({ type: 'stop' });
-    } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'bookmark') {
+    } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'reload-no-cache' || action === 'bookmark') {
       openPanel(null); setSuggestionsOpen(false); void run({ type: action });
     }
-  }, [aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, findOpen, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
+  }, [aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
   useEffect(() => {
     const unsubscribe = window.horizon.onShortcut(shortcut);
     const keydown = (event: KeyboardEvent) => {
@@ -508,7 +518,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
   }, [shortcut, run]);
 
   const suggestions = useMemo(() => {
-    const search = { kind: 'search' as const, url: `${SEARCH_ENGINES[state?.searchEngine ?? 'duckduckgo'].searchPrefix}${encodeURIComponent((dirty ? address : activeUrl).trim())}`, title: text('searchWeb', language).replace('{query}', (dirty ? address : activeUrl).trim()), hint: '' };
+    const searchQuery = (dirty ? address : activeUrl).trim().replace(/^\?\s+/, '');
+    const search = { kind: 'search' as const, url: `${SEARCH_ENGINES[state?.searchEngine ?? 'duckduckgo'].searchPrefix}${encodeURIComponent(searchQuery)}`, title: text('searchWeb', language).replace('{query}', searchQuery), hint: '' };
     if (!query) return [search];
     const seen = new Set<string>();
     const local = [...(state ? allFavoriteLinks(state.store.favorites) : []), ...(state?.store.history ?? [])].filter(item => {
@@ -586,6 +597,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
             onChange={event => { setDesktopOverlay(null); setShieldScope(null); setAddress(event.target.value); setDirty(true); setSuggestionIndex(-1); setSuggestionsOpen(Boolean(event.target.value.trim())); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setPanel(null); }}
             onBlur={event => { focusingClick.current = false; setAddressFocused(false); if (!dirty) setDirty(false); if (!event.relatedTarget || !(event.relatedTarget as HTMLElement).closest('.suggestions')) setSuggestionsOpen(false); }}
             onKeyDown={event => {
+              if (event.key === 'Enter' && event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) { event.preventDefault(); navigate(completeAddress(dirty ? address : activeUrl)); return; }
               if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setSuggestionsOpen(true); setSuggestionIndex(previous => !suggestions.length ? -1 : previous < 0 ? event.key === 'ArrowDown' ? 0 : suggestions.length - 1 : (previous + (event.key === 'ArrowDown' ? 1 : suggestions.length - 1)) % suggestions.length); }
               else if (event.key === 'Escape') { event.preventDefault(); setSuggestionsOpen(false); setDirty(false); addressRef.current?.focus(); }
             }} />
@@ -625,7 +637,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       void run({ type: 'switch-profile', id: profile.id }).then(success => { if (success) { setAnnouncement(t('switchedProfile').replace('{name}', profile.name)); profileButtonRef.current?.focus(); } });
     }} onNew={() => setProfileOpen('new')} onManage={() => openSettings('profiles')} />}
     {profileOpen === 'new' && state && <NewProfilePopover state={state} language={language} opener={profileButtonRef} onCancel={() => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus(); }} onSuccess={name => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); setAnnouncement(t('createdProfile').replace('{name}', name)); profileButtonRef.current?.focus(); }} />}
-    {menuOpen && <BrowserMenu language={language} active={active} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); shortcut(action); }} onPanel={openPanel} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
+    {menuOpen && <BrowserMenu language={language} active={active} canReopen={state?.canReopenTab ?? false} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); shortcut(action); }} onPanel={openPanel} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
     {panel === 'bookmarks' && state && <FavoritesPanel key={state.activeProfileId} state={state} language={language} opener={menuButtonRef} undo={undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} onDelete={destructive} run={run} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
     {panel && panel !== 'bookmarks' && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
     {aboutOpen && state && <AboutHorizon version={state.version} language={language} opener={menuButtonRef} onClose={() => setAboutOpen(false)} />}

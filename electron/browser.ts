@@ -28,8 +28,10 @@ import { captureWholePage, deadline, pngSize } from './captures';
 import { validCaptureRect } from '../src/shared/capture';
 import { addFavorite, createFavoriteFolder, deletedFavorite, favoriteDestination, favoriteLinks, favoriteLocation, favoriteName, favoriteTitle, moveFavorite, restoreFavorite } from './favorites';
 import type { DeletedFavorite } from './favorites';
+import { lazySession, readSession, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeSession } from './session-store';
+import type { SessionTab } from './session-store';
 
-interface Tab { state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
+interface Tab { restore?: SessionTab; restoring?: SessionTab; state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
 
 
 const profileSessions = new Set<Session>();
@@ -61,7 +63,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
     quickAccess: settings.quickAccess, showCapture: settings.showCapture,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
-    searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
+    onStart: settings.onStart, searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
     ...resolvedDownloadsFolder(settings, downloads), askWhereToSave: settings.askWhereToSave,
     blockAds: settings.blockAds, blockThirdPartyCookies: settings.blockThirdPartyCookies, clearingBrowsingData, defaultBrowser: defaultBrowser.status,
   });
@@ -109,6 +111,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       case 'pin-app': case 'unpin-app': settings.setAppPinned(command.id, command.type === 'pin-app'); publish(); return;
       case 'register-default-browser': return defaultBrowser.register().then(publish);
       case 'set-search-engine': settings.setSearchEngine(command.value); publish(); return;
+      case 'set-on-start': settings.setOnStart(command.value); publish(); return;
       case 'set-language': settings.setLanguage(command.value); publish(); return;
       case 'set-ask-where-to-save': settings.setAskWhereToSave(command.value); publish(); return;
       case 'set-show-capture': settings.setShowCapture(command.value); publish(); return;
@@ -182,7 +185,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const storePath = profileStorePath(userData, profile.id);
     const readStatus = { readError: false, memoryOnly: false };
     const store = readStore(storePath, safeStorage, readStatus);
-    const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, publish);
+    const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { persistSession(); publish(); });
+    const ownAddress = (url: string) => url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
+    const sessionPath = resolve(dirname(storePath), 'session.json');
+    const sessionStatus = { readError: false, memoryOnly: false };
+    const savedSession = readSession(sessionPath, safeStorage, ownAddress, sessionStatus);
+    let sessionWrite: ReturnType<typeof setTimeout> | undefined;
+    let sessionError = false;
     const desktopPanel: DesktopPanelState = { open: false, page: { kind: 'home' } };
     const tabs: Tab[] = [];
     let activeId = '';
@@ -287,10 +296,34 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     webSession.webRequest.onCompleted(details => { requests.delete(details.id); });
     webSession.webRequest.onErrorOccurred(details => { requests.delete(details.id); });
 
-    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion, storageError, storageReadError: readStatus.readError,
+    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
+      canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : siteSettings(store.siteSettings, active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: permissions.prompt(activeId) });
+    const snapshotTab = (tab: Tab): SessionTab => {
+      if (tab.restore || tab.restoring) return structuredClone((tab.restore ?? tab.restoring)!);
+      const history = !tab.state.settings && !tab.state.desktop ? page(tab.view)?.navigationHistory : undefined;
+      const entries = history?.getAllEntries() ?? [], selected = history?.getActiveIndex() ?? -1;
+      const start = Math.max(0, selected - 1000), kept = entries.slice(start, start + 2000);
+      // Chromium pageState can embed form values and file addresses; only addresses and titles cross the restore boundary.
+      return { url: tab.state.url, title: tab.state.title.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, 4096), zoom: tab.state.zoom,
+        entries: kept.map(entry => ({ url: entry.url, title: entry.title.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, 4096) })), index: kept.length ? Math.max(0, selected - start) : -1 };
+    };
+    const flushSession = () => {
+      clearTimeout(sessionWrite); sessionWrite = undefined;
+      if (sessionStatus.memoryOnly || disposed) return;
+      try {
+        const open = tabs.filter(tab => !tab.retryDownload);
+        const next = restoreSession({ ...savedSession, tabs: open.map(snapshotTab), active: open.findIndex(tab => tab.state.id === activeId) }, ownAddress);
+        writeSession(sessionPath, next, safeStorage); sessionError = false;
+      } catch { sessionError = true; }
+    };
+    const persistSession = () => {
+      if (disposed || closing || sessionStatus.memoryOnly) return;
+      clearTimeout(sessionWrite); sessionWrite = setTimeout(() => { flushSession(); publish(); }, 500);
+    };
     const flush = () => {
+      flushSession();
       if (pendingWrite === undefined) return;
       clearTimeout(pendingWrite); pendingWrite = undefined;
       try { writeStore(storePath, store, safeStorage); storageError = false; }
@@ -365,6 +398,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const layout = () => {
       if (window.isDestroyed()) return;
+      const selected = active();
+      if (isCurrent() && selected) resumeTab(selected);
       const { width, height } = window.getContentBounds();
       const top = Math.min(height, Math.ceil(area.top * window.webContents.getZoomFactor()));
       for (const tab of tabs) {
@@ -376,7 +411,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         tab.view.setVisible(isCurrent() && tab.state.id === activeId && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
       }
     };
-    const update = () => { layout(); publish(); };
+    const update = () => { persistSession(); layout(); publish(); };
     const applyDarkCSS = (tab: Tab) => {
       const contents = page(tab.view), generation = tab.pageLoad;
       if (!contents) return;
@@ -415,7 +450,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!contents) return;
       tab.state.zoom = delta === 0 ? 1 : Math.max(0.25, Math.min(3, Math.round((tab.state.zoom + delta * 0.1) * 100) / 100));
       contents.setZoomFactor(tab.state.zoom);
-      publish();
+      persistSession(); publish();
     };
     const clearFavicon = (tab: Tab, url?: string) => {
       let site = '';
@@ -453,6 +488,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const load = (tab: Tab, url: string, launch = false) => {
       if (!isAllowedURL(url) && !(launch && isLocalHTMLURL(url))) throw new Error('Invalid navigation URL');
+      tab.restore = undefined; tab.restoring = undefined;
       tab.state.desktop = null; tab.state.desktopItem = null; tab.state.settings = null;
       if (active() === tab) invalidateCaptures();
       invalidateMenu(tab.state.id);
@@ -474,10 +510,40 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (!disposed && tabs.includes(tab) && tab.navigation === navigation) fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
       });
     };
+    const makeTab = (url = ''): Tab => ({ pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } });
+    const restoredTab = (saved: SessionTab) => {
+      const tab = makeTab(saved.url);
+      tab.state.title = saved.title; tab.state.zoom = saved.zoom;
+      tab.state.settings = settingsSection(saved.url);
+      tab.state.desktop = ownAddress(saved.url) ? saved.url === 'horizon://desktop/captures' ? 'captures' : desktop.list().find(project => desktopAddress(project.name) === saved.url)!.id : null;
+      if (!tab.state.settings && !tab.state.desktop && saved.url) {
+        tab.restore = { url: saved.url, title: saved.title, zoom: saved.zoom, entries: structuredClone(saved.entries), index: saved.index };
+        tab.state.canGoBack = saved.index > 0; tab.state.canGoForward = saved.index >= 0 && saved.index < saved.entries.length - 1;
+      }
+      return tab;
+    };
+    function resumeTab(tab: Tab) {
+      const saved = tab.restore;
+      if (!saved || disposed || closing) return;
+      tab.restore = undefined;
+      const allowed = restorableTab(saved, ownAddress);
+      if (!allowed) { closeTab(tab); return; }
+      if (!allowed.entries.length) { load(tab, allowed.url); return; }
+      ensureView(tab);
+      const contents = page(tab.view)!;
+      tab.restoring = allowed; tab.state.loading = true; tab.navigating = true;
+      const navigation = tab.navigation = (tab.navigation ?? 0) + 1;
+      void contents.navigationHistory.restore({ entries: allowed.entries, index: allowed.index }).catch((error: unknown) => {
+        if (error instanceof Error && error.message.includes('ERR_ABORTED')) return;
+        if (!disposed && tabs.includes(tab) && page(tab.view) === contents && tab.navigation === navigation) fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
+      }).finally(() => {
+        if (tab.restoring === allowed) { tab.restoring = undefined; if (!disposed && !closing && tabs.includes(tab)) update(); }
+      });
+    }
     const newTab = (url?: string, foreground = true, contents?: WebContents, launch = false) => {
       if (disposed || closing) throw new Error('Profile is closed');
       if (tabs.length >= 200) throw new Error('Tab limit reached');
-      const tab: Tab = { pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), settings: null, desktop: null, desktopItem: null, url: url ?? '', title: url ?? '', favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
+      const tab = makeTab(url);
       clearFavicon(tab, url);
       tabs.push(tab);
       if (foreground || !activeId) activate(tab);
@@ -494,11 +560,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         target = newTab(); tabs.splice(tabs.indexOf(target), 1); tabs.splice(index + 1, 0, target);
       }
       target.state.settings = section; target.state.url = settingsAddress(section); target.state.title = 'Settings';
+      target.restore = undefined; target.restoring = undefined;
       activate(target); update(); return target;
     };
     const closeTab = (tab: Tab) => {
       const index = tabs.indexOf(tab);
       if (index < 0 || closing || disposed) return;
+      if (!tab.retryDownload) { const saved = restorableTab(snapshotTab(tab), ownAddress); if (saved) rememberClosed(savedSession, saved, index); }
       invalidateMenu(tab.state.id);
       permissions.drop(tab.state.id);
       leaveFullscreen(tab); clearFavicon(tab);
@@ -657,7 +725,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         tab.state.title = title.slice(0, 1024);
         const entry = store.history.find(entry => entry.url === tab.state.url);
         if (entry && !clearingData && !closing && !disposed) { entry.title = tab.state.title; persist(); }
-        publish();
+        persistSession(); publish();
       });
       contents.on('did-fail-load', (_event, code, description, url, mainFrame) => {
         if (tab.view !== view || !mainFrame) return;
@@ -683,13 +751,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (input.type !== 'keyDown' || input.isComposing) return;
         const shortcut = browserShortcut(input);
         if (!shortcut) return;
+        if (shortcut === 'reopen-tab' && !state().canReopenTab) { event.preventDefault(); return; }
         if (shortcut === 'fullscreen' || shortcut === 'stop' && tab.state.fullscreen) {
           event.preventDefault(); run({ type: shortcut === 'fullscreen' ? 'fullscreen' : 'stop' }); return;
         }
         if (shortcut === 'stop' && !contents.isLoading()) return;
         event.preventDefault();
         if (!isCurrent() || tab.state.id !== activeId) return;
-        if (['capture', 'focus-address', 'find', 'favorites', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
+        if (['capture', 'focus-address', 'focus-search', 'find', 'find-next', 'find-previous', 'menu', 'clear-browsing-data', 'reopen-tab', 'home', 'favorites', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
         window.webContents.send(IPC.shortcut, shortcut);
       });
       contents.on('zoom-changed', (_event, direction) => { if (tab.view === view && isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
@@ -757,6 +826,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const tab = active();
       const target = tabs.find(tab => tab.state.desktop === id) ?? (tab && !tab.view && !tab.state.url && !tab.state.desktop && !tab.state.settings ? tab : newTab());
       target.state.desktop = id; target.state.desktopItem = item ?? null;
+      target.restore = undefined; target.restoring = undefined;
       target.state.url = id === 'captures' ? 'horizon://desktop/captures' : desktopAddress(name); target.state.title = name;
       activate(target); if (id !== 'captures') desktop.use(id); update();
     };
@@ -822,6 +892,21 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!tab) return;
       const contents = page(tab.view);
       switch (command.type) {
+        case 'reopen-tab': {
+          const saved = takeClosed(savedSession, tabs.length, ownAddress);
+          if (!saved) return;
+          const target = restoredTab(saved); tabs.splice(saved.position, 0, target); activate(target); break;
+        }
+        case 'home': {
+          tab.restore = undefined; tab.restoring = undefined; invalidateMenu(tab.state.id); permissions.drop(tab.state.id); invalidateCaptures(); leaveFullscreen(tab);
+          const view = tab.view; tab.view = undefined;
+          if (view) { try { window.contentView.removeChildView(view); } catch { /* A crashed view may already be detached. */ } page(view)?.close(); }
+          clearFavicon(tab); tab.state = { ...makeTab().state, id: tab.state.id }; break;
+        }
+        case 'reload-no-cache': if (contents && !tab.state.settings && !tab.state.desktop) { tab.state.error = null; contents.reloadIgnoringCache(); } break;
+        case 'print': if (contents && isWebURL(tab.state.url) && !tab.state.error && !tab.state.settings && !tab.state.desktop) return new Promise<void>((resolve, reject) => {
+          contents.print({}, (success, reason) => { if (success || reason === 'Print job canceled') resolve(); else reject(new Error('PRINT_FAILED')); });
+        }); break;
         case 'open-settings': openSettings(command.section); break;
         case 'set-clear-history-on-close': case 'set-clear-cache-on-close': {
           if (readStatus.memoryOnly) throw new Error('PROFILE_SETTINGS_SAVE_FAILED');
@@ -1119,6 +1204,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (tab) { leaveFullscreen(tab); page(tab.view)?.stopFindInPage('clearSelection'); tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; }
     };
     const dispose = (discard = false) => {
+      if (!discard) flushSession();
+      clearTimeout(sessionWrite); sessionWrite = undefined;
       screenCapture = undefined;
       const attempt = (cleanup: () => void) => {
         if (!discard) { cleanup(); return; }
@@ -1148,6 +1235,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       requests.clear();
       if (!discard && (store.clearHistoryOnClose || store.clearCacheOnClose)) return clearBeforeDeadline([clearOnClose]);
     };
+    for (const { tab: saved, active: selected } of lazySession(savedSession, settings.onStart)) {
+      const tab = restoredTab(saved); tabs.push(tab); if (selected) activeId = tab.state.id;
+    }
     return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear };
 
   }
@@ -1237,6 +1327,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!quitCleared && needsClearOnClose()) { event?.preventDefault(); void finishClearing().then(() => app.quit()); }
   };
   window.on('close', (event: Electron.Event) => {
+    flush();
     if (!quitCleared && needsClearOnClose()) { event.preventDefault(); void finishClearing().then(() => window.close()); }
   });
   window.on('closed', () => {
@@ -1250,7 +1341,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   });
   app.on('before-quit', beforeQuit);
   const initial = runtimeFor(registry.profiles.find(profile => profile.id === registry.activeId)!);
-  initial.persist(); initial.newTab();
+  initial.persist(); if (!initial.tabs.length) initial.newTab(); else layout();
   void blocker.start();
   refreshDefaultBrowser();
   return { layout, openLaunch: (url: string) => { if (isWebURL(url) || isLocalHTMLURL(url)) current().newTab(url, true, undefined, true); } };

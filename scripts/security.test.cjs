@@ -11,11 +11,208 @@ const { createSettings, readSettings, writeSettings, validateSettings } = requir
 const { fetchFavicon, readFavicon, isFaviconURL, FAVICON_LIMIT } = require('../dist/electron/favicon.js');
 const { darkPagesActive, darkPagesCSS, DARK_FILTERS, MEDIAWIKI_DARK_CSS, setDarkPagesSwitch } = require('../dist/electron/dark-pages.js');
 const { browserShortcut } = require('../dist/src/shared/shortcuts.js');
+const { emptySession, validateSession, readSession, writeSession, restoreSession, lazySession, rememberClosed, takeClosed } = require('../dist/electron/session-store.js');
 const { cleanupPartitions, makeProfile, migrateStore, profileStorePath, readRegistry, validateRegistry, writeRegistry, removeProfileDirectory } = require('../dist/electron/profiles.js');
 const { randomUUID, createCipheriv, createDecipheriv } = require('node:crypto');
 const { contextMenuGroups, PageMenuSession } = require('../dist/electron/context-menu.js');
 const { PermissionQueue, defaultPermissions, requestedPermissions, setPermission, setBlocking, setSiteDark, siteSettings, stripCookieHeaders, cookieSite, secureOrigin, SITE_SETTINGS_LIMIT } = require('../dist/electron/site-settings.js');
 const testTemporaryRoot = resolve(process.env.HORIZON_TEST_TEMP ?? '.runtime');
+
+function sessionTab(url = 'https://example.com/current', title = 'Current') {
+  return { url, title, zoom: 1.3, entries: [{ url: 'https://example.com/back', title: 'Back' }, { url, title }, { url: 'https://example.com/forward', title: 'Forward' }], index: 1 };
+}
+
+test('session validation bounds every field and refuses unknown shapes', () => {
+  const sample = { version: 1, tabs: [sessionTab()], active: 0, closed: [{ ...sessionTab(), position: 0 }] };
+  assert.equal(validateSession(sample), true); assert.equal(validateSession(emptySession()), true);
+  for (const change of [
+    value => { value.version = 2; }, value => { value.extra = true; }, value => { delete value.closed; },
+    value => { value.tabs = new Array(201); }, value => { value.closed = new Array(26); }, value => { value.active = -1; }, value => { value.active = 1; },
+    value => { value.tabs[0].url = 'x'.repeat(8193); }, value => { value.tabs[0].title = '\0'; }, value => { value.tabs[0].zoom = NaN; }, value => { value.tabs[0].zoom = 3.1; },
+    value => { value.tabs[0].entries = new Array(2001); }, value => { value.tabs[0].entries[0].pageState = 'unexpected'; }, value => { value.tabs[0].index = 3; },
+    value => { value.closed[0].position = -1; }, value => { value.closed[0].position = 200; }, value => { value.closed[0].position = 0.5; },
+  ]) { const value = structuredClone(sample); change(value); assert.equal(validateSession(value), false); }
+});
+
+test('sessions drop forbidden pages and history, resolve own addresses and remap the active index', () => {
+  const own = url => url === 'horizon://desktop/research';
+  const good = sessionTab(); good.entries.splice(1, 0, { url: 'file:///private', title: 'Local' }); good.index = 2;
+  const store = { version: 1, tabs: [sessionTab('javascript:alert(1)'), good, sessionTab('horizon://desktop/research'), sessionTab('horizon://settings/privacy'), sessionTab('horizon://desktop/gone')], active: 1,
+    closed: ['data:text/html,unsafe', 'https://example.com/', 'horizon://settings/gone', 'https://user:password@example.com/', 'ftp://example.com/'].map(url => ({ ...sessionTab(url), position: 3 })) };
+  const restored = restoreSession(store, own);
+  assert.deepEqual(restored.tabs.map(tab => tab.url), [good.url, 'horizon://desktop/research', 'horizon://settings/privacy']);
+  assert.equal(restored.active, 0); assert.equal(restored.tabs[0].index, 1); assert.equal(restored.tabs[0].entries.length, 3);
+  assert.deepEqual(restored.closed.map(tab => tab.url), ['https://example.com/']); assert.equal(validateSession(restored), true);
+  assert.equal(restoreSession({ ...store, active: 4 }, own).active, 2);
+  assert.deepEqual(lazySession(restored, 'restore').map(tab => tab.load), [true, false, false]);
+  assert.deepEqual(lazySession(restored, 'new-page'), []);
+  const background = restoreSession({ ...store, tabs: [sessionTab(), sessionTab('https://other.example/')], active: 1 }, own);
+  assert.deepEqual(lazySession(background, 'restore').map(tab => [tab.active, tab.load]), [[false, false], [true, true]]);
+});
+
+test('session and closed tabs persist encrypted, recover corrupt data and stay atomic on write failure', t => {
+  const directory = temporaryDirectory(t, 'session-store'), path = join(directory, 'session.json'), cipher = authenticatedCipher(), status = () => ({ readError: false, memoryOnly: false });
+  const store = { version: 1, tabs: [sessionTab()], active: 0, closed: [] };
+  for (let i = 0; i < 30; i++) rememberClosed(store, sessionTab('https://example.com/' + i), i);
+  assert.equal(store.closed.length, 25); assert.equal(store.closed[0].url, 'https://example.com/29'); assert.equal(store.closed.at(-1).url, 'https://example.com/5');
+  writeSession(path, store, cipher); const bytes = readFileSync(path);
+  assert.equal(bytes.includes(Buffer.from('example.com')), false); assert.deepEqual(readSession(path, cipher, () => false, status()), store);
+  const reopened = readSession(path, cipher, () => false, status());
+  assert.equal(takeClosed(reopened, 2, () => false).position, 2); assert.equal(takeClosed(reopened, 1, () => false).url, 'https://example.com/28');
+  assert.throws(() => takeClosed(reopened, 200, () => false)); assert.equal(reopened.closed.length, 23);
+  writeSession(path, reopened, cipher); assert.equal(readSession(path, cipher, () => false, status()).closed.length, 23);
+  const previous = readFileSync(path), unavailable = status();
+  assert.deepEqual(readSession(path, plainCipher, () => false, unavailable), emptySession()); assert.equal(unavailable.memoryOnly, true); assert.deepEqual(readFileSync(path), previous);
+  assert.throws(() => writeSession(path, store, plainCipher)); assert.deepEqual(readFileSync(path), previous);
+  const fs = require('node:fs'), { compileFunction } = require('node:vm'), filename = resolve('dist/electron/store.js'), exported = {}, localRequire = require('node:module').createRequire(filename);
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...fs, renameSync() { throw new Error('Synthetic rename refusal'); } } : localRequire(name));
+  assert.throws(() => exported.writeStoreFile(path, store, cipher)); assert.deepEqual(readFileSync(path), previous); assert.deepEqual(readdirSync(directory), ['session.json']);
+  for (const corrupt of [Buffer.from('{'), Buffer.from(JSON.stringify({ ...store, active: 999 })), Buffer.from(bytes.map((byte, index) => index === bytes.length - 1 ? byte ^ 255 : byte))]) {
+    writeFileSync(path, corrupt); const failed = status(); assert.deepEqual(readSession(path, cipher, () => false, failed), emptySession()); assert.equal(failed.readError, true);
+  }
+  assert.equal(readdirSync(directory).filter(name => name.startsWith('session.json.corrupt-')).length, 3);
+  while (reopened.closed.length) takeClosed(reopened, 0, () => false);
+  assert.equal(takeClosed(reopened, 0, () => false), null);
+});
+
+test('On start migrates v5 on read, validates choices and persists both settings', t => {
+  const directory = temporaryDirectory(t, 'on-start'), path = join(directory, 'settings.json'), defaults = readSettings(path);
+  assert.equal(defaults.onStart, 'restore');
+  const legacy = { ...defaults, version: 5, theme: 'daylight', showCapture: false }; delete legacy.onStart;
+  writeFileSync(path, JSON.stringify(legacy)); const migrated = readSettings(path);
+  assert.equal(migrated.version, 6); assert.equal(migrated.onStart, 'restore'); assert.equal(migrated.theme, 'daylight'); assert.equal(migrated.showCapture, false);
+  const settings = createSettings(path, () => {});
+  for (const value of ['new-page', 'restore']) { settings.setOnStart(value); assert.equal(readSettings(path).onStart, value); assert.deepEqual(validateCommand({ type: 'set-on-start', value }), { type: 'set-on-start', value }); }
+  for (const value of ['last', true, null, undefined]) { assert.throws(() => settings.setOnStart(value), /SETTINGS_COMMAND_INVALID/); assert.equal(validateSettings({ ...migrated, onStart: value }), false); assert.throws(() => validateCommand({ type: 'set-on-start', value }), /SETTINGS_COMMAND_INVALID/); }
+});
+
+test('new browser shortcuts share pure mappings, tab selection and address completion', () => {
+  const { shortcutTabIndex, completeAddress } = require('../dist/src/shared/shortcuts.js');
+  for (const [key, control, shift, alt, expected] of [
+    ['t', true, true, false, 'reopen-tab'], ['F4', true, false, false, 'close-tab'], ['PageDown', true, false, false, 'next-tab'], ['PageUp', true, false, false, 'previous-tab'], ['9', true, false, false, 'tab-9'],
+    ['d', false, false, true, 'focus-address'], ['e', true, false, false, 'focus-search'], ['k', true, false, false, 'focus-search'], ['Home', false, false, true, 'home'], ['Delete', true, true, false, 'clear-browsing-data'],
+    ['F5', true, false, false, 'reload-no-cache'], ['F5', false, true, false, 'reload-no-cache'], ['r', true, true, false, 'reload-no-cache'], ['F3', false, false, false, 'find-next'], ['F3', false, true, false, 'find-previous'],
+    ['g', true, false, false, 'find-next'], ['g', true, true, false, 'find-previous'], ['p', true, false, false, 'print'], ['f', false, false, true, 'menu'], ['e', false, false, true, 'menu'],
+  ]) { const input = { key, control, shift, alt, meta: false }; assert.equal(browserShortcut(input), expected, key); assert.equal(browserShortcut({ ...input, meta: true }), null); }
+  for (const key of ['n', 's', 'Enter']) assert.equal(browserShortcut({ key, control: true, shift: false, alt: false, meta: false }), null);
+  assert.equal(shortcutTabIndex('tab-9', 12, 0), 11); assert.equal(shortcutTabIndex('tab-8', 12, 0), 7); assert.equal(shortcutTabIndex('tab-8', 2, 0), -1);
+  assert.equal(shortcutTabIndex('next-tab', 3, 2), 0); assert.equal(shortcutTabIndex('previous-tab', 3, 0), 2); assert.equal(shortcutTabIndex('next-tab', 0, -1), -1);
+  assert.equal(completeAddress(' horizon '), 'https://www.horizon.com/'); assert.equal(completeAddress('my-site'), 'https://www.my-site.com/');
+  for (const value of ['two words', 'example.org', 'https://example.com/', 'javascript:alert(1)', 'a/b', '-host', 'x'.repeat(64)]) assert.equal(completeAddress(value), value);
+  const { copy } = interfaceModule('src/copy.ts');
+  for (const key of ['onStart', 'tabsFromLastTime', 'aNewPage', 'reopenTab', 'reloadNoCache', 'print', 'PRINT_FAILED']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim());
+});
+
+test('browser restores only the active page, keeps background titles and restores history on first selection', async t => {
+  const cipher = authenticatedCipher(), profile = makeProfile('Personal', 'amber', true), other = makeProfile('Work', 'blue');
+  const saved = { version: 1, tabs: [sessionTab('https://first.example/', 'First'), sessionTab('https://second.example/', 'Second')], active: 1, closed: [{ ...sessionTab('https://closed.example/', 'Closed'), position: 9 }] };
+  const browser = notebookBrowser(t, cipher, { prepare(directory) {
+    writeRegistry(join(directory, 'profiles.json'), { version: 1, activeId: profile.id, profiles: [profile, other], tombstones: [] });
+    writeSession(join(directory, 'profiles', profile.id, 'session.json'), saved, cipher);
+    writeSession(join(directory, 'profiles', other.id, 'session.json'), { ...saved, tabs: [sessionTab('https://work.example/', 'Work')], active: 0 }, cipher);
+  } });
+  assert.equal(browser.views.length, 1); assert.equal(browser.views[0].webContents.restored.entries[1].url, 'https://second.example/');
+  assert.deepEqual(browser.state().tabs.map(tab => tab.title), ['First', 'Second']); assert.equal(browser.state().tabs[0].loading, false);
+  assert.equal(browser.state().tabs[1].zoom, 1.3); assert.equal(browser.views[0].webContents.zoom, 1.3);
+  browser.command({ type: 'activate-tab', id: browser.state().tabs[0].id }); assert.equal(browser.views.length, 2);
+  assert.deepEqual(browser.views[1].webContents.restored, { entries: saved.tabs[0].entries, index: 1 });
+  browser.command({ type: 'activate-tab', id: browser.state().tabs[1].id }); assert.equal(browser.views.length, 2);
+  browser.command({ type: 'switch-profile', id: other.id }); assert.equal(browser.views.length, 3); assert.equal(browser.state().tabs[0].title, 'Work');
+  browser.command({ type: 'reopen-tab' }); assert.equal(browser.state().tabs[1].title, 'Closed');
+  browser.command({ type: 'switch-profile', id: profile.id }); assert.deepEqual(browser.state().tabs.map(tab => tab.title), ['First', 'Second']); assert.equal(browser.state().canReopenTab, true);
+  await Promise.resolve(); await Promise.resolve();
+  browser.command({ type: 'reopen-tab' }); assert.equal(browser.state().tabs.at(-1).title, 'Closed'); assert.equal(browser.state().canReopenTab, false);
+  assert.deepEqual(browser.views.at(-1).webContents.restored, { entries: saved.closed[0].entries, index: 1 });
+  fireTimers(browser.timers, 500);
+  assert.equal(readSession(join(browser.directory, 'profiles', profile.id, 'session.json'), cipher, () => false, { readError: false, memoryOnly: false }).tabs.length, 3);
+  browser.close();
+});
+
+test('browser session writes debounce, flush on close and keep closed stack across restart and a new-page start', async t => {
+  const cipher = authenticatedCipher(), browser = notebookBrowser(t, cipher);
+  browser.navigate('https://first.example/'); browser.command({ type: 'new-tab', input: 'https://second.example/' });
+  const first = browser.state().tabs[0];
+  browser.views[0].webContents.entries = sessionTab(first.url, first.title).entries; browser.views[0].webContents.entryIndex = 1;
+  const path = join(browser.directory, 'profiles', browser.state().activeProfileId, 'session.json');
+  assert.equal(existsSync(path), false);
+  browser.command({ type: 'close-tab', id: first.id });
+  browser.command({ type: 'set-on-start', value: 'new-page' }); browser.close();
+  const saved = readSession(path, cipher, () => false, { readError: false, memoryOnly: false });
+  assert.equal(saved.tabs.length, 1); assert.equal(saved.closed.length, 1); assert.deepEqual(saved.closed[0].entries, sessionTab(first.url, first.title).entries);
+  const next = notebookBrowser(t, cipher, { directory: browser.directory });
+  assert.equal(next.state().tabs.length, 1); assert.equal(next.state().tabs[0].url, ''); assert.equal(next.views.length, 0);
+  next.command({ type: 'reopen-tab' }); assert.equal(next.state().tabs[0].url, first.url); assert.equal(next.views.length, 1);
+  const before = next.state(); next.command({ type: 'reopen-tab' }); assert.deepEqual(next.state(), before);
+  await Promise.resolve(); await Promise.resolve();
+  next.command({ type: 'set-on-start', value: 'restore' }); next.close();
+  const last = notebookBrowser(t, cipher, { directory: browser.directory });
+  assert.equal(last.state().tabs.length, 2); assert.equal(last.views.length, 1); assert.equal(last.state().canReopenTab, false); last.close();
+});
+
+test('page keys forward every new shortcut to chrome, preserve ordinary editing keys and execute native print and reload', async t => {
+  const browser = notebookBrowser(t); browser.navigate(); const contents = browser.views[0].webContents;
+  browser.command({ type: 'new-tab' }); browser.command({ type: 'close-tab', id: browser.state().activeId });
+  const keys = [
+    ['T', true, true, false, 'reopen-tab'], ['F4', true, false, false, 'close-tab'], ['PageDown', true, false, false, 'next-tab'], ['PageUp', true, false, false, 'previous-tab'],
+    ['9', true, false, false, 'tab-9'], ['D', false, false, true, 'focus-address'], ['E', true, false, false, 'focus-search'], ['K', true, false, false, 'focus-search'], ['Home', false, false, true, 'home'],
+    ['Delete', true, true, false, 'clear-browsing-data'], ['F5', true, false, false, 'reload-no-cache'], ['F5', false, true, false, 'reload-no-cache'],
+    ['F3', false, false, false, 'find-next'], ['F3', false, true, false, 'find-previous'], ['G', true, false, false, 'find-next'], ['G', true, true, false, 'find-previous'],
+    ['P', true, false, false, 'print'], ['F', false, false, true, 'menu'], ['E', false, false, true, 'menu'],
+  ];
+  for (const [key, control, shift, alt, shortcut] of keys) {
+    let prevented = false; contents.emit('before-input-event', { preventDefault() { prevented = true; } }, { key, control, shift, alt, meta: false, type: 'keyDown', isComposing: false });
+    assert.equal(prevented, true, key); assert.deepEqual(browser.window.webContents.sent.at(-1), ['horizon:shortcut', shortcut]);
+  }
+  for (const key of ['s', 'z', 'Enter']) contents.emit('before-input-event', { preventDefault() { assert.fail('Editing key taken'); } }, { key, control: true, shift: false, alt: false, meta: false, type: 'keyDown' });
+  browser.command({ type: 'reload-no-cache' }); assert.equal(contents.bypassedCache, 1);
+  await browser.command({ type: 'print' }); assert.deepEqual(contents.printOptions, {});
+  browser.command({ type: 'find', text: 'word', forward: false, next: true }); assert.deepEqual(contents.findArgs, ['word', { forward: false, findNext: false }]);
+  browser.command({ type: 'home' }); assert.equal(browser.state().tabs[0].url, ''); assert.equal(contents.isDestroyed(), true); assert.equal(browser.state().tabs.length, 1);
+});
+
+test('On start follows the General board order and uses the existing labelled keyboard segments in both languages', () => {
+  const ts = require('typescript'), { compileFunction } = require('node:vm'), { text } = interfaceModule('src/copy.ts');
+  const source = ts.createSourceFile('Settings.tsx', readFileSync('src/Settings.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const functions = ['GeneralSettings', 'SettingsSegmented'].map(name => source.statements.find(node => ts.isFunctionDeclaration(node) && node.name.text === name));
+  const compiled = ts.transpileModule(functions.map(node => 'export ' + node.getText(source)).join('\n'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const exported = {}, jsx = (type, props) => ({ type, props });
+  compileFunction(compiled, ['exports', 'require', 'text', 'SEARCH_ENGINES', 'SettingRow', 'SettingsDropdown', 'SettingsToggle', 'Folder'])(exported, () => ({ jsx, jsxs: jsx }), text, require('../dist/src/shared/api.js').SEARCH_ENGINES, 'row', 'dropdown', 'toggle', 'folder');
+  for (const language of ['en', 'es']) {
+    const tree = exported.GeneralSettings({ state: { defaultBrowser: 'notDefault', onStart: 'restore', languageSetting: 'system', language, searchEngine: 'duckduckgo' }, language });
+    const rows = interfaceChildren(tree); assert.deepEqual(rows.slice(0, 3).map(row => row.props.title), ['defaultBrowser', 'onStart', 'searchEngine']);
+    assert.equal(rows[1].props.hint, undefined); const commands = [];
+    const choice = rows[1].props.children('on-start', command => { commands.push(command); return Promise.resolve(true); }, false);
+    const group = exported.SettingsSegmented(choice.props), buttons = interfaceChildren(group);
+    assert.equal(group.props.role, 'radiogroup'); assert.equal(group.props['aria-labelledby'], 'on-start-title');
+    assert.deepEqual(buttons.map(button => [button.props.children, button.props.role, button.props['aria-checked'], button.props.tabIndex]), [[text('tabsFromLastTime', language), 'radio', true, 0], [text('aNewPage', language), 'radio', false, -1]]);
+    let focus = -1; const children = buttons.map((_, index) => ({ focus() { focus = index; } }));
+    buttons[0].props.onKeyDown({ key: 'ArrowRight', preventDefault() {}, currentTarget: { parentElement: { children } } });
+    assert.equal(focus, 1); assert.deepEqual(commands, [{ type: 'set-on-start', value: 'new-page' }]);
+    const disabled = exported.SettingsSegmented({ ...choice.props, disabled: true }); assert.ok(interfaceChildren(disabled).every(button => button.props.disabled));
+  }
+});
+
+test('chrome Find shortcuts advance in either direction, open Find when closed and reopening an empty stack stays silent', () => {
+  const ts = require('typescript'), { compileFunction } = require('node:vm');
+  const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let callback;
+  const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'shortcut' && ts.isCallExpression(node.initializer) && node.initializer.expression.getText(source) === 'useCallback') callback = node.initializer.arguments[0]; ts.forEachChild(node, visit); };
+  visit(source); assert.ok(callback);
+  const compiled = ts.transpileModule('export const shortcut = ' + callback.getText(source), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  const args = ['exports', 'state', 'active', 'activeUrl', 'findOpen', 'findText', 'run', 'openPanel', 'setSuggestionsOpen', 'setFindOpen', 'requestAnimationFrame', 'findRef', 'openSettings', 'menuByKeyboard', 'setMenuOpen', 'focusAddress', 'setAddress', 'setDirty', 'addressRef'];
+  for (const open of [false, true]) {
+    const exported = {}, commands = [], calls = [];
+    compileFunction(compiled, args)(exported, { tabs: [], canReopenTab: false }, {}, 'https://example.com/', open, 'needle', async command => commands.push(command), () => {}, () => {}, value => calls.push(['find', value]), callback => callback(), { current: { focus() {}, select() {} } }, (...values) => calls.push(['settings', ...values]), { current: false }, value => calls.push(['menu', value]), () => {}, value => calls.push(['address', value]), () => {}, { current: { setSelectionRange() {} } });
+    exported.shortcut('find-next'); exported.shortcut('find-previous');
+    if (open) assert.deepEqual(commands, [{ type: 'find', text: 'needle', forward: true, next: true }, { type: 'find', text: 'needle', forward: false, next: true }]);
+    else { assert.deepEqual(commands, []); assert.deepEqual(calls, [['find', true], ['find', true]]); }
+    const before = structuredClone([commands, calls]); exported.shortcut('reopen-tab'); assert.deepEqual([commands, calls], before);
+    exported.shortcut('clear-browsing-data'); assert.deepEqual(calls.at(-1), ['settings', 'privacy', true]);
+    exported.shortcut('menu'); assert.deepEqual(calls.at(-1), ['menu', true]);
+    exported.shortcut('focus-search'); assert.deepEqual(calls.at(-1), ['address', '? ']);
+  }
+  for (const type of ['reopen-tab', 'home', 'reload-no-cache', 'print']) { assert.deepEqual(validateCommand({ type }), { type }); assert.throws(() => validateCommand({ type, silent: true })); }
+});
 require('./desktop-recovery.test.cjs');
 require('./popup-position.test.cjs');
 
@@ -220,18 +417,18 @@ test('changing the drop folder during draft flush cancels the save without leavi
 test('quick access migrates settings versions 1 through 3 without losing their saved choices', t => {
   const directory = temporaryDirectory(t, 'quick-access-migration'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
-  assert.equal(defaults.version, 5); assert.deepEqual(defaults.quickAccess, []);
-  const third = { ...defaults, version: 3, searchEngine: 'brave', language: 'es', askWhereToSave: true, blockAds: false, blockThirdPartyCookies: false }; delete third.quickAccess; delete third.showCapture;
+  assert.equal(defaults.version, 6); assert.deepEqual(defaults.quickAccess, []);
+  const third = { ...defaults, version: 3, searchEngine: 'brave', language: 'es', askWhereToSave: true, blockAds: false, blockThirdPartyCookies: false }; delete third.quickAccess; delete third.showCapture; delete third.onStart;
   const versions = [{ version: 1, theme: 'amber', contrast: 'high' }, { version: 2, theme: 'daylight', contrast: 'standard', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' }, third];
   for (const previous of versions) {
     writeFileSync(path, JSON.stringify(previous));
-    const expected = { ...defaults, ...previous, version: 5, quickAccess: [], showCapture: true };
+    const expected = { ...defaults, ...previous, version: 6, quickAccess: [], showCapture: true };
     assert.deepEqual(readSettings(path), expected); assert.deepEqual(JSON.parse(readFileSync(path)), expected);
   }
   const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   writeFileSync(path, JSON.stringify(third));
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...localRequire(name), writeFileSync() { throw new Error('Read-only settings'); } } : localRequire(name));
-  assert.deepEqual(exported.readSettings(path), { ...defaults, ...third, version: 5, quickAccess: [], showCapture: true });
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...third, version: 6, quickAccess: [], showCapture: true });
   assert.deepEqual(JSON.parse(readFileSync(path)), third);
 });
 
@@ -1313,7 +1510,7 @@ test('chrome and web content share the same browser shortcut mapping', () => {
   assert.equal(browserShortcut(input('O', { control: true, shift: true })), 'favorites');
   for (const event of [input('o'), input('o', { control: true }), input('o', { control: true, shift: true, alt: true }), input('o', { control: true, shift: true, meta: true }), input('F11', { control: true }), input('F11', { shift: true }), input('F11', { alt: true })]) assert.equal(browserShortcut(event), null);
   assert.equal(browserShortcut(input('Escape')), 'stop');
-  for (const event of [input('t'), input('ArrowLeft'), input('t', { control: true, alt: true }), input('t', { control: true, shift: true }), input('t', { control: true, meta: true }), input('z', { control: true })]) {
+  for (const event of [input('t'), input('ArrowLeft'), input('t', { control: true, alt: true }), input('t', { control: true, meta: true }), input('z', { control: true })]) {
     assert.equal(browserShortcut(event), null);
   }
 });
@@ -2276,14 +2473,14 @@ test('settings validate themes, write atomically and preserve corrupt or oversiz
   assert.equal(settings.theme, 'system');
   assert.equal(createSettings(path, () => {}).migrationAllowed, false);
   assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
-  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 5, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true }), true);
+  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 6, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true }), true);
   for (const value of [null, [], {}, { version: 2, theme: 'system' }, { version: 1, theme: 'dark' }, { version: 1, theme: 'amber', extra: true }, { version: 1, theme: 'amber' }, { version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', contrast: null }, { version: 1, theme: 'amber', contrast: 'high', extra: true }]) {
     assert.equal(validateSettings(value), false);
     assert.throws(() => writeSettings(path, value));
   }
   for (const corrupt of ['{broken', JSON.stringify({ version: 2, theme: 'amber' }), ' '.repeat(4097)]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readSettings(path), { version: 5, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+    assert.deepEqual(readSettings(path), { version: 6, onStart: 'restore', theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
     assert.ok(readdirSync(directory).filter(name => name.startsWith('settings.json.corrupt-')).some(name => readFileSync(join(directory, name), 'utf8') === corrupt));
   }
   const existing = createSettings(path, () => {});
@@ -2444,7 +2641,7 @@ test('dark page flips replace views in every profile without closing tabs and si
 
 test('dark page settings validate exact values, migrate version 1 and retain valid data when migration cannot be saved', t => {
   const directory = temporaryDirectory(t, 'dark-settings'), path = join(directory, 'settings.json');
-  const defaults = { version: 5, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true };
+  const defaults = { version: 6, onStart: 'restore', theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true };
   assert.deepEqual(readSettings(path), defaults);
   for (const darkPages of ['off', 'on', 'system']) for (const darkStrength of ['soft', 'standard', 'deep']) for (const darkTone of ['neutral', 'warm']) {
     const valid = { ...defaults, darkPages, darkStrength, darkTone };
@@ -2619,25 +2816,25 @@ test('contrast defaults follow the OS only on first run and legacy settings migr
   const directory = temporaryDirectory(t, 'contrast');
   const first = join(directory, 'first.json');
   const settings = createSettings(first, () => {}, true);
-  assert.deepEqual(readSettings(first), { version: 5, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+  assert.deepEqual(readSettings(first), { version: 6, onStart: 'restore', theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   settings.setTheme('amber', true);
   assert.equal(settings.contrast, 'high');
   settings.setContrast('standard');
   assert.equal(settings.theme, 'amber');
-  assert.deepEqual(readSettings(first, true), { version: 5, theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+  assert.deepEqual(readSettings(first, true), { version: 6, onStart: 'restore', theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   assert.throws(() => settings.setContrast('invalid'));
   assert.equal(settings.contrast, 'standard');
   for (const theme of ['system', 'amber', 'daylight']) {
     const legacy = join(directory, theme + '.json');
     writeFileSync(legacy, JSON.stringify({ version: 1, theme }));
-    assert.deepEqual(readSettings(legacy, true), { version: 5, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
-    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 5, theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+    assert.deepEqual(readSettings(legacy, true), { version: 6, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 6, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
     assert.equal(createSettings(legacy, () => {}, true).migrationAllowed, false);
   }
   assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
   const blocked = join(directory, 'blocked');
   writeFileSync(blocked, 'file');
-  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 5, theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 6, onStart: 'restore', theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   const unavailable = createSettings(join(blocked, 'settings.json'), () => {}, true);
   assert.throws(() => unavailable.setContrast('standard'));
   assert.equal(unavailable.contrast, 'high');
@@ -3681,13 +3878,15 @@ function capturePNG(width, height) { const bytes = Buffer.from(faviconPNG); byte
 function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
   let close = () => {}; t.after(() => close());
-  const directory = temporaryDirectory(t, 'notebook-browser'), handlers = new Map(), views = [], timers = new Map(), sessions = new Map();
+  const directory = options.directory ?? temporaryDirectory(t, 'notebook-browser'), handlers = new Map(), views = [], timers = new Map(), sessions = new Map();
   const notebookModule = timedModule('desktop', timers), captureModule = timedModule('captures', timers);
   let contentsId = 0;
   class Contents extends EventEmitter {
     constructor(targetSession) {
       super(); this.id = ++contentsId; this.session = targetSession; this.zoom = 1; this.mainFrame = { url: 'horizon://app/' }; this.sent = []; this.protocol = [];
-      this.navigationHistory = { canGoBack: () => false, canGoForward: () => false, getAllEntries: () => [], getActiveIndex: () => -1 };
+      this.navigationHistory = { canGoBack: () => (this.entryIndex ?? -1) > 0, canGoForward: () => this.entryIndex >= 0 && this.entryIndex < (this.entries?.length ?? 0) - 1,
+        getAllEntries: () => this.entries ?? [], getActiveIndex: () => this.entryIndex ?? -1,
+        restore: async options => { this.restored = structuredClone(options); this.entries = structuredClone(options.entries); this.entryIndex = options.index; this.mainFrame.url = this.entries[this.entryIndex].url; } };
       this.debugger = { attach: () => { this.attached = true; }, detach: () => { this.attached = false; this.detached = (this.detached || 0) + 1; }, sendCommand: async (name, args) => {
         this.protocol.push([name, args]); return name === 'Page.getLayoutMetrics' ? { cssLayoutViewport: { clientWidth: 800 }, cssContentSize: { height: 600 } } : { data: faviconPNG.toString('base64') };
       } };
@@ -3695,13 +3894,15 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
     isDestroyed() { return !!this.destroyed; }
     send(...args) { this.sent.push(args); }
     setWindowOpenHandler(fn) { this.popup = fn; }
-    focus() {}
+    focus() { this.focused = (this.focused || 0) + 1; }
     setZoomMode() {}
     setZoomFactor(value) { this.zoom = value; }
     getZoomFactor() { return this.zoom; }
     getTitle() { return this.title || 'A web page'; }
     loadURL(url) { this.mainFrame.url = url; return Promise.resolve(); }
     isLoading() { return false; }
+    print(value, done) { this.printOptions = value; done(!options.printFailure, options.printFailure); }
+    findInPage(value, options) { this.findArgs = [value, options]; return 1; }
     stopFindInPage() {}
     insertCSS() { return Promise.resolve('style'); }
     removeInsertedCSS() { return Promise.resolve(); }
@@ -4178,10 +4379,10 @@ test('browser menu keeps the drawn order, shortcuts and working zoom controls', 
   const { BrowserMenu } = interfaceModule('src/BrowserMenu.tsx', { 'lucide-react': {}, './copy': copy, './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' } });
   const tree = BrowserMenu({ language: 'en', active: { url: 'https://example.com/', zoom: 1 }, keyboard: true, opener: { current: null }, onDismiss() {}, onShortcut: action => shortcuts.push(action), onPanel: panel => panels.push(panel), onSettings() {}, onAbout() {}, run: async command => { commands.push(command); return true; } });
   const items = notebookNodes(tree, node => node.props.role === 'menuitem');
-  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Favorites', 'History', 'Downloads', 'Settings', 'About Horizon']);
-  assert.deepEqual(notebookNodes(tree, node => node.type === 'kbd').map(node => node.props.children), ['Ctrl+T', 'Ctrl+F', 'Ctrl+Shift+O', 'Ctrl+H', 'Ctrl+J']);
+  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'Reopen closed tab', 'Close tab', 'Home', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Reload past the cache', 'Print page', 'Favorites', 'History', 'Downloads', 'Settings', 'Clear browsing data', 'About Horizon']);
+  assert.deepEqual(notebookNodes(tree, node => node.type === 'kbd').map(node => node.props.children), ['Ctrl+T', 'Ctrl+Shift+T', 'Ctrl+F4', 'Alt+Home', 'Ctrl+F', 'Ctrl+F5 / Shift+F5', 'Ctrl+P', 'Ctrl+Shift+O', 'Ctrl+H', 'Ctrl+J', 'Ctrl+Shift+Delete']);
   assert.equal(notebookNodes(tree, node => node.type === 'hr').length, 3);
-  items[1].props.onClick(); items[2].props.onClick(); items[3].props.onClick(); items[5].props.onClick();
+  items[4].props.onClick(); items[5].props.onClick(); items[6].props.onClick(); items[10].props.onClick();
   assert.deepEqual(commands, [{ type: 'zoom', delta: -1 }, { type: 'zoom', delta: 1 }]); assert.deepEqual(shortcuts, ['fullscreen']); assert.deepEqual(panels, ['bookmarks']);
   assert.ok(items.every(item => item.props.tabIndex === -1));
 });
@@ -4780,22 +4981,22 @@ test('locked project creation and capture explain refusal in place before sendin
   assert.equal(commands, 0); assert.equal(notebookNodes(render(), node => node.props.role === 'alert')[0].props.children, copy.text('DESKTOP_LOCKED', 'es'));
 });
 
-test('settings v5 validates every new field and migrates v2 without losing appearance', t => {
+test('settings v6 validates every new field and migrates v2 without losing appearance', t => {
   const directory = temporaryDirectory(t, 'settings-v3'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
-  assert.equal(defaults.version, 5);
+  assert.equal(defaults.version, 6);
   for (const [key, bad] of [['searchEngine', 'unknown'], ['language', 'fr'], ['downloadsFolder', 'relative'], ['askWhereToSave', 1], ['showCapture', 'false'], ['blockAds', null], ['blockThirdPartyCookies', 'false']]) {
     assert.equal(validateSettings({ ...defaults, [key]: bad }), false);
     const missing = { ...defaults }; delete missing[key]; assert.equal(validateSettings(missing), false);
   }
   const legacy = { version: 2, theme: 'daylight', contrast: 'high', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' };
   writeFileSync(path, JSON.stringify(legacy));
-  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 5 });
-  assert.equal(JSON.parse(readFileSync(path)).version, 5);
+  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 6 });
+  assert.equal(JSON.parse(readFileSync(path)).version, 6);
   const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   writeFileSync(path, JSON.stringify(legacy));
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...require(name), renameSync() { throw new Error('Read-only'); } } : localRequire(name));
-  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 5 });
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 6 });
   assert.equal(JSON.parse(readFileSync(path)).version, 2);
 });
 
@@ -5346,7 +5547,7 @@ test('context-menu text saves Chromium selection as plain text with source and r
 
 test('Capture toolbar preference defaults on, migrates version four and persists while the shortcut stays available', t => {
   const directory = temporaryDirectory(t, 'capture-setting'), path = join(directory, 'settings.json'), defaults = readSettings(path);
-  assert.equal(defaults.showCapture, true); const legacy = { ...defaults, version: 4 }; delete legacy.showCapture;
+  assert.equal(defaults.showCapture, true); const legacy = { ...defaults, version: 4 }; delete legacy.showCapture; delete legacy.onStart;
   writeFileSync(path, JSON.stringify(legacy)); assert.equal(readSettings(path).showCapture, true);
   const settings = createSettings(path, () => {}); settings.setShowCapture(false);
   assert.equal(readSettings(path).showCapture, false);

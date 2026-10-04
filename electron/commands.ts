@@ -1,6 +1,6 @@
 import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
 import { isWebURL } from './browsing';
-import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp } from './settings';
+import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
@@ -34,10 +34,11 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
   const command = object(value);
   const type = command.type;
   const settingsCommands = ['set-show-capture', 'open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'register-default-browser'];
-  if (settingsCommands.includes(type as string)) {
+  if (type === 'set-on-start' || settingsCommands.includes(type as string)) {
     let allowed: string[] = ['type'];
     let valid = false;
     switch (type) {
+      case 'set-on-start': allowed.push('value'); valid = isOnStart(command.value); break;
       case 'open-settings': allowed.push('section'); valid = ['general', 'appearance', 'privacy', 'privacy/sites', 'profiles'].includes(command.section as string); break;
       case 'set-search-engine': allowed.push('value'); valid = isSearchEngine(command.value); break;
       case 'set-language': allowed.push('value'); valid = isLanguageSetting(command.value); break;
@@ -188,8 +189,9 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     case 'delete-history': case 'delete-bookmark': keys(command, ['type', 'url']); valid = isWebURL(command.url); break;
     case 'restore':
       keys(command, ['type', 'kind']); valid = command.kind === 'history' || command.kind === 'bookmarks' || command.kind === 'downloads' || command.kind === 'desktop'; break;
+    case 'reopen-tab': case 'home': case 'reload-no-cache': case 'print':
     case 'back': case 'forward': case 'reload': case 'stop': case 'bookmark': case 'focus-page': case 'stop-find': case 'clear-history': case 'open-downloads-folder': case 'fullscreen':
-      keys(command, ['type']); valid = true; break;
+      keys(command, ['type']); valid = Object.hasOwn(command, 'type'); break;
   }
   if (!valid) throw new Error('Invalid browser command');
   return value as BrowserCommand;

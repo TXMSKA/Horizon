@@ -2,13 +2,14 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, u
 import { dirname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { HUB_APPS, QUICK_ACCESS_LIMIT, SEARCH_ENGINES } from '../src/shared/api';
-import type { Contrast, DarkPagesMode, DarkStrength, DarkTone, HubApp, Language, LanguageSetting, SearchEngine, Theme } from '../src/shared/api';
+import type { Contrast, DarkPagesMode, DarkStrength, DarkTone, HubApp, Language, LanguageSetting, OnStart, SearchEngine, Theme } from '../src/shared/api';
 
 interface LegacySettings { version: 1; theme: Theme; contrast?: Contrast }
 interface SettingsV2 { version: 2; theme: Theme; contrast: Contrast; darkPages: DarkPagesMode; darkStrength: DarkStrength; darkTone: DarkTone }
 interface SettingsV3 extends Omit<SettingsV2, 'version'> { version: 3; searchEngine: SearchEngine; language: LanguageSetting; downloadsFolder: string | null; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean }
 interface SettingsV4 extends Omit<SettingsV3, 'version'> { version: 4; quickAccess: HubApp[] }
-export interface Settings extends Omit<SettingsV4, 'version'> { version: 5; showCapture: boolean }
+interface SettingsV5 extends Omit<SettingsV4, 'version'> { version: 5; showCapture: boolean }
+export interface Settings extends Omit<SettingsV5, 'version'> { version: 6; onStart: OnStart }
 export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
   readonly migrationAllowed: boolean;
   readonly downloadsFolderUnavailable: boolean;
@@ -17,7 +18,9 @@ export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
   setAskWhereToSave(value: boolean): void; setBlockAds(value: boolean): void; setBlockThirdPartyCookies(value: boolean): void;
   setAppPinned(id: HubApp, pinned: boolean): void;
   setShowCapture(value: boolean): void;
+  setOnStart(value: OnStart): void;
 }
+export function isOnStart(value: unknown): value is OnStart { return value === 'restore' || value === 'new-page'; }
 export function isHubApp(value: unknown): value is HubApp { return typeof value === 'string' && HUB_APPS.includes(value as HubApp); }
 export function isQuickAccess(value: unknown): value is HubApp[] {
   return Array.isArray(value) && value.length <= QUICK_ACCESS_LIMIT && [...value].every(isHubApp) && new Set(value).size === value.length;
@@ -61,10 +64,15 @@ function v4Settings(value: unknown): value is SettingsV4 {
   const previous = { ...value }; delete previous.quickAccess;
   return v3Settings({ ...previous, version: 3 });
 }
-function settingsShape(value: unknown): value is Settings {
+function v5Settings(value: unknown): value is SettingsV5 {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const fields = value as Record<string, unknown>, previous = { ...fields }; delete previous.showCapture;
   return Object.hasOwn(fields, 'version') && fields.version === 5 && Object.hasOwn(fields, 'showCapture') && typeof fields.showCapture === 'boolean' && v4Settings({ ...previous, version: 4 });
+}
+function settingsShape(value: unknown): value is Settings {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const fields = value as Record<string, unknown>, previous = { ...fields }; delete previous.onStart;
+  return fields.version === 6 && Object.hasOwn(fields, 'onStart') && isOnStart(fields.onStart) && v5Settings({ ...previous, version: 5 });
 }
 export function validateSettings(value: unknown): value is Settings { return settingsShape(value) && (value.downloadsFolder === null || isDownloadsFolder(value.downloadsFolder)); }
 export function writeSettings(path: string, settings: Settings): void {
@@ -75,14 +83,14 @@ export function writeSettings(path: string, settings: Settings): void {
   finally { if (existsSync(temporary)) try { unlinkSync(temporary); } catch { /* Preserve the save failure. */ } }
 }
 export function readSettings(path: string, highContrast = false, status = { downloadsFolderUnavailable: false }): Settings {
-  const empty: Settings = { version: 5, theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true };
+  const empty: Settings = { version: 6, onStart: 'restore', theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true };
   try {
     if (!existsSync(path)) { empty.contrast = highContrast ? 'high' : 'standard'; writeSettings(path, empty); return empty; }
     let settings: Settings, migrated = false;
     try {
       if (statSync(path).size > 4096) throw new Error('Settings exceed size limit');
       const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
-      if (legacySettings(value) || v2Settings(value) || v3Settings(value) || v4Settings(value)) { settings = { ...empty, ...value, version: 5 }; migrated = true; }
+      if (legacySettings(value) || v2Settings(value) || v3Settings(value) || v4Settings(value) || v5Settings(value)) { settings = { ...empty, ...value, version: 6 }; migrated = true; }
       else if (settingsShape(value)) settings = value;
       else throw new Error('Invalid settings');
     } catch { renameSync(path, `${path}.corrupt-${randomUUID()}`); writeSettings(path, empty); return empty; }
@@ -111,6 +119,8 @@ export function createSettings(path: string, changed: (theme: Theme) => void, hi
     get downloadsFolderUnavailable() { return readStatus.downloadsFolderUnavailable || settings.downloadsFolder !== null && !isDownloadsFolder(settings.downloadsFolder); },
     get quickAccess() { return [...settings.quickAccess]; },
     get showCapture() { return settings.showCapture; },
+    get onStart() { return settings.onStart; },
+    setOnStart(value) { if (!isOnStart(value)) throw new Error('SETTINGS_COMMAND_INVALID'); save({ ...settings, onStart: value }); },
     setShowCapture(value) { if (typeof value !== 'boolean') throw new Error('SETTINGS_COMMAND_INVALID'); save({ ...settings, showCapture: value }); },
     setAppPinned(id, pinned) {
       if (!isHubApp(id) || typeof pinned !== 'boolean') throw new Error('QUICK_ACCESS_INVALID');
