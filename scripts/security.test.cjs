@@ -1054,7 +1054,7 @@ test('store writes atomically, recovers invalid files, and preserves corrupt ori
   assert.doesNotThrow(() => readStore(join(unavailable, 'browser.json')));
 });
 
-test('version 4 favorites migrate in order with new ids and a failed validation keeps the old file usable', t => {
+test('version 4 favorites migrate in order and remain writable above new title and count caps', t => {
   const directory = temporaryDirectory(t, 'favorite-migration'), path = join(directory, 'browser.json');
   const old = legacyStoreSample(sampleStore(directory));
   old.bookmarks.push({ url: 'https://second.example/', title: 'Second', createdAt: 2 });
@@ -1070,17 +1070,40 @@ test('version 4 favorites migrate in order with new ids and a failed validation 
   const unwriteable = legacyStoreSample(sampleStore(directory));
   unwriteable.bookmarks[0].title = 'L'.repeat(4096);
   writeFileSync(path, JSON.stringify(unwriteable));
-  const original = readFileSync(path);
   const restored = readStore(path);
   assert.equal(restored.favorites.bar[0].title.length, 4096);
-  assert.deepEqual(readFileSync(path), original);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), restored);
+  restored.clearHistoryOnClose = true; writeStore(path, restored);
+  assert.deepEqual(readStore(path), restored);
   assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-')), false);
   const many = legacyStoreSample(sampleStore(directory));
   many.bookmarks = Array.from({ length: 10001 }, (_, index) => ({ url: `https://example.com/${index}`, title: String(index), createdAt: index }));
   writeFileSync(path, JSON.stringify(many));
-  const saved = readFileSync(path);
-  assert.equal(readStore(path).favorites.bar.length, 10001);
-  assert.deepEqual(readFileSync(path), saved);
+  many.bookmarks[0].title = 'Old\n\t\u0085title';
+  writeFileSync(path, JSON.stringify(many));
+  const overLimit = readStore(path);
+  assert.equal(overLimit.favorites.bar.length, 10001);
+  assert.equal(overLimit.favorites.bar[0].title, many.bookmarks[0].title);
+  overLimit.clearCacheOnClose = true; writeStore(path, overLimit);
+  assert.deepEqual(readStore(path), overLimit);
+  const { addFavorite, favoriteTitle, moveFavorite } = require('../dist/electron/favorites.js');
+  assert.throws(() => addFavorite(overLimit.favorites, 'other', 0, 'https://new.example/', 'New'), /FAVORITE_LINK_LIMIT/);
+  assert.throws(() => favoriteTitle('x'.repeat(201)), /FAVORITE_TITLE_INVALID/);
+  moveFavorite(overLimit.favorites, overLimit.favorites.bar[0].id, 'other', 0);
+  writeStore(path, overLimit); assert.deepEqual(readStore(path), overLimit);
+});
+
+test('moves into a full stored folder fail without preventing reordering or later writes', t => {
+  const { moveFavorite, createFavoriteFolder } = require('../dist/electron/favorites.js');
+  const tree = { bar: [], other: [] }, folder = createFavoriteFolder(tree, 'bar', 0, 'Migrated links');
+  folder.children = Array.from({ length: 100000 }, (_, index) => ({ kind: 'link', id: randomUUID(), url: `https://example.com/${index}`, title: '', createdAt: 1 }));
+  const extra = { kind: 'link', id: randomUUID(), url: 'https://other.example/', title: '', createdAt: 1 }; tree.other.push(extra);
+  assert.throws(() => moveFavorite(tree, extra.id, folder.id, folder.children.length), /FAVORITE_LINK_LIMIT/);
+  assert.equal(tree.other[0], extra); assert.equal(folder.children.length, 100000);
+  const first = folder.children[0]; moveFavorite(tree, first.id, folder.id, folder.children.length);
+  assert.equal(folder.children.at(-1), first);
+  const path = join(temporaryDirectory(t, 'favorite-full-folder'), 'browser.json'), store = { ...emptyStore(), favorites: tree };
+  writeStore(path, store); assert.deepEqual(readStore(path), store);
 });
 
 test('favorites enforce nesting, item limits, moves and strict saved shape', () => {
@@ -1735,16 +1758,18 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     assert.equal([...timers.values()].filter(timer => timer.delay === 8000).length, 1);
     tick();
     assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[field], removed);
+    const restored = structuredClone(restoreStore[field]);
     if (kind === 'bookmarks') state().store.favorites.bar[0].url = 'https://changed.example/';
     else if (removed.length) state().store[kind][0].url = 'https://changed.example/';
+    if (kind === 'bookmarks') { restored.bar[0].url = 'https://changed.example/'; removed.bar[0].url = 'https://changed.example/'; }
     command({ type: 'restore', kind });
-    assert.deepEqual(state().store[field], restoreStore[field]);
+    assert.deepEqual(state().store[field], restored);
     assert.equal([...timers.values()].some(timer => timer.delay === 8000), false);
     tick();
-    assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[field], restoreStore[field]);
+    assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[field], restored);
     const writesAfterRestore = writes.length;
     command({ type: 'restore', kind });
-    assert.deepEqual(state().store[field], restoreStore[field]);
+    assert.deepEqual(state().store[field], restored);
     assert.equal(timers.size, 0);
     assert.equal(writes.length, writesAfterRestore);
     command(destructive);
@@ -3769,6 +3794,82 @@ test('favorite IPC keeps the current profile tree ordered, opens nested links, s
   browser.close();
 });
 
+test('favorite undo restores the deleted subtree while retaining subsequent additions, renames and moves', t => {
+  const browser = notebookBrowser(t), { command, state } = browser;
+  command({ type: 'create-favorite-folder', name: 'Deleted', parent: 'bar', position: 0 });
+  const deleted = state().store.favorites.bar[0];
+  command({ type: 'add-favorite', url: 'https://nested.example/', title: 'Nested', parent: deleted.id, position: 0 });
+  command({ type: 'create-favorite-folder', name: 'Kept', parent: 'bar', position: 1 });
+  const kept = state().store.favorites.bar[1], before = structuredClone(deleted);
+  command({ type: 'delete-favorite', id: deleted.id });
+  command({ type: 'rename-favorite', id: kept.id, name: 'Renamed' });
+  command({ type: 'move-favorite', id: kept.id, parent: 'other', position: 0 });
+  command({ type: 'add-favorite', url: 'https://new.example/', title: 'Added after deletion', parent: 'bar', position: 0 });
+  const added = structuredClone(state().store.favorites.bar[0]);
+  command({ type: 'restore', kind: 'bookmarks' });
+  assert.deepEqual(state().store.favorites.bar, [before, added]);
+  assert.equal(state().store.favorites.other[0].name, 'Renamed');
+  assert.equal(state().store.favorites.other[0].id, kept.id);
+  const path = profileStorePath(browser.directory, state().activeProfileId);
+  assert.deepEqual(readStore(path).favorites, state().store.favorites);
+  command({ type: 'restore', kind: 'bookmarks' });
+  assert.deepEqual(state().store.favorites.bar, [before, added]);
+});
+
+test('favorite undo clamps the position, falls back to its original root and refuses exceeded limits', () => {
+  const { addFavorite, createFavoriteFolder, deletedFavorite, restoreFavorite, FAVORITE_LINK_LIMIT } = require('../dist/electron/favorites.js');
+  const tree = { bar: [], other: [] }, parent = createFavoriteFolder(tree, 'other', 0, 'Parent');
+  addFavorite(tree, parent.id, 0, 'https://first.example/', 'First');
+  const removed = addFavorite(tree, parent.id, 1, 'https://deleted.example/', 'Deleted'), deleted = deletedFavorite(tree, removed.id);
+  parent.children = []; restoreFavorite(tree, deleted); assert.equal(parent.children[0].id, removed.id);
+  tree.other = []; addFavorite(tree, 'other', 0, 'https://remaining.example/', 'Remaining');
+  restoreFavorite(tree, deleted); assert.equal(tree.other.at(-1).id, removed.id);
+  const full = { bar: Array.from({ length: FAVORITE_LINK_LIMIT }, () => ({ ...removed, id: randomUUID() })), other: [] };
+  assert.throws(() => restoreFavorite(full, deleted), /FAVORITE_LINK_LIMIT/); assert.deepEqual(full.other, []);
+  const deep = { bar: [], other: [] }; let last = 'bar';
+  for (let depth = 0; depth < 8; depth++) last = createFavoriteFolder(deep, last, 0, `Level ${depth}`).id;
+  assert.throws(() => restoreFavorite(deep, { item: parent, parent: last, root: 'bar', position: 0 }), /FAVORITE_DEPTH_LIMIT/);
+});
+
+test('favorite edits are on disk before completion and failed writes preserve tree, version and undo', t => {
+  const options = {}, browser = notebookBrowser(t, plainCipher, options), { command, state } = browser;
+  browser.navigate('https://saved.example/'); command({ type: 'bookmark' });
+  const link = state().store.favorites.bar[0];
+  command({ type: 'create-favorite-folder', name: 'Folder', parent: 'bar', position: 1 });
+  const folder = state().store.favorites.bar[1], path = profileStorePath(browser.directory, state().activeProfileId);
+  const attempts = [
+    { type: 'add-favorite', url: 'https://new.example/', title: 'New', parent: 'other', position: 0 },
+    { type: 'create-favorite-folder', name: 'New folder', parent: 'other', position: 0 },
+    { type: 'rename-favorite', id: folder.id, name: 'Renamed folder' },
+    { type: 'rename-favorite', id: link.id, name: 'Renamed link' },
+    { type: 'move-favorite', id: link.id, parent: folder.id, position: 0 },
+    { type: 'rename-bookmark', url: link.url, title: 'Legacy rename' },
+    { type: 'delete-bookmark', url: link.url }, { type: 'delete-favorite', id: folder.id },
+    { type: 'bookmark' },
+  ];
+  for (const attempt of attempts) {
+    const before = structuredClone(state().store.favorites), version = state().favoritesVersion, bytes = readFileSync(path);
+    options.failStore = true;
+    assert.throws(() => command(attempt), /FAVORITE_STORAGE_FAILED/);
+    assert.deepEqual(state().store.favorites, before); assert.equal(state().favoritesVersion, version);
+    assert.equal(state().storageError, true); assert.deepEqual(readFileSync(path), bytes);
+    options.failStore = false;
+  }
+  browser.navigate('https://new-star.example/');
+  const beforeStar = structuredClone(state().store.favorites); options.failStore = true;
+  assert.throws(() => command({ type: 'bookmark' }), /FAVORITE_STORAGE_FAILED/); assert.deepEqual(state().store.favorites, beforeStar);
+  options.failStore = false; command({ type: 'bookmark' });
+  assert.deepEqual(readStore(path).favorites, state().store.favorites); assert.equal(state().storageError, false);
+  command({ type: 'delete-favorite', id: folder.id });
+  assert.deepEqual(readStore(path).favorites, state().store.favorites);
+  const beforeUndo = structuredClone(state().store.favorites), undoVersion = state().favoritesVersion, bytes = readFileSync(path);
+  options.failStore = true; assert.throws(() => command({ type: 'restore', kind: 'bookmarks' }), /FAVORITE_STORAGE_FAILED/);
+  assert.deepEqual(state().store.favorites, beforeUndo); assert.equal(state().favoritesVersion, undoVersion); assert.deepEqual(readFileSync(path), bytes);
+  options.failStore = false; command({ type: 'restore', kind: 'bookmarks' });
+  assert.equal(state().store.favorites.bar.some(item => item.id === folder.id), true);
+  assert.deepEqual(readStore(path).favorites, state().store.favorites);
+});
+
 test('notebook tabs are chrome pages, remain consistent across editing and never enter history or a web view', async t => {
   const browser = notebookBrowser(t), { state, command, notebook, views } = browser;
   command({ type: 'create-project', name: 'My Research' }); const id = state().projectInUse;
@@ -4172,6 +4273,78 @@ test('favorites panel expands its tree, filters nested links and sends id-based 
   await Promise.resolve();
   assert.equal(sent.at(-1).type, 'create-favorite-folder');
   assert.equal(sent.at(-1).name, 'Next');
+});
+
+test('favorite invalid submissions focus the field and retain the error until the name is valid', () => {
+  for (const language of ['en', 'es']) for (const kind of ['new', 'folder', 'link']) {
+    const hooks = notebookTestHooks(), sent = [], document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
+    const { FavoritesPanel } = favoritesInterface(hooks, sent, document);
+    const item = kind === 'link' ? { kind: 'link', id: randomUUID(), url: 'https://example.com/', title: 'Link', createdAt: 1 }
+      : { kind: 'folder', id: randomUUID(), name: 'Folder', createdAt: 1, children: [] };
+    const props = { state: { activeProfileId: randomUUID(), store: { favorites: { bar: [item], other: [] } } }, language,
+      run: async () => true, onDelete: async () => {}, opener: { current: null }, undo: null, onRestore() {}, onDismiss() {}, onAnnounce() {} };
+    const render = () => hooks.render(() => FavoritesPanel(props)); let tree = render();
+    if (kind === 'new') notebookNodes(tree, node => node.type === 'button' && node.props['aria-label'] === (language === 'en' ? 'New folder' : 'Nueva carpeta'))[0].props.onClick();
+    else {
+      notebookNodes(tree, node => node.props['data-tree-id'] === item.id)[0].props.onContextMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ left: 0, bottom: 0 }), focus() {} }, clientX: 0, clientY: 0 });
+      tree = render(); notebookNodes(tree, node => node.props.role === 'menuitem')[1].props.onClick();
+    }
+    tree = render(); let field = notebookNodes(tree, node => node.type === 'input')[0];
+    const control = { focus() { document.activeElement = control; } }; field.props.ref.current = control;
+    field.props.onChange({ target: { value: kind === 'link' ? 'x'.repeat(201) : '' } }); tree = render();
+    document.activeElement = { label: 'Save' };
+    notebookNodes(tree, node => node.type === 'form')[0].props.onSubmit({ preventDefault() {} });
+    assert.equal(document.activeElement, control); assert.deepEqual(sent, []);
+    tree = render(); field = notebookNodes(tree, node => node.type === 'input')[0]; assert.equal(field.props['aria-invalid'], true);
+    field.props.onChange({ target: { value: 'still\ninvalid' } }); tree = render(); field = notebookNodes(tree, node => node.type === 'input')[0];
+    assert.equal(field.props['aria-invalid'], true); assert.equal(notebookNodes(tree, node => node.props.role === 'alert').length, 1);
+    field.props.onChange({ target: { value: 'Valid name' } }); tree = render(); field = notebookNodes(tree, node => node.type === 'input')[0];
+    assert.equal(field.props['aria-invalid'], false); assert.equal(notebookNodes(tree, node => node.props.role === 'alert').length, 0);
+    hooks.dispose();
+  }
+});
+
+test('favorite drafts survive outside panel dismissal and remain scoped to the profile and item', () => {
+  let hooks = notebookTestHooks();
+  const react = Object.fromEntries(Object.keys(hooks.react).map(name => [name, (...args) => hooks.react[name](...args)]));
+  const listeners = new Map(), dismissed = [], document = { activeElement: null, addEventListener(name, fn) { const entries = listeners.get(name) ?? new Set(); entries.add(fn); listeners.set(name, entries); }, removeEventListener(name, fn) { listeners.get(name)?.delete(fn); } };
+  const { FavoritesPanel } = favoritesInterface({ react }, [], document);
+  const folder = { kind: 'folder', id: randomUUID(), name: 'Folder', createdAt: 1, children: [] };
+  const props = { state: { activeProfileId: randomUUID(), store: { favorites: { bar: [folder], other: [] } } }, language: 'en', run: async () => true,
+    onDelete: async () => {}, opener: { current: null }, undo: null, onRestore() {}, onDismiss: focus => dismissed.push(focus), onAnnounce() {} };
+  const render = () => hooks.render(() => FavoritesPanel(props));
+  const open = kind => {
+    let tree = render();
+    if (kind === 'new') notebookNodes(tree, node => node.type === 'button' && node.props['aria-label'] === 'New folder')[0].props.onClick();
+    else {
+      notebookNodes(tree, node => node.props['data-tree-id'] === folder.id)[0].props.onContextMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ left: 0, bottom: 0 }), focus() {} }, clientX: 0, clientY: 0 });
+      tree = render(); notebookNodes(tree, node => node.props.role === 'menuitem')[1].props.onClick();
+    }
+    return render();
+  };
+  for (const kind of ['rename', 'new']) {
+    let tree = open(kind); notebookNodes(tree, node => node.type === 'input')[0].props.onChange({ target: { value: `${kind} draft` } });
+    tree = render(); notebookNodes(tree, node => node.props.className?.includes('favorites-panel'))[0].props.ref.current = { contains: () => false, querySelector: () => null };
+    hooks.flush(); for (const listener of listeners.get('pointerdown')) listener({ target: { closest: () => null } });
+    assert.equal(dismissed.at(-1), false); hooks.dispose(); hooks = notebookTestHooks();
+    tree = open(kind); assert.equal(notebookNodes(tree, node => node.type === 'input')[0].props.value, `${kind} draft`);
+    hooks.dispose(); hooks = notebookTestHooks();
+  }
+  props.state = { ...props.state, activeProfileId: randomUUID() };
+  assert.equal(notebookNodes(open('new'), node => node.type === 'input')[0].props.value, ''); hooks.dispose();
+});
+
+test('favorite panel opening focuses its first control and Escape requests focus on the menu opener', () => {
+  const hooks = notebookTestHooks(), document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
+  const { FavoritesPanel } = favoritesInterface(hooks, [], document); const dismissed = [];
+  const props = { state: { activeProfileId: randomUUID(), store: { favorites: { bar: [], other: [] } } }, language: 'en', run: async () => true,
+    onDelete: async () => {}, opener: { current: null }, undo: null, onRestore() {}, onDismiss: focus => dismissed.push(focus), onAnnounce() {} };
+  const tree = hooks.render(() => FavoritesPanel(props)), panel = notebookNodes(tree, node => node.props.className?.includes('favorites-panel'))[0];
+  const control = { focus() { document.activeElement = control; } };
+  panel.props.ref.current = { querySelector(selector) { assert.equal(selector, '[role=treeitem][tabindex="0"], button:not(:disabled)'); return control; }, contains: () => true };
+  hooks.flush(); assert.equal(document.activeElement, control);
+  panel.props.onKeyDown({ key: 'Escape', defaultPrevented: false, preventDefault() {}, stopPropagation() {}, target: { closest: () => null } });
+  assert.deepEqual(dismissed, [true]); hooks.dispose();
 });
 
 test('favorites tree drag refuses descendants and moves a folder with its contents between roots', () => {

@@ -37,7 +37,7 @@ export function validFavorites(value: unknown): value is FavoritesTree {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const tree = value as Record<string, unknown>;
   if (Object.keys(tree).length !== 2 || !Array.isArray(tree.bar) || !Array.isArray(tree.other)) return false;
-  let folders = 0, links = 0;
+  let folders = 0;
   const ids = new Set<string>();
   const timestamp = (time: unknown) => typeof time === 'number' && Number.isSafeInteger(time) && time >= 0 && time <= 8640000000000000;
   const exact = (entry: Record<string, unknown>, keys: string[]) => Object.keys(entry).length === keys.length && keys.every(key => Object.hasOwn(entry, key));
@@ -47,9 +47,9 @@ export function validFavorites(value: unknown): value is FavoritesTree {
     if (!favoriteId(entry.id) || ids.has(entry.id) || !timestamp(entry.createdAt)) return false;
     ids.add(entry.id);
     if (entry.kind === 'link') {
-      links++;
-      return exact(entry, ['kind', 'id', 'url', 'title', 'createdAt']) && isWebURL(entry.url) && typeof entry.url === 'string' && entry.url.length <= 8192
-        && typeof entry.title === 'string' && entry.title.length <= 200 && !controls.test(entry.title);
+      // Version four accepted these values; editing limits must not strand a migrated store.
+      return exact(entry, ['kind', 'id', 'url', 'title', 'createdAt']) && isWebURL(entry.url)
+        && typeof entry.title === 'string' && entry.title.length <= 4096 && !entry.title.includes('\0');
     }
     if (entry.kind === 'folder') {
       folders++;
@@ -60,19 +60,19 @@ export function validFavorites(value: unknown): value is FavoritesTree {
     }
     return false;
   });
-  return walk(tree.bar, 0) && walk(tree.other, 0) && folders <= FAVORITE_FOLDER_LIMIT && links <= FAVORITE_LINK_LIMIT;
+  return walk(tree.bar, 0) && walk(tree.other, 0) && folders <= FAVORITE_FOLDER_LIMIT;
 }
 
-export function favoriteLocation(tree: FavoritesTree, id: string): { item: FavoriteItem; siblings: FavoriteItem[]; index: number; depth: number } | undefined {
-  const search = (siblings: FavoriteItem[], depth: number): ReturnType<typeof favoriteLocation> => {
+export function favoriteLocation(tree: FavoritesTree, id: string): { item: FavoriteItem; siblings: FavoriteItem[]; index: number; depth: number; parent: FavoriteParent; root: 'bar' | 'other' } | undefined {
+  const search = (siblings: FavoriteItem[], depth: number, parent: FavoriteParent, root: 'bar' | 'other'): ReturnType<typeof favoriteLocation> => {
     for (let index = 0; index < siblings.length; index++) {
       const item = siblings[index]!;
-      if (item.id === id) return { item, siblings, index, depth };
-      if (item.kind === 'folder') { const found = search(item.children, depth + 1); if (found) return found; }
+      if (item.id === id) return { item, siblings, index, depth, parent, root };
+      if (item.kind === 'folder') { const found = search(item.children, depth + 1, item.id, root); if (found) return found; }
     }
     return undefined;
   };
-  return search(tree.bar, 0) ?? search(tree.other, 0);
+  return search(tree.bar, 0, 'bar', 'bar') ?? search(tree.other, 0, 'other', 'other');
 }
 
 export function favoriteDestination(tree: FavoritesTree, parent: FavoriteParent): { items: FavoriteItem[]; depth: number } {
@@ -94,10 +94,15 @@ export function favoritePosition(position: number, length: number): void {
   if (!Number.isSafeInteger(position) || position < 0 || position > length) throw new Error('FAVORITE_POSITION_INVALID');
 }
 
+function favoriteRoom(items: FavoriteItem[], item: FavoriteItem['kind']): void {
+  if (items.length >= 100000) throw new Error(item === 'link' ? 'FAVORITE_LINK_LIMIT' : 'FAVORITE_FOLDER_LIMIT');
+}
+
 export function addFavorite(tree: FavoritesTree, parent: FavoriteParent, position: number, url: string, title: string): FavoriteLink {
   favoriteURL(url); favoriteTitle(title);
   const { items } = favoriteDestination(tree, parent); favoritePosition(position, items.length);
   if (favoriteCounts(tree).links >= FAVORITE_LINK_LIMIT) throw new Error('FAVORITE_LINK_LIMIT');
+  favoriteRoom(items, 'link');
   const link: FavoriteLink = { kind: 'link', id: randomUUID(), url, title, createdAt: Date.now() };
   items.splice(position, 0, link); return link;
 }
@@ -107,6 +112,7 @@ export function createFavoriteFolder(tree: FavoritesTree, parent: FavoriteParent
   const { items, depth } = favoriteDestination(tree, parent); favoritePosition(position, items.length);
   if (depth >= FAVORITE_DEPTH_LIMIT) throw new Error('FAVORITE_DEPTH_LIMIT');
   if (favoriteCounts(tree).folders >= FAVORITE_FOLDER_LIMIT) throw new Error('FAVORITE_FOLDER_LIMIT');
+  favoriteRoom(items, 'folder');
   const folder: FavoriteFolder = { kind: 'folder', id: randomUUID(), name: clean, createdAt: Date.now(), children: [] };
   items.splice(position, 0, folder); return folder;
 }
@@ -115,6 +121,7 @@ export function moveFavorite(tree: FavoritesTree, id: string, parent: FavoritePa
   const source = favoriteLocation(tree, id);
   if (!source) throw new Error('FAVORITE_NOT_FOUND');
   const destination = favoriteDestination(tree, parent);
+  if (source.siblings !== destination.items) favoriteRoom(destination.items, source.item.kind);
   if (source.item.kind === 'folder') {
     if (parent === id || containsFolder(source.item, parent)) throw new Error('FAVORITE_CYCLE');
     let maxDepth = 1;
@@ -126,6 +133,26 @@ export function moveFavorite(tree: FavoritesTree, id: string, parent: FavoritePa
   source.siblings.splice(source.index, 1);
   const index = source.siblings === destination.items && position > source.index ? position - 1 : position;
   destination.items.splice(index, 0, source.item);
+}
+
+export type DeletedFavorite = { item: FavoriteItem; parent: FavoriteParent; root: 'bar' | 'other'; position: number };
+
+export function deletedFavorite(tree: FavoritesTree, id: string): DeletedFavorite {
+  const location = favoriteLocation(tree, id);
+  if (!location) throw new Error('FAVORITE_NOT_FOUND');
+  return { item: structuredClone(location.item), parent: location.parent, root: location.root, position: location.index };
+}
+
+export function restoreFavorite(tree: FavoritesTree, deleted: DeletedFavorite): void {
+  const parent = deleted.parent === 'bar' || deleted.parent === 'other' || favoriteLocation(tree, deleted.parent)?.item.kind === 'folder' ? deleted.parent : deleted.root;
+  const { items, depth } = favoriteDestination(tree, parent), counts = favoriteCounts(tree);
+  const restored = favoriteCounts({ bar: [deleted.item], other: [] });
+  if (counts.links + restored.links > FAVORITE_LINK_LIMIT) throw new Error('FAVORITE_LINK_LIMIT');
+  if (counts.folders + restored.folders > FAVORITE_FOLDER_LIMIT) throw new Error('FAVORITE_FOLDER_LIMIT');
+  favoriteRoom(items, deleted.item.kind);
+  const height = (item: FavoriteItem): number => item.kind === 'link' ? 0 : 1 + Math.max(0, ...item.children.map(height));
+  if (depth + height(deleted.item) > FAVORITE_DEPTH_LIMIT) throw new Error('FAVORITE_DEPTH_LIMIT');
+  items.splice(parent === deleted.parent ? Math.min(deleted.position, items.length) : items.length, 0, structuredClone(deleted.item));
 }
 
 function containsFolder(folder: FavoriteFolder, id: string): boolean {

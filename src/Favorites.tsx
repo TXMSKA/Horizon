@@ -12,6 +12,7 @@ import { ToolbarPopover } from './ToolbarPopover';
 
 const FAVORITE_DRAG = 'application/x-horizon-favorite';
 let dragging: { profile: string; id: string } | null = null;
+const drafts = new Map<string, string>();
 type Root = 'bar' | 'other';
 type FolderTarget = { id: string; name: string; children: FavoriteItem[] };
 type ActionProps = {
@@ -35,11 +36,20 @@ function FavoriteBadge({ item }: { item: FavoriteItem }) {
 const itemName = (item: FavoriteItem) => item.kind === 'folder' ? item.name : item.title || item.url;
 const rootName = (root: Root, language: Language) => text(root === 'bar' ? 'favoritesBar' : 'otherFavorites', language);
 
+function nameError(value: string, link: boolean): CopyKey | null {
+  const name = link ? value : value.trim();
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) return link ? 'FAVORITE_TITLE_INVALID' : 'FAVORITE_NAME_INVALID';
+  if (!link && !name) return 'FAVORITE_NAME_EMPTY';
+  if (name.length > (link ? 200 : 80)) return link ? 'FAVORITE_TITLE_INVALID' : 'FAVORITE_NAME_LONG';
+  return null;
+}
+
 function useFavoriteActions({ state, language, run, onDelete }: ActionProps, close: () => void) {
   const [context, setContext] = useState<{ item: FavoriteItem; opener: RefObject<HTMLElement | null>; point: { x: number; y: number }; keyboard: boolean } | null>(null);
   const [form, setForm] = useState<{ kind: 'rename' | 'new' | 'move'; item?: FavoriteItem; parent: string; opener: RefObject<HTMLElement | null> } | null>(null);
   const [value, setValue] = useState(''), [error, setError] = useState(''), [pending, setPending] = useState(false);
-  const busy = useRef(false), id = useId();
+  const busy = useRef(false), field = useRef<HTMLInputElement>(null), id = useId();
+  const draftKey = (kind: 'rename' | 'new' | 'move', parent: string, item?: FavoriteItem) => JSON.stringify([state.activeProfileId, kind, kind === 'rename' ? item?.id : parent]);
   const t = (key: CopyKey) => text(key, language);
   const showMenu = (event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>, item: FavoriteItem) => {
     event.preventDefault(); event.stopPropagation();
@@ -53,9 +63,9 @@ function useFavoriteActions({ state, language, run, onDelete }: ActionProps, clo
   };
   const openForm = (kind: 'rename' | 'new' | 'move', opener: RefObject<HTMLElement | null>, parent: string, item?: FavoriteItem) => {
     if (busy.current) return;
-    setContext(null); setForm({ kind, opener, parent, item }); setValue(kind === 'rename' && item ? itemName(item) : ''); setError('');
+    setContext(null); setForm({ kind, opener, parent, item }); setValue(drafts.get(draftKey(kind, parent, item)) ?? (kind === 'rename' && item ? itemName(item) : '')); setError('');
   };
-  const cancel = () => { const opener = form?.opener; setForm(null); opener?.current?.focus(); };
+  const cancel = () => { const opener = form?.opener; if (form) drafts.delete(draftKey(form.kind, form.parent, form.item)); setForm(null); opener?.current?.focus(); };
   const perform = async (command: BrowserCommand) => {
     if (busy.current) return false;
     busy.current = true; setPending(true); setError('');
@@ -90,11 +100,11 @@ function useFavoriteActions({ state, language, run, onDelete }: ActionProps, clo
   }}><h2 id={`${id}-form-title`}>{t(form.kind === 'rename' ? 'rename' : form.kind === 'move' ? 'moveFavorite' : 'newFolder')}</h2>
     {form.kind === 'move' ? <div className="favorite-destinations" role="group" aria-label={t('chooseFavoriteFolder')}>{destinations(state.store.favorites).map(destination => <button autoFocus={destination.id === 'bar'} type="button" key={destination.id} disabled={pending || !canMoveFavorite(state.store.favorites, form.item!.id, destination.id)} onClick={() => { const position = destination.children.length; void perform({ type: 'move-favorite', id: form.item!.id, parent: destination.id, position }).then(success => { if (success) cancel(); }); }}><Folder aria-hidden="true" /><span>{destination.label}</span></button>)}</div> : <form className="profile-form" onSubmit={event => {
       event.preventDefault();
-      const link = form.item?.kind === 'link', name = link ? value : value.trim(), maximum = link ? 200 : 80;
-      if (!link && !name || name.length > maximum || /[\u0000-\u001f\u007f-\u009f]/.test(name)) { setError(t(link ? 'FAVORITE_TITLE_INVALID' : !name ? 'FAVORITE_NAME_EMPTY' : name.length > maximum ? 'FAVORITE_NAME_LONG' : 'FAVORITE_NAME_INVALID')); return; }
+      const link = form.item?.kind === 'link', name = link ? value : value.trim(), invalid = nameError(value, link);
+      if (invalid) { setError(t(invalid)); field.current?.focus(); return; }
       const command: BrowserCommand = form.kind === 'rename' ? { type: 'rename-favorite', id: form.item!.id, name } : { type: 'create-favorite-folder', parent: form.parent, name, position: favoriteChildren(state.store.favorites, form.parent)?.length ?? 0 };
       void perform(command).then(success => { if (success) cancel(); });
-    }}><label htmlFor={`${id}-name`}>{t(form.item?.kind === 'link' ? 'bookmarkName' : 'folderName')}</label><input id={`${id}-name`} autoFocus value={value} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} onChange={event => { setValue(event.target.value); setError(''); }} /><div className="profile-form-actions"><button className="profile-action quiet" type="button" disabled={pending} onClick={cancel}>{t('cancel')}</button><button className="profile-action primary" type="submit" disabled={pending}>{t('save')}</button></div></form>}
+    }}><label htmlFor={`${id}-name`}>{t(form.item?.kind === 'link' ? 'bookmarkName' : 'folderName')}</label><input ref={field} id={`${id}-name`} autoFocus value={value} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} onChange={event => { const next = event.target.value; setValue(next); drafts.set(draftKey(form.kind, form.parent, form.item), next); if (!nameError(next, form.item?.kind === 'link')) setError(''); }} /><div className="profile-form-actions"><button className="profile-action quiet" type="button" disabled={pending} onClick={cancel}>{t('cancel')}</button><button className="profile-action primary" type="submit" disabled={pending}>{t('save')}</button></div></form>}
     {error && <p className="profile-field-error" role="alert" id={`${id}-error`}>{error}</p>}
     {form.kind === 'move' && <button className="profile-action quiet" type="button" disabled={pending} onClick={cancel}>{t('cancel')}</button>}
   </section></div></PopupAnchor>}</>;
@@ -248,7 +258,7 @@ export function FavoritesPanel({ state, language, run, onDelete, opener, undo, o
   const treeFocus = visibleIds.has(focused) ? focused : 'bar';
   const noResults = Boolean(filter.trim()) && !tree.bar.length && !tree.other.length;
   const t = (key: CopyKey) => text(key, language);
-  useEffect(() => { ref.current?.querySelector<HTMLElement>('[role=treeitem] > button')?.focus(); }, []);
+  useEffect(() => { ref.current?.querySelector<HTMLElement>('[role=treeitem][tabindex="0"], button:not(:disabled)')?.focus(); }, []);
   useEffect(() => { if (searching) search.current?.focus(); }, [searching]);
   useEffect(() => { if (noResults) onAnnounce(text('noResultsTitle', language)); else onAnnounce(''); }, [noResults, language, onAnnounce]);
   useEffect(() => {
