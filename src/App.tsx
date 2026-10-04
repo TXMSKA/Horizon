@@ -11,6 +11,7 @@ import type { CopyKey } from './copy';
 import { SEARCH_ENGINES } from './shared/api';
 import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureShot, ContextMenuItemId, DesktopPanelPage, Language, ProjectSummary, PageContextMenu, SettingsSection, WindowAction } from './shared/api';
 import { browserShortcut, completeAddress, shortcutTabIndex } from './shared/shortcuts';
+import { webTabTitle } from './shared/tab-title';
 import { applyTheme } from './theme';
 import { Menu } from './Menu';
 import { Hub, hubApps } from './Hub';
@@ -559,7 +560,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
                 event.dataTransfer.setData('text/uri-list', tab.url);
                 event.dataTransfer.setData('text/plain', tab.title || tab.url);
               }}
-              title={tab.settings ? t('settings') : tab.desktop ? desktopTabTitle(tab, language) : tab.title || t('home')} onClick={() => { closeFind(); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }); }}
+              title={tab.settings ? t('settings') : tab.desktop ? desktopTabTitle(tab, language) : webTabTitle(tab, t('home'))} onClick={() => { closeFind(); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }); }}
               onKeyDown={event => {
                 let next = index;
                 if (event.key === 'ArrowRight') next = (index + 1) % state.tabs.length;
@@ -571,7 +572,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
                 void run({ type: 'activate-tab', id: selected.id }); document.getElementById(`tab-${selected.id}`)?.focus();
               }}>
               {tab.loading ? <LoaderCircle className="spinner accent" aria-label={t('loading')} /> : !tab.url || tab.desktop || tab.settings ? <HorizonMark /> : tab.favicon && favicons[tab.id]?.hash === tab.favicon ? <img className="tab-favicon" src={favicons[tab.id]?.url} alt="" aria-hidden="true" onError={() => setFavicons(previous => { if (previous[tab.id]?.hash !== tab.favicon) return previous; const next = { ...previous }; delete next[tab.id]; return next; })} /> : <span className="tab-initial" aria-hidden="true">{(tab.title || tab.url).slice(0, 1).toUpperCase()}</span>}
-              <span>{tab.settings ? t('settings') : tab.desktop ? desktopTabTitle(tab, language) : tab.title || t('home')}</span>
+              <span>{tab.settings ? t('settings') : tab.desktop ? desktopTabTitle(tab, language) : webTabTitle(tab, t('home'))}</span>
             </button>
             {iconButton(X, 'closeTab', () => { if (tab.id === state.activeId) closeFind(); void run({ type: 'close-tab', id: tab.id }); })}
           </div>)}

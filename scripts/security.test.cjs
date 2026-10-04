@@ -10,7 +10,7 @@ const { validateCommand, validateContentArea } = require('../dist/electron/comma
 const { createSettings, readSettings, writeSettings, validateSettings } = require('../dist/electron/settings.js');
 const { fetchFavicon, readFavicon, isFaviconURL, FAVICON_LIMIT } = require('../dist/electron/favicon.js');
 const { darkPagesActive, darkPagesCSS, DARK_FILTERS, MEDIAWIKI_DARK_CSS, setDarkPagesSwitch } = require('../dist/electron/dark-pages.js');
-const { browserShortcut } = require('../dist/src/shared/shortcuts.js');
+const { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } = require('../dist/src/shared/shortcuts.js');
 const { emptySession, validateSession, readSession, writeSession, restoreSession, lazySession, rememberClosed, takeClosed } = require('../dist/electron/session-store.js');
 const { cleanupPartitions, makeProfile, migrateStore, profileStorePath, readRegistry, validateRegistry, writeRegistry, removeProfileDirectory } = require('../dist/electron/profiles.js');
 const { randomUUID, createCipheriv, createDecipheriv } = require('node:crypto');
@@ -103,6 +103,115 @@ test('new browser shortcuts share pure mappings, tab selection and address compl
   for (const key of ['onStart', 'tabsFromLastTime', 'aNewPage', 'reopenTab', 'reloadNoCache', 'print', 'PRINT_FAILED']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim());
 });
 
+test('shortcut reservation gives document actions to pages and keeps browser tab management reserved', () => {
+  const reserved = ['new-tab', 'close-tab', 'reopen-tab', 'next-tab', 'previous-tab', 'fullscreen', ...Array.from({ length: 9 }, (_, index) => 'tab-' + (index + 1))];
+  const page = ['focus-address', 'focus-search', 'find', 'find-next', 'find-previous', 'reload', 'reload-no-cache', 'print', 'capture', 'bookmark', 'favorites', 'history', 'downloads', 'home', 'back', 'forward', 'menu', 'clear-browsing-data', 'zoom-in', 'zoom-out', 'zoom-reset', 'stop'];
+  for (const action of reserved) assert.equal(browserReservedShortcut(action), true, action);
+  for (const action of page) assert.equal(browserReservedShortcut(action), false, action);
+  assert.equal(browserReservedShortcut(null), false);
+  for (const action of [...reserved, ...page]) assert.equal(browserReservedShortcut(action, true), action === 'fullscreen' || action === 'stop', action);
+  const accelerators = browserShortcutAccelerators();
+  assert.equal(new Set(accelerators.map(item => item.accelerator)).size, accelerators.length);
+  for (const action of [...reserved, ...page]) assert.ok(accelerators.some(item => item.shortcut === action), action);
+  for (const item of accelerators) assert.equal(browserShortcut(item.input), item.shortcut);
+  assert.equal(browserShortcut({ key: 'k', control: true, alt: false, shift: false, meta: false }), 'focus-search');
+  assert.equal(browserReservedShortcut('focus-search'), false);
+});
+
+test('a page-consumed Ctrl+K stays in the page, while an unhandled key reaches chrome once', t => {
+  const browser = notebookBrowser(t); browser.navigate(); const contents = browser.views[0].webContents;
+  const input = { key: 'K', control: true, alt: false, shift: false, meta: false, type: 'keyDown' }, before = browser.window.webContents.sent.length;
+  const menu = browser.window.menu.find(item => item.accelerator === 'Ctrl+K');
+  assert.equal(menu.visible, false);
+  contents.emit('before-input-event', { preventDefault() { assert.fail('Ctrl+K belongs to the page first'); } }, input);
+  assert.equal(browser.window.webContents.sent.length, before);
+  assert.equal(contents.ignoreMenuShortcuts, false);
+  contents.focus(); menu.click({}, browser.window);
+  assert.deepEqual(browser.window.webContents.sent.slice(before), [['horizon:shortcut', 'focus-search']]);
+  for (const extra of [{ isComposing: true }, { type: 'keyUp' }]) {
+    const sent = browser.window.webContents.sent.length;
+    contents.emit('before-input-event', { preventDefault() { assert.fail('Composition and keyUp reach the page'); } }, { ...input, ...extra });
+    assert.equal(browser.window.webContents.sent.length, sent);
+    if (extra.isComposing) assert.equal(contents.ignoreMenuShortcuts, true);
+  }
+  const sent = browser.window.webContents.sent.length;
+  menu.click({}, {}); assert.equal(browser.window.webContents.sent.length, sent);
+  browser.command({ type: 'new-tab' });
+  assert.equal(contents.ignoreMenuShortcuts, true, 'A pending unhandled event from the old page cannot act on the next tab');
+  contents.emit('before-input-event', { preventDefault() { assert.fail('An inactive page cannot take a browser shortcut'); } }, input);
+  assert.equal(contents.ignoreMenuShortcuts, true);
+  menu.click({}, browser.window); assert.equal(browser.window.webContents.sent.filter(item => item[0] === 'horizon:shortcut').length, 1);
+  browser.close();
+});
+
+test('Home preserves native history, trims the old forward branch and survives restart and reopening', async t => {
+  const cipher = authenticatedCipher(), browser = notebookBrowser(t, cipher); browser.navigate('https://example.com/current'); browser.area(false);
+  const contents = browser.views[0].webContents, id = browser.state().activeId;
+  contents.entries = [{ url: 'https://example.com/back', title: 'Back', pageState: 'native-state' }, { url: 'https://example.com/current', title: 'Current', pageState: 'current-state' }, { url: 'https://example.com/old-forward', title: 'Old forward' }]; contents.entryIndex = 1;
+  const original = structuredClone(contents.entries.slice(0, 2));
+  const commit = () => { contents.emit('did-navigate', {}, contents.mainFrame.url); contents.emit('did-stop-loading'); };
+  const traverse = delta => {
+    contents.entryIndex += delta; contents.mainFrame.url = contents.entries[contents.entryIndex].url; contents.title = contents.entries[contents.entryIndex].title;
+    commit();
+  };
+  contents.navigationHistory.goBack = () => traverse(-1); contents.navigationHistory.goForward = () => traverse(1);
+  const load = contents.loadURL;
+  contents.loadURL = url => { contents.entries.splice(contents.entryIndex + 1, contents.entries.length, { url, title: '' }); contents.entryIndex++; return load.call(contents, url); };
+  browser.command({ type: 'home' }); commit();
+  const focused = browser.window.webContents.focused;
+  contents.emit('focus'); await new Promise(setImmediate);
+  assert.equal(browser.window.webContents.focused, focused + 1, 'The hidden Home entry cannot take the keyboard');
+  const pageFocus = contents.focused; browser.command({ type: 'focus-page' }); assert.equal(contents.focused, pageFocus);
+  assert.equal(contents.isDestroyed(), false); assert.equal(browser.views.length, 1); assert.equal(browser.state().activeId, id);
+  assert.equal(browser.views[0].visible, false); assert.deepEqual(contents.entries.slice(0, 2), original);
+  assert.deepEqual(contents.entries.at(-1), { url: 'about:blank', title: '' });
+  assert.equal(browser.state().tabs[0].url, ''); assert.equal(browser.state().tabs[0].canGoBack, true); assert.equal(browser.state().tabs[0].canGoForward, false);
+  browser.command({ type: 'home' }); assert.equal(contents.entries.length, 3);
+  browser.command({ type: 'back' }); assert.equal(browser.state().tabs[0].url, original[1].url); assert.equal(browser.views[0].visible, true);
+  assert.equal(browser.state().tabs[0].canGoBack, true); assert.equal(browser.state().tabs[0].canGoForward, true);
+  browser.command({ type: 'back' }); assert.equal(browser.state().tabs[0].url, original[0].url);
+  browser.command({ type: 'forward' }); browser.command({ type: 'forward' }); assert.equal(browser.state().tabs[0].url, '');
+  const path = join(browser.directory, 'profiles', browser.state().activeProfileId, 'session.json'); browser.close();
+  const saved = readSession(path, cipher, () => false, { readError: false, memoryOnly: false });
+  assert.equal(saved.tabs[0].url, ''); assert.equal(saved.tabs[0].index, 2); assert.equal(saved.tabs[0].entries.length, 3);
+  assert.ok(saved.tabs[0].entries.every(entry => !Object.hasOwn(entry, 'pageState')));
+  const next = notebookBrowser(t, cipher, { directory: browser.directory });
+  assert.equal(next.state().tabs[0].url, ''); assert.equal(next.state().tabs[0].canGoBack, true); assert.equal(next.views[0].visible, false);
+  assert.deepEqual(next.views[0].webContents.restored, { entries: saved.tabs[0].entries, index: 2 });
+  await Promise.resolve(); await Promise.resolve();
+  next.command({ type: 'close-tab', id: next.state().activeId }); next.command({ type: 'reopen-tab' });
+  assert.equal(next.state().tabs.at(-1).url, ''); assert.deepEqual(next.views.at(-1).webContents.restored, { entries: saved.tabs[0].entries, index: 2 });
+  next.close();
+});
+
+test('Home history validation preserves safe pages and discards unsafe entries without losing the blank index', () => {
+  const tab = { url: '', title: '', zoom: 1, entries: [{ url: 'file:///private', title: 'Unsafe' }, { url: 'https://example.com/', title: '' }, { url: 'about:blank', title: '' }], index: 2 };
+  const before = structuredClone(tab), restored = restoreSession({ version: 1, tabs: [tab], active: 0, closed: [] }, () => false);
+  assert.equal(restored.tabs[0].index, 1); assert.deepEqual(restored.tabs[0].entries, tab.entries.slice(1)); assert.deepEqual(tab, before);
+  assert.equal(validateSession(restored), true);
+});
+
+test('untitled live and lazy web tabs use their address without its scheme and only blank tabs use localized Home', t => {
+  const { webTabTitle } = require('../dist/src/shared/tab-title.js'), { text } = interfaceModule('src/copy.ts');
+  for (const language of ['en', 'es']) {
+    const home = text('home', language);
+    for (const url of ['', 'about:blank']) assert.equal(webTabTitle({ url, title: 'Old title' }, home), home);
+    for (const url of ['https://example.com/', 'http://example.com/path?q=one#two']) {
+      assert.equal(webTabTitle({ url, title: '' }, home), url.replace(/^https?:\/\//, ''));
+      assert.equal(webTabTitle({ url, title: url }, home), url.replace(/^https?:\/\//, ''));
+      assert.equal(webTabTitle({ url, title: 'Page title' }, home), 'Page title');
+    }
+  }
+  const cipher = authenticatedCipher(), profile = makeProfile('Personal', 'amber', true);
+  const browser = notebookBrowser(t, cipher, { prepare(directory) {
+    writeRegistry(join(directory, 'profiles.json'), { version: 1, activeId: profile.id, profiles: [profile], tombstones: [] });
+    writeSession(join(directory, 'profiles', profile.id, 'session.json'), { version: 1, tabs: [sessionTab(), sessionTab('https://untitled.example/path', '')], active: 0, closed: [] }, cipher);
+  } });
+  assert.equal(browser.views.length, 1); assert.equal(webTabTitle(browser.state().tabs[1], 'Home'), 'untitled.example/path');
+  browser.views[0].webContents.emit('page-title-updated', {}, ''); assert.equal(webTabTitle(browser.state().tabs[0], 'Home'), 'example.com/current');
+  browser.close();
+});
+
 test('browser restores only the active page, keeps background titles and restores history on first selection', async t => {
   const cipher = authenticatedCipher(), profile = makeProfile('Personal', 'amber', true), other = makeProfile('Work', 'blue');
   const saved = { version: 1, tabs: [sessionTab('https://first.example/', 'First'), sessionTab('https://second.example/', 'Second')], active: 1, closed: [{ ...sessionTab('https://closed.example/', 'Closed'), position: 9 }] };
@@ -149,7 +258,7 @@ test('browser session writes debounce, flush on close and keep closed stack acro
   assert.equal(last.state().tabs.length, 2); assert.equal(last.views.length, 1); assert.equal(last.state().canReopenTab, false); last.close();
 });
 
-test('page keys forward every new shortcut to chrome, preserve ordinary editing keys and execute native print and reload', async t => {
+test('page keys reserve tab management and dispatch other shortcuts only through unhandled accelerators', async t => {
   const browser = notebookBrowser(t); browser.navigate(); const contents = browser.views[0].webContents;
   browser.command({ type: 'new-tab' }); browser.command({ type: 'close-tab', id: browser.state().activeId });
   const keys = [
@@ -160,14 +269,22 @@ test('page keys forward every new shortcut to chrome, preserve ordinary editing 
     ['P', true, false, false, 'print'], ['F', false, false, true, 'menu'], ['E', false, false, true, 'menu'],
   ];
   for (const [key, control, shift, alt, shortcut] of keys) {
+    const before = browser.window.webContents.sent.length;
     let prevented = false; contents.emit('before-input-event', { preventDefault() { prevented = true; } }, { key, control, shift, alt, meta: false, type: 'keyDown', isComposing: false });
-    assert.equal(prevented, true, key); assert.deepEqual(browser.window.webContents.sent.at(-1), ['horizon:shortcut', shortcut]);
+    assert.equal(prevented, browserReservedShortcut(shortcut), key);
+    if (!prevented) {
+      assert.equal(browser.window.webContents.sent.length, before, 'The page gets the key first');
+      const accelerator = browserShortcutAccelerators().find(item => item.input.key.toLowerCase() === key.toLowerCase() && item.input.control === control && item.input.shift === shift && item.input.alt === alt);
+      contents.focus(); browser.window.menu.find(item => item.accelerator === accelerator.accelerator).click({}, browser.window);
+    }
+    assert.deepEqual(browser.window.webContents.sent.at(-1), ['horizon:shortcut', shortcut]);
   }
   for (const key of ['s', 'z', 'Enter']) contents.emit('before-input-event', { preventDefault() { assert.fail('Editing key taken'); } }, { key, control: true, shift: false, alt: false, meta: false, type: 'keyDown' });
   browser.command({ type: 'reload-no-cache' }); assert.equal(contents.bypassedCache, 1);
   await browser.command({ type: 'print' }); assert.deepEqual(contents.printOptions, {});
   browser.command({ type: 'find', text: 'word', forward: false, next: true }); assert.deepEqual(contents.findArgs, ['word', { forward: false, findNext: false }]);
-  browser.command({ type: 'home' }); assert.equal(browser.state().tabs[0].url, ''); assert.equal(contents.isDestroyed(), true); assert.equal(browser.state().tabs.length, 1);
+  browser.command({ type: 'home' }); assert.equal(browser.state().tabs[0].url, ''); assert.equal(contents.isDestroyed(), false); assert.equal(browser.state().tabs.length, 1);
+  browser.close();
 });
 
 test('On start follows the General board order and uses the existing labelled keyboard segments in both languages', () => {
@@ -1606,6 +1723,8 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     }
     get session() { return this.targetSession || webSession; }
     isDestroyed() { return this.destroyed; }
+    setIgnoreMenuShortcuts(value) { this.ignoreMenuShortcuts = value; }
+    isFocused() { return Boolean(this.focused); }
     send(...args) { this.sent.push(args); }
     focus() { this.focused = true; }
     setZoomMode(mode) { this.zoomMode = mode; }
@@ -1671,7 +1790,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const localRequire = createRequire(filename);
   const loaded = { exports: {} };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'module', '__filename', '__dirname', 'setTimeout', 'clearTimeout'])(loaded.exports,
-    name => name === 'electron' ? electron : name === './blocking' ? { createBlockingEngine() { return {
+    name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { createBlockingEngine() { return {
       get ready() { return mockBlockingReady; }, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '',
       match(url) { blockingCalls.push(url); return url.includes('/blocked-ad') ? { kind: 'ads' } : url.includes('/blocked-tracker') ? { kind: 'trackers' } : undefined; },
     }; } } : name === './store' ? { ...localRequire(name), writeStore(path, store, cipher) {
@@ -1692,6 +1811,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   window.getContentBounds = () => ({ width: 800, height: 600 });
   window.setFullScreen = fullscreen => { window.fullscreen = fullscreen; };
   window.setTitle = title => { window.title = title; };
+  window.setMenu = function (menu) { this.menu = menu; };
   window.contentView = { addChildView() {}, removeChildView() {} };
   const themes = [];
   const settings = createSettings(join(directory, 'settings.json'), value => themes.push(value));
@@ -1848,11 +1968,13 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(window.webContents.sent.length, sentBefore);
   view.webContents.loading = true;
   view.webContents.emit('before-input-event', shortcutEvent, shortcutInput('Escape'));
-  assert.equal(preventedShortcut, true);
+  assert.equal(preventedShortcut, false);
+  view.webContents.focus(); window.menu.find(item => item.accelerator === 'Escape').click({}, window);
   assert.deepEqual(window.webContents.sent.at(-1), ['horizon:shortcut', 'stop']);
   view.webContents.loading = false; preventedShortcut = false;
   view.webContents.emit('before-input-event', shortcutEvent, shortcutInput('F6'));
-  assert.equal(preventedShortcut, true);
+  assert.equal(preventedShortcut, false);
+  view.webContents.focus(); window.menu.find(item => item.accelerator === 'F6').click({}, window);
   assert.deepEqual(window.webContents.sent.at(-1), ['horizon:shortcut', 'focus-address']);
   command({ type: 'zoom', delta: 1 });
   assert.equal(state().tabs[0].zoom, 1.1);
@@ -2037,7 +2159,9 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   press('Escape'); assert.equal(window.fullscreen, false); assert.equal(state().tabs[0].fullscreen, false);
   let preventedFavorites = false;
   view.webContents.emit('before-input-event', { preventDefault() { preventedFavorites = true; } }, { type: 'keyDown', key: 'O', control: true, shift: true, alt: false, meta: false });
-  assert.equal(preventedFavorites, true); assert.deepEqual(window.webContents.sent.at(-1), ['horizon:shortcut', 'favorites']);
+  assert.equal(preventedFavorites, false);
+  view.webContents.focus(); window.menu.find(item => item.accelerator === 'Ctrl+Shift+O').click({}, window);
+  assert.deepEqual(window.webContents.sent.at(-1), ['horizon:shortcut', 'favorites']);
   view.webContents.emit('enter-html-full-screen');
   assert.equal(window.fullscreen, true);
   assert.equal(state().tabs[0].fullscreen, true);
@@ -2423,7 +2547,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(loaded.exports.isProfileSession(webSession), false);
   const freshWindow = new EventEmitter();
   freshWindow.webContents = new Contents();
-  for (const key of ['isDestroyed', 'getContentBounds', 'setFullScreen', 'setTitle', 'contentView']) freshWindow[key] = window[key];
+  for (const key of ['isDestroyed', 'getContentBounds', 'setFullScreen', 'setTitle', 'setMenu', 'contentView']) freshWindow[key] = window[key];
   loaded.exports.createBrowser(freshWindow, directory, join(directory, 'downloads'), settings);
   assert.equal(existsSync(join(directory, 'profiles', work.id)), false, 'Tombstone cleanup retries the store folder');
   const freshEvent = { sender: freshWindow.webContents, senderFrame: freshWindow.webContents.mainFrame };
@@ -2508,6 +2632,8 @@ test('dark page flips replace views in every profile without closing tabs and si
       };
     }
     isDestroyed() { return !!this.destroyed; }
+    setIgnoreMenuShortcuts(value) { this.ignoreMenuShortcuts = value; }
+    isFocused() { return Boolean(this.focused); }
     send(...args) { this.sent.push(args); }
     focus() {}
     setZoomMode() {}
@@ -2548,11 +2674,11 @@ test('dark page flips replace views in every profile without closing tabs and si
     } },
   };
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
-  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? electron : name === './blocking' ? {
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? {
     createBlockingEngine: () => ({ ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '', match: () => undefined }),
   } : localRequire(name), require('node:path').dirname(filename));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
-    getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen(value) { this.fullscreen = value; }, contentView: { addChildView() {}, removeChildView() {} },
+    getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen(value) { this.fullscreen = value; }, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} },
   });
   const settings = createSettings(join(directory, 'settings.json'), () => {});
   exported.createBrowser(window, directory, join(directory, 'downloads'), settings);
@@ -3892,6 +4018,8 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
       } };
     }
     isDestroyed() { return !!this.destroyed; }
+    setIgnoreMenuShortcuts(value) { this.ignoreMenuShortcuts = value; }
+    isFocused() { return Boolean(this.focused); }
     send(...args) { this.sent.push(args); }
     setWindowOpenHandler(fn) { this.popup = fn; }
     focus() { this.focused = (this.focused || 0) + 1; }
@@ -3938,9 +4066,9 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
-    name === 'electron' ? electron : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
+    name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
-    getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, contentView: { addChildView() {}, removeChildView() {} } });
+    getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
   electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
   electron.shell = { openExternal: async () => assert.fail('System settings must stay mocked'), showItemInFolder: path => { options.shownPath = path; }, openPath: async () => '' };
   Contents.prototype.stop = function () { this.stops = (this.stops || 0) + 1; };

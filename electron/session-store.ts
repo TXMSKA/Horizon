@@ -33,11 +33,12 @@ export function sessionAddress(url: string, ownAddress: (url: string) => boolean
 }
 export function restorableTab<T extends SessionTab>(tab: T, ownAddress: (url: string) => boolean): T | null {
   if (!sessionAddress(tab.url, ownAddress)) return null;
-  const entries = isWebURL(tab.url) ? tab.entries.filter(entry => isWebURL(entry.url) || entry.url === 'about:blank') : [];
+  const home = tab.url === '' || tab.url === 'about:blank';
+  const entries = isWebURL(tab.url) || home ? tab.entries.filter(entry => isWebURL(entry.url) || entry.url === 'about:blank') : [];
   const selected = tab.entries[tab.index];
   let selectedIndex = selected ? entries.indexOf(selected) : -1;
   // A rejected current history entry must not replace the allowed address the tab was showing.
-  if (entries.length && (selectedIndex < 0 || entries[selectedIndex]!.url !== tab.url)) { entries.splice(0, entries.length, { url: tab.url, title: tab.title }); selectedIndex = 0; }
+  if (entries.length && (selectedIndex < 0 || entries[selectedIndex]!.url !== (home ? 'about:blank' : tab.url))) { entries.splice(0, entries.length, { url: home ? 'about:blank' : tab.url, title: tab.title }); selectedIndex = 0; }
   return { ...tab, url: tab.url === 'about:blank' ? '' : tab.url, entries, index: entries.length ? Math.max(0, selectedIndex) : -1 };
 }
 export function restoreSession(store: SessionStore, ownAddress: (url: string) => boolean): SessionStore {

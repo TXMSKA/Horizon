@@ -1,11 +1,11 @@
-import { app, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
+import { app, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
 import type { BrowserWindow, DownloadItem, Session, WebContents, WebPreferences } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { IPC, SEARCH_ENGINES } from '../src/shared/api';
-import type { BrowserCommand, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, Profile, SettingsSection, TabState } from '../src/shared/api';
-import { browserShortcut } from '../src/shared/shortcuts';
+import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, Profile, SettingsSection, TabState } from '../src/shared/api';
+import { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } from '../src/shared/shortcuts';
 import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName, settingsAddress, settingsSection } from './browsing';
 import { readStore, reserveDownloadPath, writeStore } from './store';
 import { validateSender } from './security';
@@ -408,7 +408,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const y = fullscreen ? 0 : top;
         const panelWidth = !fullscreen && desktopPanel.open ? Math.ceil(400 * window.webContents.getZoomFactor()) : 0;
         tab.view.setBounds({ x: 0, y, width: Math.max(0, width - panelWidth), height: Math.max(0, height - y) });
-        tab.view.setVisible(isCurrent() && tab.state.id === activeId && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
+        tab.view.setVisible(isCurrent() && tab.state.id === activeId && Boolean(tab.state.url) && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
       }
     };
     const update = () => { persistSession(); layout(); publish(); };
@@ -442,7 +442,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const previous = active();
       if (previous !== tab) invalidateCaptures();
       if (isCurrent() && previous !== tab) invalidateMenu();
-      if (previous && previous !== tab) leaveFullscreen(previous);
+      if (previous && previous !== tab) { page(previous.view)?.setIgnoreMenuShortcuts(true); leaveFullscreen(previous); }
       activeId = tab.state.id;
     };
     const zoom = (tab: Tab, delta: -1 | 0 | 1) => {
@@ -462,9 +462,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (active() === tab) invalidateCaptures();
       invalidateMenu(tab.state.id);
       if (tab.faviconSite !== (isWebURL(url) ? new URL(url).origin : '')) clearFavicon(tab, url);
-      tab.state.url = url;
+      tab.state.url = url === 'about:blank' ? '' : url;
       tab.committedURL = url;
-      tab.state.title = page(tab.view)?.getTitle().slice(0, 1024) || url;
+      tab.state.title = url === 'about:blank' ? '' : page(tab.view)?.getTitle().slice(0, 1024) || url;
       tab.state.find = { active: 0, total: 0 };
       tab.findRequest = undefined;
       if (isWebURL(url) && !clearingData && !closing && !disposed) {
@@ -497,10 +497,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       clearFavicon(tab, url);
       ensureView(tab);
       if (launch && isLocalHTMLURL(url)) launchURLs.set(tab.view!.webContents, url);
-      tab.state.url = url;
-      tab.state.title = url;
+      tab.state.url = url === 'about:blank' ? '' : url;
+      tab.state.title = tab.state.url;
       tab.state.error = null;
-      tab.state.loading = true;
+      tab.state.loading = url !== 'about:blank';
       const navigation = (tab.navigation ?? 0) + 1;
       tab.navigation = navigation;
       update();
@@ -516,7 +516,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       tab.state.title = saved.title; tab.state.zoom = saved.zoom;
       tab.state.settings = settingsSection(saved.url);
       tab.state.desktop = ownAddress(saved.url) ? saved.url === 'horizon://desktop/captures' ? 'captures' : desktop.list().find(project => desktopAddress(project.name) === saved.url)!.id : null;
-      if (!tab.state.settings && !tab.state.desktop && saved.url) {
+      if (!tab.state.settings && !tab.state.desktop && (saved.url || saved.entries.length)) {
         tab.restore = { url: saved.url, title: saved.title, zoom: saved.zoom, entries: structuredClone(saved.entries), index: saved.index };
         tab.state.canGoBack = saved.index > 0; tab.state.canGoForward = saved.index >= 0 && saved.index < saved.entries.length - 1;
       }
@@ -531,7 +531,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!allowed.entries.length) { load(tab, allowed.url); return; }
       ensureView(tab);
       const contents = page(tab.view)!;
-      tab.restoring = allowed; tab.state.loading = true; tab.navigating = true;
+      tab.restoring = allowed; tab.state.loading = Boolean(allowed.url); tab.navigating = true;
       const navigation = tab.navigation = (tab.navigation ?? 0) + 1;
       void contents.navigationHistory.restore({ entries: allowed.entries, index: allowed.index }).catch((error: unknown) => {
         if (error instanceof Error && error.message.includes('ERR_ABORTED')) return;
@@ -604,7 +604,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const next = page(tab.view)!;
         if (originalLaunch && isLocalHTMLURL(originalLaunch)) launchURLs.set(next, originalLaunch);
         if (entries.length && index >= 0 && index < entries.length) {
-          tab.state.url = entries[index]!.url; tab.state.loading = true; tab.navigating = true;
+          tab.state.url = entries[index]!.url === 'about:blank' ? '' : entries[index]!.url; tab.state.loading = Boolean(tab.state.url); tab.navigating = true;
           const navigation = tab.navigation;
           void next.navigationHistory.restore({ entries, index }).catch((error: unknown) => {
             if (error instanceof Error && error.message.includes('ERR_ABORTED')) return;
@@ -659,9 +659,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       });
       contents.on('destroyed', () => { if (tab.view === view) closeTab(tab); });
       contents.on('did-start-loading', () => { if (tab.view === view) { tab.state.loading = true; publish(); } });
-      // A reload behind an open overlay hands the keyboard to the hidden page; once Chromium has finished moving it, it goes back to chrome.
+      // Loading can hand the keyboard to a hidden page; chrome must keep it while Home or an overlay is showing.
       contents.on('focus', () => setImmediate(() => {
-        if (tab.view === view && !disposed && !closing && !window.isDestroyed() && area.hidden && isCurrent() && tab.state.id === activeId && window.isFocused()) window.webContents.focus();
+        if (tab.view === view && !disposed && !closing && !window.isDestroyed() && (area.hidden || !tab.state.url) && isCurrent() && tab.state.id === activeId && window.isFocused()) window.webContents.focus();
       }));
       contents.on('did-stop-loading', () => {
         if (tab.view !== view || contents.isLoading()) return;
@@ -747,22 +747,28 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         tab.state.find = { active: result.activeMatchOrdinal, total: result.matches }; publish();
       });
       contents.on('before-input-event', (event, input) => {
+        contents.setIgnoreMenuShortcuts(Boolean(input.isComposing) || tab.view !== view || !isCurrent() || tab.state.id !== activeId);
         if (tab.view !== view || !isCurrent() || tab.state.id !== activeId) return;
         if (input.type !== 'keyDown' || input.isComposing) return;
         const shortcut = browserShortcut(input);
-        if (!shortcut) return;
-        if (shortcut === 'reopen-tab' && !state().canReopenTab) { event.preventDefault(); return; }
-        if (shortcut === 'fullscreen' || shortcut === 'stop' && tab.state.fullscreen) {
-          event.preventDefault(); run({ type: shortcut === 'fullscreen' ? 'fullscreen' : 'stop' }); return;
-        }
-        if (shortcut === 'stop' && !contents.isLoading()) return;
+        if (!shortcut || !browserReservedShortcut(shortcut, tab.state.fullscreen)) return;
         event.preventDefault();
-        if (!isCurrent() || tab.state.id !== activeId) return;
-        if (['capture', 'focus-address', 'focus-search', 'find', 'find-next', 'find-previous', 'menu', 'clear-browsing-data', 'reopen-tab', 'home', 'favorites', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
-        window.webContents.send(IPC.shortcut, shortcut);
+        dispatchShortcut(shortcut);
       });
       contents.on('zoom-changed', (_event, direction) => { if (tab.view === view && isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
     }
+
+    const dispatchShortcut = (shortcut: BrowserShortcut) => {
+      const tab = active(), contents = page(tab?.view);
+      if (!tab || !contents || !isCurrent() || disposed || closing) return;
+      if (shortcut === 'reopen-tab' && !state().canReopenTab) return;
+      if (shortcut === 'fullscreen' || shortcut === 'stop' && tab.state.fullscreen) {
+        run({ type: shortcut === 'fullscreen' ? 'fullscreen' : 'stop' }); return;
+      }
+      if (shortcut === 'stop' && !contents.isLoading()) return;
+      if (['capture', 'focus-address', 'focus-search', 'find', 'find-next', 'find-previous', 'menu', 'clear-browsing-data', 'reopen-tab', 'home', 'favorites', 'history', 'downloads', 'new-tab', 'close-tab', 'next-tab', 'previous-tab'].includes(shortcut) || shortcut.startsWith('tab-')) window.webContents.focus();
+      window.webContents.send(IPC.shortcut, shortcut);
+    };
 
     const downloadHandler = (event: Electron.Event, item: DownloadItem, contents: WebContents) => {
       const tab = tabs.find(tab => tab.view?.webContents === contents);
@@ -898,10 +904,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           const target = restoredTab(saved); tabs.splice(saved.position, 0, target); activate(target); break;
         }
         case 'home': {
-          tab.restore = undefined; tab.restoring = undefined; invalidateMenu(tab.state.id); permissions.drop(tab.state.id); invalidateCaptures(); leaveFullscreen(tab);
-          const view = tab.view; tab.view = undefined;
-          if (view) { try { window.contentView.removeChildView(view); } catch { /* A crashed view may already be detached. */ } page(view)?.close(); }
-          clearFavicon(tab); tab.state = { ...makeTab().state, id: tab.state.id }; break;
+          if (!tab.state.url) break;
+          leaveFullscreen(tab);
+          // A native blank entry keeps Chromium's page history and Back/Forward state intact.
+          load(tab, 'about:blank'); window.webContents.focus(); break;
         }
         case 'reload-no-cache': if (contents && !tab.state.settings && !tab.state.desktop) { tab.state.error = null; contents.reloadIgnoringCache(); } break;
         case 'print': if (contents && isWebURL(tab.state.url) && !tab.state.error && !tab.state.settings && !tab.state.desktop) return new Promise<void>((resolve, reject) => {
@@ -1099,7 +1105,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'forward': if (contents?.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break;
         case 'reload': if (contents) { tab.state.error = null; contents.reload(); } else if (isAllowedURL(tab.state.url)) load(tab, tab.state.url); break;
         case 'stop': if (tab.state.fullscreen) leaveFullscreen(tab); else { contents?.stop(); tab.cosmeticPending = false; } break;
-        case 'focus-page': if (!area.hidden && !tab.state.error) contents?.focus(); break;
+        case 'focus-page': if (tab.state.url && !area.hidden && !tab.state.error) contents?.focus(); break;
         case 'fullscreen':
           if (tab.state.fullscreen) leaveFullscreen(tab);
           else { tab.state.fullscreen = true; window.setFullScreen(true); }
@@ -1201,7 +1207,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       invalidateCaptures(); desktop.forget();
       forget();
       const tab = active();
-      if (tab) { leaveFullscreen(tab); page(tab.view)?.stopFindInPage('clearSelection'); tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; }
+      if (tab) { leaveFullscreen(tab); page(tab.view)?.setIgnoreMenuShortcuts(true); page(tab.view)?.stopFindInPage('clearSelection'); tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; }
     };
     const dispose = (discard = false) => {
       if (!discard) flushSession();
@@ -1238,7 +1244,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     for (const { tab: saved, active: selected } of lazySession(savedSession, settings.onStart)) {
       const tab = restoredTab(saved); tabs.push(tab); if (selected) activeId = tab.state.id;
     }
-    return { state, tabs, active, page, run, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear };
+    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear };
 
   }
   ipcMain.handle(IPC.state, (event, ...args: unknown[]) => {
@@ -1341,6 +1347,15 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   });
   app.on('before-quit', beforeQuit);
   const initial = runtimeFor(registry.profiles.find(profile => profile.id === registry.activeId)!);
+  // Electron runs menu accelerators only after Chromium returns an unhandled page key.
+  window.setMenu(Menu.buildFromTemplate(browserShortcutAccelerators().map(({ accelerator, shortcut }) => ({
+    label: accelerator, accelerator, visible: false,
+    click: (_item, target) => {
+      if (target !== window || closing || window.isDestroyed()) return;
+      const runtime = current();
+      if (runtime.page(runtime.active()?.view)?.isFocused()) runtime.dispatchShortcut(shortcut);
+    },
+  }))));
   initial.persist(); if (!initial.tabs.length) initial.newTab(); else layout();
   void blocker.start();
   refreshDefaultBrowser();
