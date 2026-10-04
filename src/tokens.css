@@ -442,6 +442,10 @@
   --width-suggestion-hint: 40%;
   --width-menu: 22.5rem;
   --width-browser-panel: 23.75rem;
+  --height-favorites-bar: 34px;
+  --width-favorite-popover: 350px;
+  --width-favorite-item: 200px;
+  --indent-favorite-tree: 17px;
   --height-menu-row: 2.125rem;
   --width-about: 22.5rem;
   --width-context-menu: 13.75rem;

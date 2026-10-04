@@ -448,6 +448,43 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .theme-preview-field { position: absolute; left: 39px; top: 27px; width: 81px; height: 6px; border: var(--border-width) solid var(--preview-field-line); border-radius: var(--radius-small); background: var(--preview-field); }
 
 .toolbar-popover > .browser-tools-menu { position: static; margin: 0; width: var(--width-menu); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); padding: calc(var(--space-8) - var(--border-width)); }
+.chrome:has(.favorites-bar) .toolbar { border-bottom: 0; }
+.favorites-bar { display: flex; align-items: flex-start; gap: var(--space-6); height: var(--height-favorites-bar); padding-inline: var(--space-12); border-bottom: var(--border-width) solid var(--divider); background: var(--surface-chrome); }
+.favorite-bar-item { display: inline-flex; flex: none; align-items: center; gap: var(--space-6); height: var(--size-28); min-height: var(--size-28); min-width: 0; max-width: var(--width-favorite-item); padding: 0 var(--space-8); border-radius: var(--radius-small); color: var(--text-primary); font-size: var(--type-caption); line-height: var(--line-caption); }
+.favorite-bar-item > svg { width: var(--size-14); height: var(--size-14); color: var(--text-secondary); }
+.favorite-bar-item[aria-expanded=true] { background: var(--surface-pressed); }
+.favorite-label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: start; }
+.favorite-badge { display: grid; place-items: center; flex: none; width: var(--size-16); height: var(--size-16); border-radius: var(--radius-badge); background: var(--profile-color); color: var(--on-accent); font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--size-16); }
+.favorites-spacer { flex: 1; min-width: 0; height: var(--size-28); }
+.favorite-overflow { width: var(--size-28); padding: 0; justify-content: center; }
+.favorite-other { max-width: min(var(--width-favorite-item), 50%); }
+.favorites-measure { display: flex; width: max-content; position: fixed; visibility: hidden; pointer-events: none; }
+.favorite-popover { display: flex; flex-direction: column; width: min(var(--width-favorite-popover), calc(100vw - var(--space-12))); max-height: var(--popup-available-height); overflow-y: auto; padding: calc(var(--space-8) - var(--border-width)); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--text-title); }
+.favorite-popup-row, .favorite-tree-row { position: relative; display: flex; flex: none; align-items: center; gap: var(--space-10); width: 100%; min-width: 0; padding: 0 var(--space-10); height: var(--size-40); min-height: var(--size-40); border-radius: var(--radius-small); color: var(--text-title); font-size: var(--type-label); line-height: var(--line-label); text-align: start; }
+.favorite-mark { display: grid; place-items: center; flex: none; width: var(--size-16); height: var(--size-16); color: var(--text-secondary); }
+.favorite-mark > svg { width: var(--size-16); height: var(--size-16); }
+.favorite-popover > hr { border: 0; border-top: var(--border-width) solid var(--divider); width: 100%; margin: 0; }
+.favorite-popover:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+.favorite-item-menu { z-index: calc(var(--layer-overlay) + 3); }
+.favorite-form { position: static; margin: 0; display: flex; flex-direction: column; gap: var(--space-12); width: var(--width-favorite-popover); max-height: var(--popup-available-height); }
+.favorite-destinations { display: flex; flex-direction: column; max-height: var(--height-suggestions-maximum); overflow-y: auto; }
+.favorite-destinations > button { display: flex; align-items: center; gap: var(--space-10); padding: var(--space-8); border-radius: var(--radius-small); text-align: start; font-size: var(--type-label); }
+.favorite-destinations > button > span { min-width: 0; overflow-wrap: anywhere; }
+.favorite-empty { padding: var(--space-12) var(--space-10); font-size: var(--type-label); color: var(--text-secondary); }
+.favorites-tree, .favorite-tree-children { list-style: none; margin: 0; padding: 0; }
+.favorite-tree-children { margin-inline-start: var(--indent-favorite-tree); border-inline-start: var(--border-width) solid var(--divider); padding-inline-start: var(--space-10); }
+.favorite-tree-row { height: var(--size-36); min-height: var(--size-36); }
+.favorite-tree-chevron { display: grid; place-items: center; width: var(--size-14); height: var(--size-14); flex: none; color: var(--text-secondary); }
+.favorite-tree-chevron > svg { width: var(--size-14); height: var(--size-14); }
+.favorite-bar-item, .favorite-popup-row, .favorite-tree-row { position: relative; }
+.favorite-bar-item[data-drop=before]::before, .favorite-bar-item[data-drop=after]::after { content: ''; position: absolute; top: 0; bottom: 0; width: var(--border-strong); background: var(--accent); }
+.favorite-bar-item[data-drop=before]::before { left: calc(-1 * var(--space-3)); }
+.favorite-bar-item[data-drop=after]::after { right: calc(-1 * var(--space-3)); }
+.favorite-popup-row[data-drop=before]::before, .favorite-tree-row[data-drop=before]::before, .favorite-popup-row[data-drop=after]::after, .favorite-tree-row[data-drop=after]::after { content: ''; position: absolute; inset-inline: 0; height: var(--border-strong); background: var(--accent); }
+.favorite-popup-row[data-drop=before]::before, .favorite-tree-row[data-drop=before]::before { top: 0; }
+.favorite-popup-row[data-drop=after]::after, .favorite-tree-row[data-drop=after]::after { bottom: 0; }
+[data-drop=inside] { outline: var(--focus-width) solid var(--accent); outline-offset: calc(-1 * var(--focus-width)); background: var(--surface-selected); }
+.favorites-undo { position: fixed; left: var(--space-12); bottom: var(--space-12); z-index: calc(var(--layer-overlay) + 2); }
 .browser-tools-menu > button { min-height: var(--height-menu-row); height: var(--height-menu-row); }
 .browser-tools-menu > hr { margin: 0; }
 .browser-menu-zoom { display: flex; flex: none; align-items: center; gap: var(--space-10); height: var(--height-menu-row); padding-inline: var(--space-10); font-size: var(--type-label); line-height: var(--line-label); }

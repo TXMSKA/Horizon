@@ -26,6 +26,7 @@ import { desktopInputText } from '../src/shared/desktop-input';
 import { createDesktop, desktopAddress } from './desktop';
 import { captureWholePage, deadline, pngSize } from './captures';
 import { validCaptureRect } from '../src/shared/capture';
+import { addFavorite, createFavoriteFolder, favoriteDestination, favoriteLinks, favoriteLocation, favoriteName, favoriteTitle, moveFavorite } from './favorites';
 
 interface Tab { state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
 
@@ -185,6 +186,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const tabs: Tab[] = [];
     let activeId = '';
     let storageError = false;
+    let favoritesVersion = 0;
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
     let clearingData = false;
@@ -193,14 +195,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let screenCapture: { id: string; bytes: Buffer; width: number; height: number; generation: number } | undefined;
     const invalidateCaptures = () => { captureGeneration++; for (const request of captureRequests) request.abort(); captureRequests.clear(); };
     const isCurrent = () => registry.activeId === profile.id;
-    let kept: { [Kind in 'history' | 'bookmarks' | 'downloads']: { kind: Kind; entries: BrowserStore[Kind] } }['history' | 'bookmarks' | 'downloads'] | undefined;
+    let kept: { kind: 'history'; entries: BrowserStore['history'] } | { kind: 'bookmarks'; entries: BrowserStore['favorites'] } | { kind: 'downloads'; entries: BrowserStore['downloads'] } | undefined;
     let restoreTimeout: ReturnType<typeof setTimeout> | undefined;
     const forget = () => { clearTimeout(restoreTimeout); restoreTimeout = undefined; kept = undefined; };
     const keep = (kind: 'history' | 'bookmarks' | 'downloads') => {
       forget();
       desktop.forget();
       if (kind === 'history') kept = { kind, entries: structuredClone(store.history) };
-      else if (kind === 'bookmarks') kept = { kind, entries: structuredClone(store.bookmarks) };
+      else if (kind === 'bookmarks') kept = { kind, entries: structuredClone(store.favorites) };
       else kept = { kind, entries: structuredClone(store.downloads) };
       restoreTimeout = setTimeout(forget, 8000);
     };
@@ -281,7 +283,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     webSession.webRequest.onCompleted(details => { requests.delete(details.id); });
     webSession.webRequest.onErrorOccurred(details => { requests.delete(details.id); });
 
-    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, storageError, storageReadError: readStatus.readError,
+    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion, storageError, storageReadError: readStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : siteSettings(store.siteSettings, active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: permissions.prompt(activeId) });
     const flush = () => {
@@ -996,10 +998,47 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'zoom': zoom(tab, command.delta); break;
         case 'bookmark': {
           if (!isWebURL(tab.state.url)) break;
-          const index = store.bookmarks.findIndex(entry => entry.url === tab.state.url);
-          if (index >= 0) store.bookmarks.splice(index, 1);
-          else store.bookmarks.push({ url: tab.state.url, title: tab.state.title || tab.state.url, createdAt: Date.now() });
-          persist(); break;
+          const link = favoriteLinks([...store.favorites.bar, ...store.favorites.other]).find(entry => entry.url === tab.state.url);
+          if (link) { const location = favoriteLocation(store.favorites, link.id)!; keep('bookmarks'); location.siblings.splice(location.index, 1); }
+          else addFavorite(store.favorites, 'bar', store.favorites.bar.length, tab.state.url, (tab.state.title || tab.state.url).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, 200));
+          favoritesVersion++; persist(); break;
+        }
+        case 'add-favorite':
+          addFavorite(store.favorites, command.parent, command.position, command.url, command.title);
+          favoritesVersion++; persist(); break;
+        case 'create-favorite-folder':
+          createFavoriteFolder(store.favorites, command.parent, command.position, command.name);
+          favoritesVersion++; persist(); break;
+        case 'rename-favorite': {
+          const location = favoriteLocation(store.favorites, command.id);
+          if (!location) throw new Error('FAVORITE_NOT_FOUND');
+          if (location.item.kind === 'folder') location.item.name = favoriteName(command.name);
+          else location.item.title = favoriteTitle(command.name);
+          favoritesVersion++; persist(); break;
+        }
+        case 'move-favorite':
+          moveFavorite(store.favorites, command.id, command.parent, command.position);
+          favoritesVersion++; persist(); break;
+        case 'delete-favorite': {
+          const location = favoriteLocation(store.favorites, command.id);
+          if (!location) throw new Error('FAVORITE_NOT_FOUND');
+          keep('bookmarks'); location.siblings.splice(location.index, 1);
+          favoritesVersion++; persist(); break;
+        }
+        case 'open-favorite': case 'open-favorite-new-tab': {
+          const location = favoriteLocation(store.favorites, command.id);
+          if (!location || location.item.kind !== 'link') throw new Error('FAVORITE_NOT_FOUND');
+          if (command.type === 'open-favorite-new-tab') newTab(location.item.url, true);
+          else if (command.type === 'open-favorite' && command.background) newTab(location.item.url, false);
+          else load(tab, location.item.url);
+          break;
+        }
+        case 'open-all-favorites': {
+          const items = favoriteDestination(store.favorites, command.id).items;
+          const links = favoriteLinks(items);
+          if (tabs.length + links.length > 200) throw new Error('FAVORITE_OPEN_LIMIT');
+          for (const link of links) newTab(link.url, false);
+          break;
         }
         case 'find':
           if (contents && !tab.state.error) {
@@ -1014,15 +1053,20 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (command.kind === 'desktop') { desktop.restore(); break; }
           if (kept?.kind !== command.kind) break;
           if (kept.kind === 'history') store.history = kept.entries;
-          else if (kept.kind === 'bookmarks') store.bookmarks = kept.entries;
+          else if (kept.kind === 'bookmarks') { store.favorites = kept.entries; favoritesVersion++; }
           else store.downloads = kept.entries;
           forget(); persist(); break;
         case 'rename-bookmark': {
-          const entry = store.bookmarks.find(entry => entry.url === command.url);
-          if (!entry) throw new Error('Unknown bookmark');
-          entry.title = command.title; persist(); break;
+          const entry = favoriteLinks([...store.favorites.bar, ...store.favorites.other]).find(entry => entry.url === command.url);
+          if (!entry) throw new Error('FAVORITE_NOT_FOUND');
+          entry.title = favoriteTitle(command.title); favoritesVersion++; persist(); break;
         }
-        case 'delete-bookmark': keep('bookmarks'); store.bookmarks = store.bookmarks.filter(entry => entry.url !== command.url); persist(); break;
+        case 'delete-bookmark': {
+          const entry = favoriteLinks([...store.favorites.bar, ...store.favorites.other]).find(entry => entry.url === command.url);
+          if (!entry) throw new Error('FAVORITE_NOT_FOUND');
+          const location = favoriteLocation(store.favorites, entry.id)!;
+          keep('bookmarks'); location.siblings.splice(location.index, 1); favoritesVersion++; persist(); break;
+        }
         case 'retry-download': {
           const entry = store.downloads.find(entry => entry.id === command.id);
           if (!entry || entry.status !== 'failed' || !isWebURL(entry.url) || tabs.some(tab => tab.retryDownload === entry.id)) throw new Error('Invalid download retry');
@@ -1139,7 +1183,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     validateSender(event, window.webContents);
     if (args.length !== 1) throw new Error('Invalid command arguments');
     if (deleting) throw new Error('Profile deletion is in progress');
-    return run(validateCommand(args[0], new Set(registry.profiles.map(profile => profile.id)), current().desktop.list(), current().desktop.captureList()));
+    return run(validateCommand(args[0], new Set(registry.profiles.map(profile => profile.id)), current().desktop.list(), current().desktop.captureList(), current().state().store.favorites));
   });
   ipcMain.handle(IPC.contentArea, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);

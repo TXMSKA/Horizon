@@ -1,4 +1,4 @@
-import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, Project } from '../src/shared/api';
+import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
 import { isWebURL } from './browsing';
 import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp } from './settings';
 import { isContextMenuItemId } from './context-menu';
@@ -6,6 +6,7 @@ import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
 import { folderName, projectName, desktopInputText, desktopTitle } from './desktop';
 import { validCaptureRect } from '../src/shared/capture';
+import { favoriteDestination, favoriteId, favoriteLocation, favoriteName, favoriteParent, favoritePosition, favoriteTitle, favoriteURL, moveFavorite } from './favorites';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid browser argument');
@@ -18,15 +19,18 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected browser argument');
 }
 const desktopCommands = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'open-desktop', 'open-desktop-panel', 'close-desktop-panel', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'delete-capture', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'take-capture', 'capture-full-page', 'capture-screen', 'edit-capture', 'copy-capture']);
-export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = []): BrowserCommand {
-  try { return validatedCommand(value, profileIds, projects, captures); }
+const favoriteCommands = new Set(['add-favorite', 'create-favorite-folder', 'rename-favorite', 'move-favorite', 'delete-favorite', 'open-favorite', 'open-favorite-new-tab', 'open-all-favorites']);
+export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
+  try { return validatedCommand(value, profileIds, projects, captures, favorites); }
   catch (error) {
     if (value && typeof value === 'object' && 'type' in value && desktopCommands.has(value.type as string)
       && !(error instanceof Error && /^(PROJECT_|FOLDER_|DESKTOP_|LINK_INVALID$|TEXT_INVALID$)/.test(error.message))) throw new Error('DESKTOP_COMMAND_INVALID');
+    if (value && typeof value === 'object' && 'type' in value && favoriteCommands.has(value.type as string)
+      && !(error instanceof Error && /^FAVORITE_/.test(error.message))) throw new Error('FAVORITE_COMMAND_INVALID');
     throw error;
   }
 }
-function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = []): BrowserCommand {
+function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
   const command = object(value);
   const type = command.type;
   const settingsCommands = ['set-show-capture', 'open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'register-default-browser'];
@@ -136,6 +140,45 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     case 'activate-tab': case 'close-tab': case 'cancel-download': case 'show-download': case 'remove-download': case 'retry-download':
       keys(command, ['type', 'id']); valid = string(command.id, 128); break;
     case 'navigate': keys(command, ['type', 'input']); valid = string(command.input, 8192); break;
+    case 'add-favorite':
+      keys(command, ['type', 'url', 'title', 'parent', 'position']);
+      favoriteURL(command.url); favoriteTitle(command.title);
+      if (!favoriteParent(command.parent)) throw new Error('FAVORITE_COMMAND_INVALID');
+      favoritePosition(command.position as number, favoriteDestination(favorites, command.parent).items.length);
+      valid = Object.keys(command).length === 5; break;
+    case 'create-favorite-folder':
+      keys(command, ['type', 'name', 'parent', 'position']); favoriteName(command.name);
+      if (!favoriteParent(command.parent)) throw new Error('FAVORITE_COMMAND_INVALID');
+      favoritePosition(command.position as number, favoriteDestination(favorites, command.parent).items.length);
+      valid = Object.keys(command).length === 4; break;
+    case 'rename-favorite':
+      keys(command, ['type', 'id', 'name']);
+      if (!favoriteId(command.id)) throw new Error('FAVORITE_COMMAND_INVALID');
+      { const found = favoriteLocation(favorites, command.id);
+        if (!found) throw new Error('FAVORITE_NOT_FOUND');
+        if (found.item.kind === 'folder') favoriteName(command.name); else favoriteTitle(command.name); }
+      valid = Object.keys(command).length === 3; break;
+    case 'move-favorite':
+      keys(command, ['type', 'id', 'parent', 'position']);
+      if (!favoriteId(command.id) || !favoriteParent(command.parent)) throw new Error('FAVORITE_COMMAND_INVALID');
+      if (Object.keys(command).length === 4) moveFavorite(structuredClone(favorites), command.id, command.parent, command.position as number);
+      valid = Object.keys(command).length === 4; break;
+    case 'delete-favorite': case 'open-favorite-new-tab':
+      keys(command, ['type', 'id']);
+      if (!favoriteId(command.id)) throw new Error('FAVORITE_COMMAND_INVALID');
+      { const found = favoriteLocation(favorites, command.id);
+        if (!found || type === 'open-favorite-new-tab' && found.item.kind !== 'link') throw new Error('FAVORITE_NOT_FOUND'); }
+      valid = Object.keys(command).length === 2; break;
+    case 'open-favorite':
+      keys(command, ['type', 'id', 'background']);
+      if (!favoriteId(command.id)) throw new Error('FAVORITE_COMMAND_INVALID');
+      { const found = favoriteLocation(favorites, command.id); if (!found || found.item.kind !== 'link') throw new Error('FAVORITE_NOT_FOUND'); }
+      valid = (!Object.hasOwn(command, 'background') || typeof command.background === 'boolean') && Object.keys(command).length <= 3; break;
+    case 'open-all-favorites':
+      keys(command, ['type', 'id']);
+      if (!favoriteParent(command.id)) throw new Error('FAVORITE_COMMAND_INVALID');
+      favoriteDestination(favorites, command.id);
+      valid = Object.keys(command).length === 2; break;
     case 'zoom': keys(command, ['type', 'delta']); valid = command.delta === -1 || command.delta === 0 || command.delta === 1; break;
     case 'find':
       keys(command, ['type', 'text', 'forward', 'next']);

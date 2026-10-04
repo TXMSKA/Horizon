@@ -30,6 +30,11 @@ export interface ProfileState { id: string; name: string; color: ProfileColor; t
 
 export interface HistoryEntry { url: string; title: string; lastVisit: number; visitCount: number }
 export interface Bookmark { url: string; title: string; createdAt: number }
+export interface FavoriteLink { kind: 'link'; id: string; url: string; title: string; createdAt: number }
+export interface FavoriteFolder { kind: 'folder'; id: string; name: string; createdAt: number; children: FavoriteItem[] }
+export type FavoriteItem = FavoriteLink | FavoriteFolder;
+export interface FavoritesTree { bar: FavoriteItem[]; other: FavoriteItem[] }
+export type FavoriteParent = 'bar' | 'other' | string;
 export type DownloadStatus = 'progressing' | 'completed' | 'failed' | 'cancelled';
 export interface DownloadEntry { id: string; url: string; filename: string; path: string; received: number; total: number; status: DownloadStatus; startedAt: number }
 export const SITE_PERMISSIONS = ['camera', 'microphone', 'location', 'notifications'] as const;
@@ -41,7 +46,7 @@ export interface SiteSettings { host: string; origin: string; blocking: boolean;
 export interface SiteSettingsEntry { host: string; origin: string; blocking: boolean | null; dark: boolean | null; permissions: PermissionDecisions }
 export interface PermissionPrompt { id: string; origin: string; permissions: SitePermission[] }
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
-export interface BrowserStore { version: 4; history: HistoryEntry[]; bookmarks: Bookmark[]; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
+export interface BrowserStore { version: 5; history: HistoryEntry[]; favorites: FavoritesTree; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { id: string; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
 export interface BrowserState { showCapture: boolean; version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
@@ -112,6 +117,13 @@ export type BrowserCommand =
   | { type: 'open-downloads-folder' }
   | { type: 'activate-tab' | 'close-tab'; id: string }
   | { type: 'navigate'; input: string }
+  | { type: 'add-favorite'; url: string; title: string; parent: FavoriteParent; position: number }
+  | { type: 'create-favorite-folder'; name: string; parent: FavoriteParent; position: number }
+  | { type: 'rename-favorite'; id: string; name: string }
+  | { type: 'move-favorite'; id: string; parent: FavoriteParent; position: number }
+  | { type: 'delete-favorite' | 'open-favorite-new-tab'; id: string }
+  | { type: 'open-favorite'; id: string; background?: boolean }
+  | { type: 'open-all-favorites'; id: FavoriteParent }
   | { type: 'back' | 'forward' | 'reload' | 'stop' | 'bookmark' | 'focus-page' | 'fullscreen' }
   | { type: 'zoom'; delta: -1 | 0 | 1 }
   | { type: 'find'; text: string; forward: boolean; next: boolean }

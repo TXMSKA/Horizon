@@ -17,6 +17,8 @@ import { Hub, hubApps } from './Hub';
 import { ToolbarPopover } from './ToolbarPopover';
 import { NewProfilePopover, ProfileControl, ProfilesMenu } from './Profiles';
 import { BrowserPanel } from './BrowserPanel';
+import { FavoritesBar, FavoritesPanel, favoritesError } from './Favorites';
+import { allFavoriteLinks } from './shared/favorites';
 import type { LibraryPanel } from './BrowserPanel';
 import { AboutHorizon } from './AboutHorizon';
 import { BrowserMenu } from './BrowserMenu';
@@ -70,6 +72,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const [suggestionIndex, setSuggestionIndex] = useState(-1);
   const [startSearch, setStartSearch] = useState('');
   const [panel, setPanel] = useState<Panel>(null);
+  const [favoritesOpen, setFavoritesOpen] = useState(false);
   const [announcement, setAnnouncement] = useState('');
   const [undo, setUndo] = useState<{ kind: LibraryPanel; message: CopyKey } | null>(null);
 
@@ -131,16 +134,16 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const liveDesktopScope = useRef(desktopScope);
   useLayoutEffect(() => { liveDesktopScope.current = desktopScope; }, [desktopScope]);
   const desktopMode = desktopOverlay?.scope === desktopScope ? desktopOverlay.mode : null;
-  const bookmarked = state?.store.bookmarks.some(item => item.url === activeUrl) ?? false;
+  const bookmarked = state ? allFavoriteLinks(state.store.favorites).some(item => item.url === activeUrl) : false;
   const site = state?.siteSettings;
   const siteScope = site ? `${state?.activeProfileId}:${state?.activeId}:${site.origin}` : null;
   const currentSiteScope = useRef(siteScope);
   useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.permissionPrompt;
-  const permissionOpen = Boolean(!desktopModalOpen && !aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !shieldOpen && !panel && !findOpen);
+  const permissionOpen = Boolean(!favoritesOpen && !desktopModalOpen && !aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
-  const popover = showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
+  const popover = favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
@@ -160,7 +163,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     const leaving = command.type === 'switch-profile' || command.type === 'delete-profile';
     if (leaving) { desktopLeaves.current++; setDesktopLeaving(true); }
     try { await edits.flush(); await window.horizon.command(command); setError(''); return true; }
-    catch (reason) { setError(command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
+    catch (reason) { setError(command.type.includes('favorite') || command.type === 'bookmark' ? favoritesError(reason, language) : command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
     finally { if (leaving && --desktopLeaves.current === 0) setDesktopLeaving(false); }
   }, [language, edits]);
   const closeCapture = useCallback(() => {
@@ -331,8 +334,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
           blockingReload = null;
         } else if (!current.loading && before.loading && !current.error) { blockingReload = null; announce(text('pageLoaded', language).replace('{page}', current.title || current.url)); }
         if (current.url === before.url) {
-          const saved = next.store.bookmarks.some(item => item.url === current.url);
-          const wasSaved = previous!.store.bookmarks.some(item => item.url === current.url);
+          const saved = allFavoriteLinks(next.store.favorites).some(item => item.url === current.url);
+          const wasSaved = allFavoriteLinks(previous!.store.favorites).some(item => item.url === current.url);
           if (saved !== wasSaved) announce(text(saved ? 'bookmarkAdded' : 'bookmarkRemoved', language));
         }
       }
@@ -508,14 +511,14 @@ export function App({ language: initialLanguage }: { language: Language }) {
     const search = { kind: 'search' as const, url: `${SEARCH_ENGINES[state?.searchEngine ?? 'duckduckgo'].searchPrefix}${encodeURIComponent((dirty ? address : activeUrl).trim())}`, title: text('searchWeb', language).replace('{query}', (dirty ? address : activeUrl).trim()), hint: '' };
     if (!query) return [search];
     const seen = new Set<string>();
-    const local = [...(state?.store.bookmarks ?? []), ...(state?.store.history ?? [])].filter(item => {
+    const local = [...(state ? allFavoriteLinks(state.store.favorites) : []), ...(state?.store.history ?? [])].filter(item => {
       if (seen.has(item.url)) return false;
       seen.add(item.url);
       return `${item.title} ${item.url}`.toLowerCase().includes(query.toLowerCase());
     }).slice(0, 8).map(item => ({ kind: 'createdAt' in item ? 'bookmark' as const : 'history' as const, url: item.url, title: item.title || item.url, hint: 'createdAt' in item ? text('bookmarks', language) : new URL(item.url).host }));
     const desktops = desktopSuggestions(state?.projects ?? [], query).map(project => ({ ...project, hint: text('projectHint', language) }));
     return [search, ...local, ...desktops];
-  }, [query, address, dirty, activeUrl, language, state?.searchEngine, state?.store.bookmarks, state?.store.history, state?.projects]);
+  }, [query, address, dirty, activeUrl, language, state?.searchEngine, state?.store.favorites, state?.store.history, state?.projects]);
   const chooseSuggestion = (item: typeof suggestions[number]) => navigate(item.url);
   const iconButton = (Icon: LucideIcon, key: CopyKey, onClick: () => void, disabled = false, accent = false) => <button
     className={`icon-button${accent ? ' accent' : ''}`} type="button" onClick={onClick} disabled={disabled} aria-label={t(key)} title={t(key)}><Icon aria-hidden="true" /></button>;
@@ -598,6 +601,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
           <button className="icon-button lyra-button" ref={lyraButtonRef} type="button" aria-label={t('lyra')} title={t('lyra')} aria-haspopup="dialog" aria-expanded={lyraOpen} aria-controls="lyra-preview" onClick={() => { closeFind(); dismissUndo(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(previous => !previous); }}><span><Sparkles aria-hidden="true" /></span></button>
         </div>
       </div>
+      {state && <FavoritesBar key={`${state.activeProfileId}:${state.activeId}`} state={state} language={language} run={run} onDelete={destructive} onOverlay={setFavoritesOpen} dismiss={Boolean(panel || menuOpen || profileOpen || hubPage || lyraOpen || desktopMode || suggestionsOpen || contextMenu || shieldOpen || aboutOpen || desktopModalOpen)} onActivate={() => { closeFind(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }} undo={panel === 'bookmarks' ? null : undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} />}
       {findOpen && <div className="find-bar" role="search" aria-label={t('find')}>
         <Search aria-hidden="true" /><input ref={findRef} spellCheck={false} autoComplete="off" aria-label={t('find')} placeholder={t('find')} value={findText} maxLength={1024} onChange={event => { const value = event.target.value; setFindText(value); if (value) void run({ type: 'find', text: value, forward: true, next: false }); else void run({ type: 'stop-find' }); }}
           onKeyDown={event => { if (event.key === 'Enter' && findText) { event.preventDefault(); void run({ type: 'find', text: findText, forward: !event.shiftKey, next: true }); } }} />
@@ -622,7 +626,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
     }} onNew={() => setProfileOpen('new')} onManage={() => openSettings('profiles')} />}
     {profileOpen === 'new' && state && <NewProfilePopover state={state} language={language} opener={profileButtonRef} onCancel={() => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus(); }} onSuccess={name => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); setAnnouncement(t('createdProfile').replace('{name}', name)); profileButtonRef.current?.focus(); }} />}
     {menuOpen && <BrowserMenu language={language} active={active} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); shortcut(action); }} onPanel={openPanel} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
-    {panel && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
+    {panel === 'bookmarks' && state && <FavoritesPanel key={state.activeProfileId} state={state} language={language} opener={menuButtonRef} undo={undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} onDelete={destructive} run={run} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
+    {panel && panel !== 'bookmarks' && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
     {aboutOpen && state && <AboutHorizon version={state.version} language={language} opener={menuButtonRef} onClose={() => setAboutOpen(false)} />}
     {contextMenu && <Menu key={contextMenu.id} id="page-context-menu" label={t('pageMenu')} keyboard={contextMenu.keyboard} point={contextMenu} onDismiss={reason => closeContextMenu(reason === 'escape')}>
       {contextMenu.groups.flatMap((group, index) => [

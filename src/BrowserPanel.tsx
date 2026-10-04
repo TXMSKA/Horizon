@@ -1,11 +1,11 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { FileText, FolderOpen, Pencil, RotateCw, Search, Trash2, X } from 'lucide-react';
+import { FileText, FolderOpen, RotateCw, Search, Trash2, X } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS } from './shared/api';
 import type { BrowserCommand, BrowserState, HistoryEntry, Language } from './shared/api';
-import { EmptyBookmarks, EmptyDownloads, EmptyHistory, NoResults } from './EmptyState';
+import { EmptyDownloads, EmptyHistory, NoResults } from './EmptyState';
 import { ToolbarPopover } from './ToolbarPopover';
 
 export type LibraryPanel = 'history' | 'bookmarks' | 'downloads';
@@ -37,21 +37,23 @@ function SiteBadge({ url, title, state, favicons }: {
   return <span className="browser-site-badge" data-profile-color={color} aria-hidden="true">{image && failedImage !== image ? <img src={image} alt="" onError={() => setFailedImage(image)} /> : (title || host).slice(0, 1).toUpperCase()}</span>;
 }
 
-export function BrowserPanel({ panel, state, language, opener, favicons, undo, onRestore, onDelete, run, onNavigate, onBrowse, onClear, onDismiss, onAnnounce }: {
+type BrowserPanelProps = {
   panel: LibraryPanel; state: BrowserState; language: Language; opener: RefObject<HTMLButtonElement | null>;
   favicons: Record<string, { hash: string; url: string }>; undo: { kind: LibraryPanel; message: CopyKey } | null;
   onRestore: () => void; onDelete: (command: BrowserCommand, kind: LibraryPanel, message: CopyKey) => Promise<void>;
   run: (command: BrowserCommand) => Promise<boolean>; onNavigate: (url: string) => void; onBrowse: () => void;
   onClear: () => void; onDismiss: (focus: boolean) => void; onAnnounce: (message: string) => void;
-}) {
+};
+
+export function BrowserPanel({ panel, state, language, opener, favicons, undo, onRestore, onDelete, run, onNavigate, onBrowse, onClear, onDismiss, onAnnounce }: BrowserPanelProps) {
   const t = (key: CopyKey) => text(key, language), id = useId();
   const ref = useRef<HTMLElement>(null), search = useRef<HTMLInputElement>(null), busy = useRef(false);
   const restoreFocus = useRef<HTMLElement | null>(null);
   const removedFocus = useRef<{ row: HTMLElement; focused: HTMLElement; neighbours: HTMLElement[]; control: string } | null>(null);
   const undoButton = useRef<HTMLButtonElement>(null), wasEmpty = useRef(false);
-  const [filter, setFilter] = useState(''), [renameUrl, setRenameUrl] = useState(''), [renameTitle, setRenameTitle] = useState('');
+  const [filter, setFilter] = useState('');
   const [pending, setPending] = useState(false), [failed, setFailed] = useState<BrowserCommand | null>(null);
-  const entries = panel === 'history' ? state.store.history : state.store.bookmarks;
+  const entries = state.store.history;
   const filtered = entries.filter(item => `${item.title} ${item.url}`.toLocaleLowerCase(language).includes(filter.toLocaleLowerCase(language)));
   const noResults = panel !== 'downloads' && Boolean(filter) && !filtered.length;
   useEffect(() => {
@@ -105,19 +107,14 @@ export function BrowserPanel({ panel, state, language, opener, favicons, undo, o
     return () => document.removeEventListener('pointerdown', outside);
   }, [opener, onDismiss]);
   const open = (url: string, background: boolean) => { if (background) void action({ type: 'new-tab', input: url, background: true }); else onNavigate(url); };
-  const row = (item: typeof entries[number]) => <li className={`browser-library-row ${panel === 'history' ? 'history-row' : 'favorite-row'}`} key={item.url} data-library-row>
+  const row = (item: HistoryEntry) => <li className="browser-library-row history-row" key={item.url} data-library-row>
     <a data-row-control="link" className="browser-library-link" href={item.url} title={item.title || item.url} onClick={event => { event.preventDefault(); open(item.url, event.ctrlKey); }} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); open(item.url, true); } }}>
       <SiteBadge url={item.url} title={item.title} state={state} favicons={favicons} /><span className="browser-entry-copy"><span>{item.title || item.url}</span>{'lastVisit' in item && <small>{new URL(item.url).host}</small>}</span>
       {'lastVisit' in item && <time dateTime={new Date(item.lastVisit).toISOString()}>{new Date(item.lastVisit).toLocaleTimeString(language, { hour: '2-digit', minute: '2-digit' })}</time>}
     </a>
-    <div className="browser-row-actions">{panel === 'bookmarks' && <button className="icon-button" type="button" aria-label={`${t('rename')}: ${item.title || item.url}`} title={t('rename')} data-row-control="rename" onClick={() => { setRenameUrl(item.url); setRenameTitle(item.title); }}><Pencil aria-hidden="true" /></button>}
-      <button className="icon-button" type="button" aria-label={t('deleteItem').replace('{title}', item.title || item.url)} title={t('delete')} data-row-control="delete" onClick={event => remove(event.currentTarget, { type: panel === 'history' ? 'delete-history' : 'delete-bookmark', url: item.url }, panel === 'history' ? 'entryDeleted' : 'bookmarkDeleted')}><Trash2 aria-hidden="true" /></button></div>
-    {renameUrl === item.url && <form className="rename-form" onSubmit={event => { event.preventDefault(); if (renameTitle.trim()) void action({ type: 'rename-bookmark', url: item.url, title: renameTitle }).then(success => { if (success) { setRenameUrl(''); onAnnounce(t('bookmarkRenamed')); } }); }}>
-      <input autoFocus aria-label={t('bookmarkName')} value={renameTitle} maxLength={1024} onChange={event => setRenameTitle(event.target.value)} />
-      <button className="settings-button" type="submit" disabled={pending || !renameTitle.trim()}>{t('save')}</button><button className="settings-button quiet" type="button" onClick={() => { setRenameUrl(''); search.current?.focus(); }}>{t('cancel')}</button>
-    </form>}
+    <div className="browser-row-actions"><button className="icon-button" type="button" aria-label={t('deleteItem').replace('{title}', item.title || item.url)} title={t('delete')} data-row-control="delete" onClick={event => remove(event.currentTarget, { type: 'delete-history', url: item.url }, 'entryDeleted')}><Trash2 aria-hidden="true" /></button></div>
   </li>;
-  const empty = <ul className="browser-library-list">{filter ? <NoResults language={language} onAction={() => { setFilter(''); search.current?.focus(); }} /> : panel === 'history' ? <EmptyHistory language={language} onAction={onBrowse} /> : <EmptyBookmarks language={language} onAction={onBrowse} />}</ul>;
+  const empty = <ul className="browser-library-list">{filter ? <NoResults language={language} onAction={() => { setFilter(''); search.current?.focus(); }} /> : <EmptyHistory language={language} onAction={onBrowse} />}</ul>;
   return <ToolbarPopover opener={opener}><section className="browser-library-panel" id="browser-library-panel" ref={ref} role="dialog" aria-labelledby={`${id}-title`} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onDismiss(true); return; }
     if ((event.target as HTMLElement).closest('.rename-form')) return;

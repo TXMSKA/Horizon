@@ -975,29 +975,39 @@ function temporaryDirectory(t, prefix) {
 
 function sampleStore(directory) {
   return {
-    version: 4, clearHistoryOnClose: false, clearCacheOnClose: false,
+    version: 5, clearHistoryOnClose: false, clearCacheOnClose: false,
     siteSettings: { blocking: [], dark: [], permissions: [] },
     history: [{ url: 'https://example.com/', title: 'Example', lastVisit: 1, visitCount: 2 }],
-    bookmarks: [{ url: 'https://example.com/', title: 'Example', createdAt: 1 }],
+    favorites: { bar: [{ kind: 'link', id: randomUUID(), url: 'https://example.com/', title: 'Example', createdAt: 1 }], other: [] },
     downloads: [{ id: 'download-1', url: 'https://example.com/file', filename: 'file.txt', path: join(directory, 'file.txt'), received: 3, total: 3, status: 'completed', startedAt: 1 }],
   };
+}
+
+function emptyStore() {
+  return { version: 5, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], favorites: { bar: [], other: [] }, downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } };
+}
+
+function legacyStoreSample(store, version = 4) {
+  const legacy = { ...store, version, bookmarks: store.favorites.bar.map(({ url, title, createdAt }) => ({ url, title, createdAt })) };
+  delete legacy.favorites;
+  return legacy;
 }
 
 test('store schema rejects unsafe URLs, shapes, statuses, paths, and unbounded fields', (t) => {
   const directory = temporaryDirectory(t, 'schema');
   assert.equal(validateStore(sampleStore(directory)), true);
-  assert.equal(validateStore({ version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } }), true);
+  assert.equal(validateStore(emptyStore()), true);
   for (const invalid of [null, [], {}, { version: 2, history: [], bookmarks: [], downloads: [] }]) assert.equal(validateStore(invalid), false);
   const mutations = [
     store => { store.extra = true; },
     store => { store.history = null; },
     store => { store.history[0].url = 'file:///private'; },
-    store => { store.bookmarks[0].url = 'https://user@example.com/'; },
-    store => { store.bookmarks[0].createdAt = -1; },
+    store => { store.favorites.bar[0].url = 'https://user@example.com/'; },
+    store => { store.favorites.bar[0].createdAt = -1; },
     store => { store.history[0].visitCount = 0; },
     store => { store.history[0].lastVisit = Infinity; },
     store => { store.history[0].lastVisit = Number.MAX_SAFE_INTEGER; },
-    store => { store.bookmarks[0].createdAt = Number.MAX_SAFE_INTEGER; },
+    store => { store.favorites.bar[0].createdAt = Number.MAX_SAFE_INTEGER; },
     store => { store.downloads[0].startedAt = Number.MAX_SAFE_INTEGER; },
     store => { store.history[0].title = 'x'.repeat(4097); },
     store => { store.downloads[0].status = 'running'; },
@@ -1024,17 +1034,17 @@ test('store schema rejects unsafe URLs, shapes, statuses, paths, and unbounded f
 test('store writes atomically, recovers invalid files, and preserves corrupt originals', (t) => {
   const directory = temporaryDirectory(t, 'store');
   const path = join(directory, 'profile', 'browser.json');
-  assert.deepEqual(readStore(path), { version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
+  assert.deepEqual(readStore(path), emptyStore());
   assert.ok(existsSync(path));
   const store = sampleStore(directory);
   writeStore(path, store);
   assert.deepEqual(readStore(path), store);
   assert.equal(readdirSync(join(directory, 'profile')).some(name => name.endsWith('.tmp')), false);
-  assert.throws(() => writeStore(path, { ...store, version: 5 }));
+  assert.throws(() => writeStore(path, { ...store, version: 6 }));
   assert.deepEqual(readStore(path), store);
-  for (const corrupt of ['{broken json', JSON.stringify({ ...store, version: 5 })]) {
+  for (const corrupt of ['{broken json', JSON.stringify({ ...store, version: 6 })]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readStore(path), { version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
+    assert.deepEqual(readStore(path), emptyStore());
     const backups = readdirSync(join(directory, 'profile')).filter(name => name.startsWith('browser.json.corrupt-'));
     assert.ok(backups.some(name => readFileSync(join(directory, 'profile', name), 'utf8') === corrupt));
     assert.equal(validateStore(JSON.parse(readFileSync(path, 'utf8'))), true);
@@ -1042,6 +1052,109 @@ test('store writes atomically, recovers invalid files, and preserves corrupt ori
   const unavailable = join(directory, 'not-a-directory');
   writeFileSync(unavailable, 'file');
   assert.doesNotThrow(() => readStore(join(unavailable, 'browser.json')));
+});
+
+test('version 4 favorites migrate in order with new ids and a failed validation keeps the old file usable', t => {
+  const directory = temporaryDirectory(t, 'favorite-migration'), path = join(directory, 'browser.json');
+  const old = legacyStoreSample(sampleStore(directory));
+  old.bookmarks.push({ url: 'https://second.example/', title: 'Second', createdAt: 2 });
+  writeFileSync(path, JSON.stringify(old));
+  const migrated = readStore(path);
+  assert.equal(migrated.version, 5);
+  assert.deepEqual(migrated.favorites.bar.map(({ url, title, createdAt }) => ({ url, title, createdAt })), old.bookmarks);
+  assert.deepEqual(migrated.favorites.other, []);
+  assert.equal(new Set(migrated.favorites.bar.map(entry => entry.id)).size, 2);
+  assert.ok(migrated.favorites.bar.every(entry => /^[0-9a-f-]{36}$/.test(entry.id)));
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), migrated);
+  assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
+  const unwriteable = legacyStoreSample(sampleStore(directory));
+  unwriteable.bookmarks[0].title = 'L'.repeat(4096);
+  writeFileSync(path, JSON.stringify(unwriteable));
+  const original = readFileSync(path);
+  const restored = readStore(path);
+  assert.equal(restored.favorites.bar[0].title.length, 4096);
+  assert.deepEqual(readFileSync(path), original);
+  assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-')), false);
+  const many = legacyStoreSample(sampleStore(directory));
+  many.bookmarks = Array.from({ length: 10001 }, (_, index) => ({ url: `https://example.com/${index}`, title: String(index), createdAt: index }));
+  writeFileSync(path, JSON.stringify(many));
+  const saved = readFileSync(path);
+  assert.equal(readStore(path).favorites.bar.length, 10001);
+  assert.deepEqual(readFileSync(path), saved);
+});
+
+test('favorites enforce nesting, item limits, moves and strict saved shape', () => {
+  const { addFavorite, createFavoriteFolder, moveFavorite, favoriteLocation, FAVORITE_LINK_LIMIT, FAVORITE_FOLDER_LIMIT } = require('../dist/electron/favorites.js');
+  const tree = { bar: [], other: [] };
+  let parent = 'bar';
+  for (let depth = 0; depth < 8; depth++) parent = createFavoriteFolder(tree, parent, 0, ` Level ${depth} `).id;
+  assert.throws(() => createFavoriteFolder(tree, parent, 0, 'Too deep'), /FAVORITE_DEPTH_LIMIT/);
+  const link = addFavorite(tree, parent, 0, 'https://example.com/', 'Example');
+  assert.throws(() => moveFavorite(tree, tree.bar[0].id, parent, 1), /FAVORITE_DEPTH_LIMIT|FAVORITE_CYCLE/);
+  moveFavorite(tree, link.id, 'other', 0);
+  assert.equal(favoriteLocation(tree, link.id).siblings, tree.other);
+  assert.throws(() => moveFavorite(tree, link.id, 'other', 2), /FAVORITE_POSITION_INVALID/);
+  assert.throws(() => addFavorite(tree, 'bar', 1, 'javascript:alert(1)', 'Bad'), /FAVORITE_URL_INVALID/);
+  assert.throws(() => addFavorite(tree, 'bar', 1, 'https://example.com/', 'x'.repeat(201)), /FAVORITE_TITLE_INVALID/);
+  assert.throws(() => createFavoriteFolder(tree, 'bar', 1, 'bad\nname'), /FAVORITE_NAME_INVALID/);
+  assert.equal(validateStore({ ...emptyStore(), favorites: tree }), true);
+  const folder = tree.bar[0];
+  const invalid = { ...emptyStore(), favorites: structuredClone(tree) };
+  invalid.favorites.bar[0].children[0].id = folder.id;
+  assert.equal(validateStore(invalid), false);
+  assert.equal(FAVORITE_LINK_LIMIT, 10000); assert.equal(FAVORITE_FOLDER_LIMIT, 1000);
+  const fullLinks = { bar: Array.from({ length: FAVORITE_LINK_LIMIT }, (_, index) => ({ kind: 'link', id: randomUUID(), url: `https://example.com/${index}`, title: '', createdAt: 1 })), other: [] };
+  assert.throws(() => addFavorite(fullLinks, 'other', 0, 'https://example.com/extra', ''), /FAVORITE_LINK_LIMIT/);
+  const fullFolders = { bar: Array.from({ length: FAVORITE_FOLDER_LIMIT }, () => ({ kind: 'folder', id: randomUUID(), name: 'Folder', createdAt: 1, children: [] })), other: [] };
+  assert.throws(() => createFavoriteFolder(fullFolders, 'other', 0, 'Extra'), /FAVORITE_FOLDER_LIMIT/);
+});
+
+test('favorite names, titles and addresses enforce their boundaries and stored children cannot be sparse', () => {
+  const { favoriteName, favoriteTitle, favoriteURL, validFavorites, createFavoriteFolder, moveFavorite, addFavorite } = require('../dist/electron/favorites.js');
+  assert.equal(favoriteName('  Folder  '), 'Folder'); assert.equal(favoriteName(' '.repeat(30) + 'x'.repeat(80) + ' '), 'x'.repeat(80));
+  for (const [name, error] of [['', 'EMPTY'], ['   ', 'EMPTY'], ['x'.repeat(81), 'LONG'], ['bad\0name', 'INVALID'], ['bad\u0085name', 'INVALID']]) assert.throws(() => favoriteName(name), new RegExp('FAVORITE_NAME_' + error));
+  assert.equal(favoriteTitle(''), ''); assert.equal(favoriteTitle('x'.repeat(200)).length, 200);
+  for (const title of ['x'.repeat(201), 'bad\nname', '\u007f']) assert.throws(() => favoriteTitle(title), /FAVORITE_TITLE_INVALID/);
+  const address = 'https://example.com/' + 'x'.repeat(8192 - 'https://example.com/'.length);
+  assert.equal(favoriteURL(address), address); assert.throws(() => favoriteURL(address + 'x'), /FAVORITE_URL_INVALID/);
+  const tree = { bar: [], other: [] }, folder = createFavoriteFolder(tree, 'bar', 0, 'Folder');
+  folder.children = new Array(1); assert.equal(validFavorites(tree), false); folder.children = [];
+  assert.equal(validFavorites({ bar: new Array(1), other: [] }), false);
+  const links = [1, 2, 3].map(index => addFavorite(tree, 'bar', tree.bar.length, `https://example.com/${index}`, String(index)));
+  moveFavorite(tree, links[0].id, 'bar', tree.bar.length);
+  assert.deepEqual(tree.bar.slice(1).map(item => item.id), [links[1].id, links[2].id, links[0].id]);
+  const before = structuredClone(tree);
+  assert.throws(() => moveFavorite(tree, folder.id, folder.id, 0), /FAVORITE_CYCLE/); assert.deepEqual(tree, before);
+});
+
+test('a failed encrypted migration save preserves the version 4 bytes and still returns every bookmark', t => {
+  const directory = temporaryDirectory(t, 'favorite-save-failure'), path = join(directory, 'browser.json');
+  const legacy = legacyStoreSample(sampleStore(directory));
+  legacy.bookmarks.push({ url: 'https://second.example/', title: 'Second', createdAt: 8 });
+  writeFileSync(path, JSON.stringify(legacy)); const bytes = readFileSync(path);
+  const cipher = { isEncryptionAvailable: () => true, encryptString() { throw new Error('Write unavailable'); }, decryptString: value => value.toString() };
+  const status = { readError: false, memoryOnly: false }, migrated = readStore(path, cipher, status);
+  assert.deepEqual(migrated.favorites.bar.map(({ url, title, createdAt }) => ({ url, title, createdAt })), legacy.bookmarks);
+  assert.equal(status.readError, false); assert.deepEqual(readFileSync(path), bytes);
+  assert.deepEqual(readdirSync(directory), ['browser.json']);
+  assert.equal(readStore(path).favorites.bar.length, 2);
+});
+
+test('favorites bar overflow keeps whole items and every favorite refusal has bilingual copy', () => {
+  const { favoritesOverflow, canMoveFavorite } = require('../dist/src/shared/favorites.js');
+  const { text } = interfaceModule('src/copy.ts');
+  assert.equal(favoritesOverflow([50, 70, 40], 160), 2);
+  assert.equal(favoritesOverflow([50, 70, 40], 159), 1);
+  assert.equal(favoritesOverflow([50, 70, 40], 160, 28, 6), 2);
+  assert.equal(favoritesOverflow([50, 70, 40], 172), 3);
+  assert.equal(favoritesOverflow([], 0), 0); assert.equal(favoritesOverflow([50], 50), 1); assert.equal(favoritesOverflow([50], 49), 0);
+  assert.equal(favoritesOverflow([50, 50], 84), 1); assert.equal(favoritesOverflow([50, 50], 83), 0);
+  const id = randomUUID(), child = randomUUID();
+  const tree = { bar: [{ kind: 'folder', id, name: 'Top', createdAt: 1, children: [{ kind: 'folder', id: child, name: 'Child', createdAt: 1, children: [] }] }], other: [] };
+  assert.equal(canMoveFavorite(tree, id, child), false);
+  assert.equal(canMoveFavorite(tree, child, 'other'), true);
+  for (const language of ['en', 'es']) for (const key of ['favoritesBar', 'otherFavorites', 'moreFavorites', 'favoriteActions', 'openFavoriteNewTab', 'openAllFavorites', 'moveFavorite', 'chooseFavoriteFolder', 'favoriteDeleted', 'FAVORITE_COMMAND_INVALID', 'FAVORITE_NAME_INVALID', 'FAVORITE_NAME_EMPTY', 'FAVORITE_NAME_LONG', 'FAVORITE_TITLE_INVALID', 'FAVORITE_URL_INVALID', 'FAVORITE_FOLDER_NOT_FOUND', 'FAVORITE_NOT_FOUND', 'FAVORITE_POSITION_INVALID', 'FAVORITE_FOLDER_LIMIT', 'FAVORITE_LINK_LIMIT', 'FAVORITE_DEPTH_LIMIT', 'FAVORITE_CYCLE', 'FAVORITE_OPEN_LIMIT', 'FAVORITE_STORAGE_FAILED'])
+    assert.equal(typeof text(key, language), 'string', `${language}:${key}`);
 });
 
 test('interrupted downloads become failed when a profile is reopened', (t) => {
@@ -1127,6 +1240,36 @@ test('browser IPC arguments reject unknown actions, extra fields, and invalid va
   for (const area of [null, [], {}, { top: -1, hidden: false }, { top: 2049, hidden: false }, { top: Infinity, hidden: true }, { top: NaN, hidden: true }, { top: '96', hidden: false }, { top: 96, hidden: 1 }, { top: 96, hidden: true, path: '/private' }]) {
     assert.throws(() => validateContentArea(area));
   }
+});
+
+test('favorite commands require exact keys and reject malformed addresses and ids', () => {
+  const id = randomUUID(), link = 'https://example.com/';
+  const tree = { bar: [{ kind: 'link', id, url: link, title: 'Example', createdAt: 1 }], other: [] };
+  const commands = [
+    { type: 'add-favorite', url: link, title: 'Example', parent: 'bar', position: 0 },
+    { type: 'create-favorite-folder', name: 'Folder', parent: 'other', position: 0 },
+    { type: 'rename-favorite', id, name: 'Renamed' },
+    { type: 'move-favorite', id, parent: 'bar', position: 0 },
+    { type: 'delete-favorite', id }, { type: 'open-favorite', id }, { type: 'open-favorite', id, background: true },
+    { type: 'open-favorite-new-tab', id }, { type: 'open-all-favorites', id: 'bar' },
+  ];
+  for (const command of commands) {
+    assert.deepEqual(validateCommand(command, undefined, [], [], tree), command);
+    assert.throws(() => validateCommand({ ...command, extra: true }, undefined, [], [], tree), /FAVORITE_COMMAND_INVALID/);
+    if ('id' in command && command.id !== 'bar') assert.throws(() => validateCommand({ ...command, id: randomUUID() }, undefined, [], [], tree), /FAVORITE_NOT_FOUND|FAVORITE_FOLDER_NOT_FOUND/);
+    if ('parent' in command) assert.throws(() => validateCommand({ ...command, parent: randomUUID() }, undefined, [], [], tree), /FAVORITE_FOLDER_NOT_FOUND/);
+    for (const key of Object.keys(command)) {
+      const missing = { ...command }; delete missing[key];
+      if (key !== 'background') assert.throws(() => validateCommand(missing, undefined, [], [], tree));
+    }
+  }
+  for (const value of [null, '', '__proto__', randomUUID().slice(0, 20), 'other/child'])
+    assert.throws(() => validateCommand({ type: 'delete-favorite', id: value }, undefined, [], [], tree));
+  for (const value of [null, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])
+    assert.throws(() => validateCommand({ type: 'move-favorite', id, parent: 'bar', position: value }, undefined, [], [], tree));
+  for (const url of ['file:///private', 'https://user:secret@example.com/', 'https://example.com/' + 'x'.repeat(8193)])
+    assert.throws(() => validateCommand({ type: 'add-favorite', url, title: 'Bad', parent: 'bar', position: 0 }, undefined, [], [], tree));
+  assert.throws(() => validateCommand({ type: 'delete-favorite', id: randomUUID() }, undefined, [], [], tree), /FAVORITE_NOT_FOUND/);
 });
 
 test('chrome and web content share the same browser shortcut mapping', () => {
@@ -1557,10 +1700,11 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(state().tabs[0].error, null);
   assert.equal(view.visible, true);
   command({ type: 'bookmark' });
-  assert.equal(state().store.bookmarks.length, 1);
+  assert.equal(state().store.favorites.bar.length, 1);
   command({ type: 'bookmark' });
-  assert.equal(state().store.bookmarks.length, 0);
+  assert.equal(state().store.favorites.bar.length, 0);
   tick();
+  tick(8000);
   const originalStore = structuredClone(state().store);
   for (const kind of ['history', 'bookmarks', 'downloads']) {
     const before = structuredClone(state().store);
@@ -1571,10 +1715,12 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
     assert.equal(writes.length, writesBefore);
   }
   const restoreStore = sampleStore(directory);
-  for (const kind of ['history', 'bookmarks', 'downloads']) {
+  for (const kind of ['history', 'downloads']) {
     const entry = restoreStore[kind][0];
     restoreStore[kind] = [entry, { ...entry, url: 'https://second.example/', ...(kind === 'downloads' ? { id: 'download-2' } : {}) }, { ...entry, url: 'https://third.example/', ...(kind === 'downloads' ? { id: 'download-3' } : {}) }];
   }
+  const bookmark = restoreStore.favorites.bar[0];
+  restoreStore.favorites.bar.push({ ...bookmark, id: randomUUID(), url: 'https://second.example/' }, { ...bookmark, id: randomUUID(), url: 'https://third.example/' });
   for (const [destructive, kind] of [
     [{ type: 'delete-history', url: 'https://second.example/' }, 'history'],
     [{ type: 'clear-history' }, 'history'],
@@ -1583,26 +1729,28 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   ]) {
     Object.assign(state().store, structuredClone(restoreStore), { siteSettings: state().store.siteSettings });
     command(destructive);
-    const removed = structuredClone(state().store[kind]);
-    assert.equal(removed.length, destructive.type === 'clear-history' ? 0 : 2);
+    const field = kind === 'bookmarks' ? 'favorites' : kind;
+    const removed = structuredClone(state().store[field]);
+    assert.equal(kind === 'bookmarks' ? removed.bar.length : removed.length, destructive.type === 'clear-history' ? 0 : 2);
     assert.equal([...timers.values()].filter(timer => timer.delay === 8000).length, 1);
     tick();
-    assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[kind], removed);
-    if (removed.length) state().store[kind][0].url = 'https://changed.example/';
+    assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[field], removed);
+    if (kind === 'bookmarks') state().store.favorites.bar[0].url = 'https://changed.example/';
+    else if (removed.length) state().store[kind][0].url = 'https://changed.example/';
     command({ type: 'restore', kind });
-    assert.deepEqual(state().store[kind], restoreStore[kind]);
+    assert.deepEqual(state().store[field], restoreStore[field]);
     assert.equal([...timers.values()].some(timer => timer.delay === 8000), false);
     tick();
-    assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[kind], restoreStore[kind]);
+    assert.deepEqual(readStore(profileStorePath(directory, state().activeProfileId))[field], restoreStore[field]);
     const writesAfterRestore = writes.length;
     command({ type: 'restore', kind });
-    assert.deepEqual(state().store[kind], restoreStore[kind]);
+    assert.deepEqual(state().store[field], restoreStore[field]);
     assert.equal(timers.size, 0);
     assert.equal(writes.length, writesAfterRestore);
     command(destructive);
     tick(); tick(8000);
     command({ type: 'restore', kind });
-    assert.deepEqual(state().store[kind], removed);
+    assert.deepEqual(state().store[field], removed);
     assert.equal(timers.size, 0);
   }
   Object.assign(state().store, structuredClone(restoreStore), { siteSettings: state().store.siteSettings });
@@ -1613,7 +1761,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   command({ type: 'restore', kind: 'history' });
   assert.deepEqual(state().store.history, historyAfterDelete);
   command({ type: 'restore', kind: 'bookmarks' });
-  assert.deepEqual(state().store.bookmarks, restoreStore.bookmarks);
+  assert.deepEqual(state().store.favorites, restoreStore.favorites);
   command({ type: 'delete-history', url: 'https://third.example/' });
   command({ type: 'restore', kind: 'history' });
   assert.deepEqual(state().store.history, historyAfterDelete);
@@ -1924,7 +2072,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.throws(() => menuAction(oldMenu, 'reload'));
   assert.equal(state().activeProfileId, work.id);
   assert.equal(readRegistry(join(directory, 'profiles.json'), 'en').activeId, work.id);
-  assert.deepEqual(state().store, { version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
+  assert.deepEqual(state().store, emptyStore());
   assert.equal(state().tabs.length, 1);
   assert.equal(view.visible, false); assert.equal(view.webContents.destroyed, false);
   assert.equal(sessions.size, 2);
@@ -1940,7 +2088,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(workView.visible, true);
   workView.webContents.emit('did-navigate', {}, 'https://work.example/'); command({ type: 'bookmark' });
   assert.equal(state().store.history[0].url, 'https://work.example/');
-  assert.equal(state().store.bookmarks[0].url, 'https://work.example/');
+  assert.equal(state().store.favorites.bar[0].url, 'https://work.example/');
   const workDownload = new Download();
   workSession.emit('will-download', allowed, workDownload, workView.webContents);
   assert.equal(state().store.downloads[0].path, workDownload.path);
@@ -1955,7 +2103,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.deepEqual(state().store.history, deletedHistory);
   command({ type: 'restore', kind: 'history' });
   assert.deepEqual(state().store.history, deletedHistory, 'Undo cannot cross a profile switch');
-  assert.deepEqual(state().store.bookmarks, personalState.store.bookmarks);
+  assert.deepEqual(state().store.favorites, personalState.store.favorites);
   assert.equal(state().store.downloads.some(entry => entry.path === workDownload.path), false);
   workDownload.emit('updated', {}, 'progressing');
   assert.equal(state().store.downloads.some(entry => entry.path === workDownload.path), false);
@@ -2664,10 +2812,10 @@ test('profile stores encrypt through an injected cipher and retain tampered or i
   const tampered = Buffer.from(encrypted); tampered[tampered.length - 1] ^= 1;
   writeFileSync(path, tampered);
   const readStatus = { readError: false, memoryOnly: false };
-  assert.deepEqual(readStore(path, cipher, readStatus), { version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] } });
+  assert.deepEqual(readStore(path, cipher, readStatus), emptyStore());
   assert.deepEqual(readStatus, { readError: true, memoryOnly: false });
   assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(tampered)));
-  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 5 }))]);
+  const invalid = Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify({ ...store, version: 6 }))]);
   writeFileSync(path, invalid);
   assert.equal(readStore(path, cipher).history.length, 0);
   assert.ok(readdirSync(join(directory, 'profile')).some(name => name.startsWith('browser-store.json.corrupt-') && readFileSync(join(directory, 'profile', name)).equals(invalid)));
@@ -2706,7 +2854,7 @@ test('legacy browsing migrates into Personal and archives the owner-only origina
   assert.deepEqual(readStore(destination, cipher), store);
   assert.equal(existsSync(profileStorePath(directory, registry.profiles[1].id)), false);
   const newer = { ...store, history: [{ ...store.history[0], title: 'Newer data' }] };
-  const older = { ...store, bookmarks: [] };
+  const older = { ...store, favorites: { bar: [], other: [] } };
   writeStore(destination, newer, cipher); writeStore(legacy, older);
   migrateStore(directory, registry, cipher);
   assert.deepEqual(readStore(destination, cipher), newer, 'A retry after a crash preserves newer data');
@@ -2768,23 +2916,25 @@ test('all profile commands reject extra keys, invalid names, ids, colours and un
 test('site settings migrate strict version 1 and 2 stores to version 3 and validate bounded canonical origins and hosts', t => {
   const directory = temporaryDirectory(t, 'site-settings');
   const path = join(directory, 'store.json'), sample = sampleStore(directory);
-  const legacy = { version: 1, history: sample.history, bookmarks: sample.bookmarks, downloads: sample.downloads };
+  const legacy = { version: 1, history: sample.history, bookmarks: legacyStoreSample(sample).bookmarks, downloads: sample.downloads };
   legacy.version = 1;
   writeFileSync(path, JSON.stringify(legacy));
   const migrated = readStore(path);
-  assert.deepEqual(migrated, sample);
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), sample);
+  assert.deepEqual(migrated.favorites.bar.map(({ url, title, createdAt }) => ({ url, title, createdAt })), legacy.bookmarks);
+  assert.equal(migrated.version, 5);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), migrated);
   assert.equal(readdirSync(directory).some(name => name.includes('corrupt')), false);
   const cipher = authenticatedCipher(), encryptedLegacy = join(directory, 'encrypted.json');
   writeFileSync(encryptedLegacy, Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify(legacy))]));
-  assert.deepEqual(readStore(encryptedLegacy, cipher), sample);
-  const legacySample = { ...sample }; delete legacySample.clearHistoryOnClose; delete legacySample.clearCacheOnClose;
+  assert.deepEqual(readStore(encryptedLegacy, cipher).favorites.bar.map(({ url, title, createdAt }) => ({ url, title, createdAt })), legacy.bookmarks);
+  const legacySample = legacyStoreSample(sample); delete legacySample.clearHistoryOnClose; delete legacySample.clearCacheOnClose;
   const second = { ...legacySample, version: 2, siteSettings: { blocking: [{ host: 'example.com', enabled: false }], permissions: [{ origin: 'https://example.com', ...defaultPermissions(), camera: 'allow' }] } };
-  const expected = { ...second, version: 4, clearHistoryOnClose: false, clearCacheOnClose: false, siteSettings: { ...second.siteSettings, dark: [] } };
-  writeFileSync(path, JSON.stringify(second)); assert.deepEqual(readStore(path), expected);
+  writeFileSync(path, JSON.stringify(second)); const expected = readStore(path);
+  assert.equal(expected.version, 5); assert.deepEqual(expected.favorites.bar.map(({ url, title, createdAt }) => ({ url, title, createdAt })), second.bookmarks);
+  assert.deepEqual(expected.siteSettings, { ...second.siteSettings, dark: [] });
   assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), expected);
   writeFileSync(encryptedLegacy, Buffer.concat([Buffer.from('HORIZON-STORE-1\n'), cipher.encryptString(JSON.stringify(second))]));
-  assert.deepEqual(readStore(encryptedLegacy, cipher), expected);
+  assert.deepEqual(readStore(encryptedLegacy, cipher).favorites.bar.map(({ url, title, createdAt }) => ({ url, title, createdAt })), second.bookmarks);
   const settings = sample.siteSettings;
   setBlocking(settings, 'example.com', false);
   assert.equal(siteSettings(settings, 'https://example.com/').dark, true);
@@ -3582,6 +3732,43 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   return { directory, handlers, views, timers, sessions, window, app, close, event, state, command, notebook, image, area, navigate, settings, openLaunch: browser.openLaunch, isLaunchNavigation: exported.isLaunchNavigation };
 }
 
+test('favorite IPC keeps the current profile tree ordered, opens nested links, stars and restores deletes', t => {
+  const browser = notebookBrowser(t), { command, state } = browser;
+  browser.navigate('https://example.com/');
+  command({ type: 'bookmark' });
+  const first = state().store.favorites.bar[0];
+  assert.equal(first.url, 'https://example.com/');
+  const version = state().favoritesVersion;
+  command({ type: 'create-favorite-folder', name: 'Reading', parent: 'bar', position: 0 });
+  const folder = state().store.favorites.bar[0];
+  command({ type: 'move-favorite', id: first.id, parent: folder.id, position: 0 });
+  command({ type: 'rename-favorite', id: first.id, name: 'Moved link' });
+  command({ type: 'add-favorite', url: 'https://second.example/', title: 'Second', parent: folder.id, position: 1 });
+  assert.deepEqual(folder.children.map(item => item.title), ['Moved link', 'Second']);
+  assert.ok(state().favoritesVersion > version);
+  command({ type: 'open-favorite', id: first.id });
+  assert.equal(state().tabs.find(tab => tab.id === state().activeId).url, first.url);
+  const tabCount = state().tabs.length;
+  command({ type: 'open-favorite-new-tab', id: folder.children[1].id });
+  assert.equal(state().tabs.length, tabCount + 1);
+  command({ type: 'open-all-favorites', id: folder.id });
+  assert.equal(state().tabs.length, tabCount + 3);
+  command({ type: 'delete-favorite', id: folder.id });
+  assert.deepEqual(state().store.favorites.bar, []);
+  command({ type: 'restore', kind: 'bookmarks' });
+  assert.deepEqual(state().store.favorites.bar, [folder]);
+  command({ type: 'open-favorite', id: first.id });
+  command({ type: 'bookmark' });
+  assert.equal(state().store.favorites.bar[0].children.some(item => item.id === first.id), false, 'Star searches nested folders');
+  const profile = state().activeProfileId;
+  command({ type: 'create-profile', name: 'Other', color: 'blue' });
+  assert.notEqual(state().activeProfileId, profile);
+  assert.throws(() => command({ type: 'delete-favorite', id: folder.id }), /FAVORITE_NOT_FOUND/);
+  command({ type: 'switch-profile', id: profile });
+  assert.equal(state().store.favorites.bar[0].id, folder.id);
+  browser.close();
+});
+
 test('notebook tabs are chrome pages, remain consistent across editing and never enter history or a web view', async t => {
   const browser = notebookBrowser(t), { state, command, notebook, views } = browser;
   command({ type: 'create-project', name: 'My Research' }); const id = state().projectInUse;
@@ -3899,8 +4086,119 @@ test('browser menu keeps the drawn order, shortcuts and working zoom controls', 
 });
 
 function browserPanelInterface(hooks, document = {}) {
-  return interfaceModule('src/BrowserPanel.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './EmptyState': { EmptyBookmarks: 'empty-bookmarks', EmptyDownloads: 'empty-downloads', EmptyHistory: 'empty-history', NoResults: 'no-results' }, './ToolbarPopover': { ToolbarPopover: 'popover' } }, { document });
+  return interfaceModule('src/BrowserPanel.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './EmptyState': { EmptyDownloads: 'empty-downloads', EmptyHistory: 'empty-history', NoResults: 'no-results' }, './ToolbarPopover': { ToolbarPopover: 'popover' } }, { document });
 }
+
+function favoritesInterface(hooks, commands = [], document = { activeElement: null, addEventListener() {}, removeEventListener() {} }) {
+  const window = { horizon: { command: async command => { commands.push(command); } }, addEventListener() {}, removeEventListener() {} };
+  return interfaceModule('src/Favorites.tsx', {
+    react: hooks.react, 'lucide-react': notebookTestIcons, './shared/api': require('../dist/src/shared/api.js'),
+    './shared/favorites': require('../dist/src/shared/favorites.js'), './copy': interfaceModule('src/copy.ts'),
+    './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' }, './ToolbarPopover': { ToolbarPopover: 'popover' },
+  }, { window, document, ResizeObserver: class { observe() {} disconnect() {} }, getComputedStyle: () => ({ columnGap: '6px', paddingLeft: '12px', paddingRight: '12px' }) });
+}
+
+test('favorites bar has one tab stop, keyboard travel, nested open all and Escape focus', () => {
+  const hooks = notebookTestHooks(), sent = [], document = { activeElement: null, addEventListener() {}, removeEventListener() {} }, { FavoritesBar } = favoritesInterface(hooks, [], document);
+  const folder = { kind: 'folder', id: randomUUID(), name: 'Reading', createdAt: 1, children: [{ kind: 'link', id: randomUUID(), url: 'https://nested.example/', title: 'Nested', createdAt: 1 }] };
+  const link = { kind: 'link', id: randomUUID(), url: 'https://example.com/', title: 'Example', createdAt: 1 };
+  const state = { activeProfileId: 'profile', store: { favorites: { bar: [folder, link], other: [] } } };
+  const props = { state, language: 'en', run: async command => { sent.push(command); return true; }, onDelete: async () => {}, onOverlay() {}, onActivate() {}, dismiss: false, undo: null, onRestore() {} };
+  const render = () => hooks.render(() => FavoritesBar(props));
+  let tree = render(), toolbar = notebookNodes(tree, node => node.props.role === 'toolbar')[0];
+  let buttons = notebookNodes(toolbar, node => node.type === 'button');
+  assert.equal(buttons.filter(button => button.props.tabIndex === 0).length, 1);
+  const focused = [], controls = buttons.map((button, index) => ({ focus: () => focused.push(index) }));
+  const key = (name, activeIndex) => { document.activeElement = controls[activeIndex]; toolbar.props.onKeyDown({ key: name, defaultPrevented: false, currentTarget: { querySelectorAll: () => controls }, preventDefault() {}, stopPropagation() {}, target: controls[activeIndex] }); };
+  key('ArrowRight', 0); key('End', 0); key('Home', 2); key('ArrowLeft', 0);
+  assert.deepEqual(focused, [1, 2, 0, 2]);
+  buttons[1].props.onClick({ ctrlKey: true, currentTarget: { hasAttribute: () => false } });
+  assert.deepEqual(sent, [{ type: 'open-favorite-new-tab', id: link.id }]);
+  const opener = { focus: () => focused.push('folder'), hasAttribute: () => false };
+  buttons[0].props.onClick({ ctrlKey: false, currentTarget: opener });
+  tree = render();
+  const popover = notebookNodes(tree, node => typeof node.type === 'function' && node.props.folder?.id === folder.id)[0];
+  assert.ok(popover);
+  const popupTree = hooks.render(() => popover.type(popover.props));
+  const popup = notebookNodes(popupTree, node => node.props.role === 'menu')[0];
+  const openAll = notebookNodes(popup, node => node.props['data-open-all'])[0];
+  openAll.props.onClick({ currentTarget: { hasAttribute: name => name === 'data-open-all' } });
+  assert.deepEqual(sent.at(-1), { type: 'open-all-favorites', id: folder.id });
+  popup.props.onKeyDown({ key: 'Escape', defaultPrevented: false, preventDefault() {}, stopPropagation() {} });
+  assert.equal(focused.at(-1), 'folder');
+});
+
+test('favorites panel expands its tree, filters nested links and sends id-based rename and folder commands', async () => {
+  const hooks = notebookTestHooks(), sent = [], events = [], { FavoritesPanel } = favoritesInterface(hooks, sent);
+  const link = { kind: 'link', id: randomUUID(), url: 'https://example.com/', title: 'Nested article', createdAt: 1 };
+  const folder = { kind: 'folder', id: randomUUID(), name: 'Reading', createdAt: 1, children: [link] };
+  const state = { activeProfileId: 'profile', store: { favorites: { bar: [folder], other: [] } }, storageReadError: false, storageError: false };
+  const props = { state, language: 'en', run: async command => { sent.push(command); return true; }, onDelete: async () => {}, opener: { current: null }, undo: null, onRestore() {}, onDismiss: focus => events.push(focus), onAnnounce: message => events.push(message) };
+  const render = () => hooks.render(() => FavoritesPanel(props));
+  let tree = render();
+  let rows = notebookNodes(tree, node => node.props.role === 'treeitem');
+  assert.deepEqual(rows.map(row => row.props['data-tree-id']), ['bar', folder.id, 'other']);
+  rows[1].props.onClick(); tree = render();
+  rows = notebookNodes(tree, node => node.props.role === 'treeitem');
+  assert.deepEqual(rows.map(row => row.props['data-tree-id']), ['bar', folder.id, link.id, 'other']);
+  rows[2].props.onClick({ ctrlKey: false });
+  assert.deepEqual(sent.at(-1), { type: 'open-favorite', id: link.id });
+  const searchButton = notebookNodes(tree, node => node.props['aria-label'] === 'Search favorites' && node.type === 'button')[0];
+  searchButton.props.onClick(); tree = render();
+  let search = notebookNodes(tree, node => node.type === 'input')[0];
+  search.props.onChange({ target: { value: 'article' } }); tree = render();
+  assert.equal(notebookNodes(tree, node => node.props['data-tree-id'] === link.id).length, 1);
+  search = notebookNodes(tree, node => node.type === 'input')[0];
+  search.props.onChange({ target: { value: 'absent' } }); tree = render();
+  assert.equal(notebookNodes(tree, node => node.props.className === 'favorite-empty').length, 1);
+  search.props.onChange({ target: { value: '' } }); tree = render();
+  const opener = { getBoundingClientRect: () => ({ left: 4, bottom: 28 }), focus() {} };
+  notebookNodes(tree, node => node.props['data-tree-id'] === folder.id)[0].props.onContextMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: opener, clientX: 4, clientY: 28 });
+  tree = render();
+  const menu = notebookNodes(tree, node => node.type === 'menu')[0];
+  assert.ok(menu);
+  const actions = notebookNodes(menu, node => node.props.role === 'menuitem');
+  actions[1].props.onClick(); tree = render();
+  const form = notebookNodes(tree, node => node.type === 'form')[0];
+  notebookNodes(form, node => node.type === 'input')[0].props.onChange({ target: { value: 'Renamed folder' } });
+  tree = render(); notebookNodes(tree, node => node.type === 'form')[0].props.onSubmit({ preventDefault() {} });
+  await Promise.resolve();
+  assert.deepEqual(sent.at(-1), { type: 'rename-favorite', id: folder.id, name: 'Renamed folder' });
+  tree = render();
+  notebookNodes(tree, node => node.props['aria-label'] === 'New folder' && node.type === 'button')[0].props.onClick();
+  tree = render();
+  notebookNodes(tree, node => node.type === 'form')[0].props.children[1].props.onChange({ target: { value: 'Next' } });
+  tree = render(); notebookNodes(tree, node => node.type === 'form')[0].props.onSubmit({ preventDefault() {} });
+  await Promise.resolve();
+  assert.equal(sent.at(-1).type, 'create-favorite-folder');
+  assert.equal(sent.at(-1).name, 'Next');
+});
+
+test('favorites tree drag refuses descendants and moves a folder with its contents between roots', () => {
+  const hooks = notebookTestHooks(), sent = [], { FavoritesPanel } = favoritesInterface(hooks);
+  const child = { kind: 'folder', id: randomUUID(), name: 'Child', createdAt: 1, children: [] };
+  const folder = { kind: 'folder', id: randomUUID(), name: 'Top', createdAt: 1, children: [child] };
+  const state = { activeProfileId: 'profile', store: { favorites: { bar: [folder], other: [] } } };
+  const props = { state, language: 'en', onDelete: async () => {}, opener: { current: null }, undo: null, onRestore() {}, onDismiss() {}, onAnnounce() {}, run: async command => {
+    validateCommand(command, undefined, [], [], state.store.favorites);
+    require('../dist/electron/favorites.js').moveFavorite(state.store.favorites, command.id, command.parent, command.position); sent.push(command); return true;
+  } };
+  const render = () => hooks.render(() => FavoritesPanel(props));
+  let tree = render(); const row = id => notebookNodes(tree, node => node.props['data-tree-id'] === id)[0];
+  row(folder.id).props.onClick(); tree = render();
+  const data = new Map(), transfer = { setData: (type, value) => data.set(type, value), getData: type => data.get(type) ?? '' };
+  let stopped = 0;
+  const event = { dataTransfer: transfer, currentTarget: { getBoundingClientRect: () => ({ top: 0, left: 0, width: 100, height: 100 }) }, clientY: 50, clientX: 50, preventDefault() {}, stopPropagation() { stopped++; } };
+  const before = structuredClone(state.store.favorites);
+  row(folder.id).props.onDragStart(event); row(child.id).props.onDragOver(event);
+  assert.equal(transfer.dropEffect, 'none'); assert.equal(stopped, 1);
+  tree = render(); assert.equal(row(child.id).props['data-drop'], undefined); row(child.id).props.onDrop(event);
+  assert.deepEqual(sent, []); assert.deepEqual(state.store.favorites, before);
+  row(folder.id).props.onDragStart(event); row('other').props.onDragOver(event); tree = render();
+  assert.equal(row('other').props['data-drop'], 'inside'); row('other').props.onDrop(event);
+  assert.deepEqual(sent, [{ type: 'move-favorite', id: folder.id, parent: 'other', position: 0 }]);
+  assert.deepEqual(state.store.favorites, { bar: [], other: before.bar });
+});
 
 test('retry cancellation and early failures release the temporary tab and allow another retry', t => {
   const { EventEmitter } = require('node:events'), options = {}, browser = notebookBrowser(t, plainCipher, options);
@@ -3935,8 +4233,8 @@ test('retry cancellation and early failures release the temporary tab and allow 
   assert.equal(browser.state().store.downloads[0].status, 'progressing');
 });
 
-test('empty search announcements follow result transitions in both languages', () => {
-  for (const panel of ['bookmarks', 'history']) for (const language of ['en', 'es']) {
+test('history empty search announcements follow result transitions in both languages', () => {
+  for (const panel of ['history']) for (const language of ['en', 'es']) {
     const hooks = notebookTestHooks(), announced = [], { BrowserPanel } = browserPanelInterface(hooks, { addEventListener() {}, removeEventListener() {} });
     const entry = { title: 'Example', url: 'https://example.com/', lastVisit: Date.now() };
     const props = { panel, language, state: { tabs: [], store: { bookmarks: [entry], history: [entry], downloads: [] } }, opener: { current: null }, favicons: {}, undo: null, onAnnounce: message => announced.push(message) };
@@ -3952,8 +4250,8 @@ test('empty search announcements follow result transitions in both languages', (
   }
 });
 
-test('deleting focused library rows preserves the control and falls back to Undo', () => {
-  for (const [panel, control] of [['bookmarks', 'delete'], ['bookmarks', 'link'], ['bookmarks', 'rename'], ['history', 'delete'], ['history', 'link'], ['downloads', 'delete']]) for (const index of [0, 1, 2]) {
+test('deleting focused history and download rows preserves the control and falls back to Undo', () => {
+  for (const [panel, control] of [['history', 'delete'], ['history', 'link'], ['downloads', 'delete']]) for (const index of [0, 1, 2]) {
     const hooks = notebookTestHooks(), document = { body: {}, activeElement: null, addEventListener() {}, removeEventListener() {} }, focused = [], { BrowserPanel } = browserPanelInterface(hooks, document);
     const entries = [0, 1, 2].map(id => ({ id: String(id), title: String(id), filename: `${id}.pdf`, url: `https://example.com/${id}`, lastVisit: 3 - id, status: 'failed', received: 0, total: 0 }));
     const state = { tabs: [], store: { bookmarks: entries, history: entries, downloads: entries } };
@@ -3981,29 +4279,8 @@ test('deleting focused library rows preserves the control and falls back to Undo
   }
 });
 
-test('browser panels search, navigate, open background tabs and keep deletion undo', async () => {
-  const hooks = notebookTestHooks(), events = new Map(), focused = [], commands = [], navigation = [], removed = [], dismissals = [];
-  const document = { activeElement: null, addEventListener: (name, callback) => events.set(name, callback), removeEventListener: name => events.delete(name) };
-  const { BrowserPanel } = browserPanelInterface(hooks, document);
-  const state = { tabs: [], store: { bookmarks: [{ url: 'https://example.com/', title: 'Example', createdAt: 1 }], history: [], downloads: [] } };
-  const props = { panel: 'bookmarks', state, language: 'en', opener: { current: { contains: () => false } }, favicons: {}, undo: { kind: 'bookmarks', message: 'bookmarkDeleted' }, onRestore: () => commands.push('restore'), onDelete: async (...args) => removed.push(args), run: async command => { commands.push(command); return true; }, onNavigate: url => navigation.push(url), onBrowse() {}, onClear() {}, onDismiss: focus => dismissals.push(focus), onAnnounce() {} };
-  const render = () => hooks.render(() => BrowserPanel(props));
-  let tree = render(); const dialog = notebookNodes(tree, node => node.props.role === 'dialog')[0], input = notebookNodes(tree, node => node.type === 'input')[0];
-  input.props.ref.current = { focus: () => focused.push('search') };
-  const link = notebookNodes(tree, node => node.type === 'a')[0]; link.focus = () => focused.push('row');
-  dialog.props.ref.current = { contains: () => false, querySelectorAll: () => [link] }; hooks.flush(); assert.deepEqual(focused, ['search']);
-  const click = (ctrlKey = false) => ({ ctrlKey, preventDefault() {} });
-  link.props.onClick(click()); assert.deepEqual(navigation, ['https://example.com/']);
-  link.props.onClick(click(true)); await Promise.resolve(); await Promise.resolve();
-  link.props.onAuxClick({ button: 1, preventDefault() {} }); await Promise.resolve(); await Promise.resolve();
-  assert.deepEqual(commands, [{ type: 'new-tab', input: 'https://example.com/', background: true }, { type: 'new-tab', input: 'https://example.com/', background: true }]);
-  const key = key => ({ key, target: { closest: () => null }, preventDefault() {}, stopPropagation() {} });
-  dialog.props.onKeyDown(key('ArrowDown')); dialog.props.onKeyDown(key('ArrowUp')); assert.deepEqual(focused.slice(-2), ['row', 'row']);
-  notebookNodes(tree, node => node.props.title === 'Delete')[0].props.onClick({ currentTarget: { closest: () => null } }); assert.deepEqual(removed, [[{ type: 'delete-bookmark', url: 'https://example.com/' }, 'bookmarks', 'bookmarkDeleted']]);
-  notebookNodes(tree, node => node.type === 'button' && node.props.children === 'Undo')[0].props.onClick(); assert.equal(commands.at(-1), 'restore');
-  input.props.onChange({ target: { value: 'missing' } }); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'no-results').length, 1);
-  notebookNodes(tree, node => node.type === 'no-results')[0].props.onAction(); tree = render(); assert.equal(notebookNodes(tree, node => node.type === 'a').length, 1);
-  dialog.props.onKeyDown(key('Escape')); assert.deepEqual(dismissals, [true]); hooks.dispose(); assert.equal(events.size, 0);
+test('bookmark menu routes to the favorites tree', () => {
+  assert.match(readFileSync('src/App.tsx', 'utf8'), /<FavoritesPanel/);
 });
 
 test('history groups local calendar days and downloads expose actions only for their state', () => {
@@ -4399,15 +4676,16 @@ test('settings commands have exact shapes, named failures and all engine prefixe
   assert.equal(resolveLanguage('en', 'es-AR'), 'en'); assert.equal(resolveLanguage('es', 'en-US'), 'es');
 });
 
-test('store v4 strictly validates profile close flags and preserves version 3 data on migration', t => {
+test('store v5 strictly validates profile close flags and preserves version 3 data on migration', t => {
   const directory = temporaryDirectory(t, 'store-v4'), path = join(directory, 'store.json'), sample = sampleStore(directory);
   for (const flag of ['clearHistoryOnClose', 'clearCacheOnClose']) {
     for (const value of [null, 1, 'false', undefined]) assert.equal(validateStore({ ...sample, [flag]: value }), false);
     const missing = { ...sample }; delete missing[flag]; assert.equal(validateStore(missing), false);
   }
-  const legacy = { ...sample, version: 3 }; delete legacy.clearHistoryOnClose; delete legacy.clearCacheOnClose;
+  const legacy = legacyStoreSample(sample, 3); delete legacy.clearHistoryOnClose; delete legacy.clearCacheOnClose;
   writeFileSync(path, JSON.stringify(legacy));
-  assert.deepEqual(readStore(path), sample); assert.equal(JSON.parse(readFileSync(path)).version, 4);
+  assert.deepEqual(readStore(path).favorites.bar.map(({ url, title, createdAt }) => ({ url, title, createdAt })), legacy.bookmarks);
+  assert.equal(JSON.parse(readFileSync(path)).version, 5);
 });
 
 test('sites list preserves explicit dark choices and per-origin permissions; reset clears every host origin', () => {
@@ -4679,11 +4957,11 @@ test('each clear kind leaves unselected data and library entries alone', async t
   for (const field of ['history', 'cookies', 'cache']) {
     const browser = notebookBrowser(t); browser.navigate();
     const store = browser.state().store;
-    store.bookmarks.push({ url: 'https://saved.example/', title: 'Saved', createdAt: 1 });
+    store.favorites.bar.push({ kind: 'link', id: randomUUID(), url: 'https://saved.example/', title: 'Saved', createdAt: 1 });
     const before = structuredClone(store);
     const result = await browser.command({ type: 'clear-browsing-data', history: false, cookies: false, cache: false, [field]: true });
     assert.deepEqual(result, { history: field === 'history', cookies: field === 'cookies', cache: field === 'cache' });
-    assert.deepEqual(store.history, field === 'history' ? [] : before.history); assert.deepEqual(store.bookmarks, before.bookmarks); assert.deepEqual(store.downloads, before.downloads);
+    assert.deepEqual(store.history, field === 'history' ? [] : before.history); assert.deepEqual(store.favorites, before.favorites); assert.deepEqual(store.downloads, before.downloads);
     const calls = browser.views[0].webContents.session.cleared.map(entry => entry[0]);
     assert.deepEqual(calls, field === 'history' ? [] : [field === 'cookies' ? 'clearStorageData' : 'clearCache']); browser.close();
   }

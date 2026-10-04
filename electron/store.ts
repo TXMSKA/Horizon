@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { BrowserStore } from '../src/shared/api';
 import { isWebURL } from './browsing';
 import { isPermissionDecision, SITE_SETTINGS_LIMIT, validHost, validOrigin } from './site-settings';
+import { migrateBookmarks, validFavorites } from './favorites';
 
 function object(value: unknown, keys: string[]): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -38,11 +39,11 @@ export function encryptedStore(path: string): boolean {
   } finally { closeSync(file); }
 }
 
-function browsingEntries(value: Record<string, unknown>): boolean {
+function browsingEntries(value: Record<string, unknown>, legacy = true): boolean {
   return entries(value.history, entry => object(entry, ['url', 'title', 'lastVisit', 'visitCount'])
       && isWebURL(entry.url) && string(entry.title, 4096) && timestamp(entry.lastVisit) && integer(entry.visitCount, 1))
-    && entries(value.bookmarks, entry => object(entry, ['url', 'title', 'createdAt'])
-      && isWebURL(entry.url) && string(entry.title, 4096) && timestamp(entry.createdAt))
+    && (legacy ? entries(value.bookmarks, entry => object(entry, ['url', 'title', 'createdAt'])
+      && isWebURL(entry.url) && string(entry.title, 4096) && timestamp(entry.createdAt)) : validFavorites(value.favorites))
     && entries(value.downloads, entry => object(entry, ['id', 'url', 'filename', 'path', 'received', 'total', 'status', 'startedAt'])
       && string(entry.id, 128, 1) && isWebURL(entry.url) && string(entry.filename, 256, 1)
       && entry.filename !== '.' && entry.filename !== '..'
@@ -52,7 +53,8 @@ function browsingEntries(value: Record<string, unknown>): boolean {
       && typeof entry.status === 'string' && ['progressing', 'completed', 'failed', 'cancelled'].includes(entry.status));
 }
 
-function legacyStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings' | 'clearHistoryOnClose' | 'clearCacheOnClose'> & { version: 1 } {
+type LegacyStore = Omit<BrowserStore, 'version' | 'favorites'> & { version: 4; bookmarks: { url: string; title: string; createdAt: number }[] };
+function legacyStore(value: unknown): value is Pick<LegacyStore, 'bookmarks' | 'history' | 'downloads'> & { version: 1 } {
   return object(value, ['version', 'history', 'bookmarks', 'downloads']) && value.version === 1 && browsingEntries(value);
 }
 function hostChoices(value: unknown): boolean {
@@ -72,16 +74,21 @@ function siteEntries(settings: Record<string, unknown>): boolean {
     origins.add(entry.origin); return true;
   });
 }
-function legacySiteStore(value: unknown): value is Omit<BrowserStore, 'version' | 'siteSettings' | 'clearHistoryOnClose' | 'clearCacheOnClose'> & { version: 2; siteSettings: Omit<BrowserStore['siteSettings'], 'dark'> } {
+function legacySiteStore(value: unknown): value is Pick<LegacyStore, 'bookmarks' | 'history' | 'downloads'> & { version: 2; siteSettings: Omit<BrowserStore['siteSettings'], 'dark'> } {
   return object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings']) && value.version === 2 && browsingEntries(value)
     && object(value.siteSettings, ['blocking', 'permissions']) && siteEntries(value.siteSettings);
 }
-function legacyDarkStore(value: unknown): value is Omit<BrowserStore, 'version' | 'clearHistoryOnClose' | 'clearCacheOnClose'> & { version: 3 } {
+function legacyDarkStore(value: unknown): value is Pick<LegacyStore, 'bookmarks' | 'history' | 'downloads' | 'siteSettings'> & { version: 3 } {
   return object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings']) && value.version === 3 && browsingEntries(value)
     && object(value.siteSettings, ['blocking', 'dark', 'permissions']) && siteEntries(value.siteSettings) && hostChoices(value.siteSettings.dark);
 }
-export function validateStore(value: unknown): value is BrowserStore {
+function legacyV4Store(value: unknown): value is LegacyStore {
   return object(value, ['version', 'history', 'bookmarks', 'downloads', 'siteSettings', 'clearHistoryOnClose', 'clearCacheOnClose']) && value.version === 4 && browsingEntries(value)
+    && typeof value.clearHistoryOnClose === 'boolean' && typeof value.clearCacheOnClose === 'boolean'
+    && object(value.siteSettings, ['blocking', 'dark', 'permissions']) && siteEntries(value.siteSettings) && hostChoices(value.siteSettings.dark);
+}
+export function validateStore(value: unknown): value is BrowserStore {
+  return object(value, ['version', 'history', 'favorites', 'downloads', 'siteSettings', 'clearHistoryOnClose', 'clearCacheOnClose']) && value.version === 5 && browsingEntries(value, false)
     && typeof value.clearHistoryOnClose === 'boolean' && typeof value.clearCacheOnClose === 'boolean'
     && object(value.siteSettings, ['blocking', 'dark', 'permissions']) && siteEntries(value.siteSettings) && hostChoices(value.siteSettings.dark);
 }
@@ -118,7 +125,7 @@ export function readStoreFile(path: string, cipher?: StoreCipher, read?: () => v
 }
 
 export function readStore(path: string, cipher?: StoreCipher, status: StoreReadStatus = { readError: false, memoryOnly: false }): BrowserStore {
-  const empty: BrowserStore = { version: 4, history: [], bookmarks: [], downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] }, clearHistoryOnClose: false, clearCacheOnClose: false };
+  const empty: BrowserStore = { version: 5, history: [], favorites: { bar: [], other: [] }, downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] }, clearHistoryOnClose: false, clearCacheOnClose: false };
   try {
     if (!existsSync(path)) {
       writeStore(path, empty, cipher);
@@ -134,11 +141,13 @@ export function readStore(path: string, cipher?: StoreCipher, status: StoreReadS
       const encrypted = encryptedStore(path);
       const value = readStoreFile(path, cipher);
       if (legacyStore(value)) {
-        store = { ...empty, ...value, version: 4, siteSettings: { blocking: [], dark: [], permissions: [] } }; upgrade = true;
+        store = { ...empty, history: value.history, downloads: value.downloads, favorites: migrateBookmarks(value.bookmarks) }; upgrade = true;
       } else if (legacySiteStore(value)) {
-        store = { ...empty, ...value, version: 4, siteSettings: { ...value.siteSettings, dark: [] } }; upgrade = true;
+        store = { ...empty, history: value.history, downloads: value.downloads, favorites: migrateBookmarks(value.bookmarks), siteSettings: { ...value.siteSettings, dark: [] } }; upgrade = true;
       } else if (legacyDarkStore(value)) {
-        store = { ...empty, ...value, version: 4 }; upgrade = true;
+        store = { ...empty, history: value.history, downloads: value.downloads, siteSettings: value.siteSettings, favorites: migrateBookmarks(value.bookmarks) }; upgrade = true;
+      } else if (legacyV4Store(value)) {
+        store = { ...empty, history: value.history, downloads: value.downloads, siteSettings: value.siteSettings, clearHistoryOnClose: value.clearHistoryOnClose, clearCacheOnClose: value.clearCacheOnClose, favorites: migrateBookmarks(value.bookmarks) }; upgrade = true;
       } else {
         if (!validateStore(value)) throw new Error('Invalid browser store');
         store = value;
