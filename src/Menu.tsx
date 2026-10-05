@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { ReactNode, RefObject } from 'react';
 
-export function Menu({ id, label, keyboard, point, opener, onDismiss, children, className = '', initialFocus }: {
+export function Menu({ id, label, keyboard, point, opener, onDismiss, children, className = '', initialFocus, describedBy }: {
   className?: string; initialFocus?: string; id: string; label: string; keyboard: boolean; point?: { x: number; y: number };
-  opener?: RefObject<HTMLElement | null>; onDismiss: (reason: 'escape' | 'tab' | 'outside') => void; children: ReactNode;
+  opener?: RefObject<HTMLElement | null>; onDismiss: (reason: 'escape' | 'tab' | 'outside') => void; children: ReactNode; describedBy?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const dismiss = useRef(onDismiss);
@@ -37,7 +37,7 @@ export function Menu({ id, label, keyboard, point, opener, onDismiss, children, 
     document.addEventListener('pointerdown', close);
     return () => document.removeEventListener('pointerdown', close);
   }, [opener]);
-  return <div id={id} className={`browser-menu${point ? ' page-context-menu' : ''} ${className}`} ref={ref} role="menu" tabIndex={-1} aria-label={label} onKeyDown={event => {
+  return <div id={id} className={`browser-menu${point ? ' page-context-menu' : ''} ${className}`} ref={ref} role="menu" tabIndex={-1} aria-label={label} aria-describedby={describedBy} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss.current('escape'); return; }
     if ((event.target as HTMLElement)?.tagName === 'INPUT' && !['ArrowDown', 'ArrowUp', 'Tab'].includes(event.key)) return;
     if (event.key === 'Tab') { dismiss.current('tab'); return; }

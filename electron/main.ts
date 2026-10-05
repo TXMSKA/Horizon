@@ -78,18 +78,19 @@ if (instance) {
       return page;
     };
     // A work area smaller than the design frame gets a window that still leaves room around it.
-    const createWindow = async (profileId?: string, privateWindow = false, origin?: BrowserWindow, id?: string, fresh = true) => {
+    const createWindow = async (profileId?: string, privateWindow = false, origin?: BrowserWindow, id?: string, fresh = true, adoption?: { adopt(destinationId: string): void; point?: { x: number; y: number } }) => {
       const offset = origin && !origin.isDestroyed() ? origin.getBounds() : undefined;
-      const display = offset ? screen.getDisplayMatching(offset) : screen.getPrimaryDisplay();
+      const bounds = adoption && origin && offset && (origin.isMaximized() || origin.isFullScreen()) ? origin.getNormalBounds() : offset;
+      const display = adoption?.point ? screen.getDisplayNearestPoint(adoption.point) : offset ? screen.getDisplayMatching(offset) : screen.getPrimaryDisplay();
       const area = display.workAreaSize;
-      const width = Math.min(DESIGN_WIDTH, Math.round(area.width * 0.9));
-      const height = Math.min(DESIGN_HEIGHT, Math.round(area.height * 0.9));
+      const width = adoption && bounds ? bounds.width : Math.min(DESIGN_WIDTH, Math.round(area.width * 0.9));
+      const height = adoption && bounds ? bounds.height : Math.min(DESIGN_HEIGHT, Math.round(area.height * 0.9));
       const workArea = display.workArea;
       profileId ??= windows.values().next().value?.browser.registry().activeId ?? registry.activeId;
       const window = new BrowserWindow({
         width,
         height,
-        ...(offset ? { x: Math.max(workArea.x, Math.min(offset.x + 32, workArea.x + workArea.width - width)), y: Math.max(workArea.y, Math.min(offset.y + 32, workArea.y + workArea.height - height)) } : { center: true }),
+        ...(offset ? { x: Math.round(Math.max(workArea.x, Math.min(adoption?.point ? adoption.point.x - 80 : offset.x + 32, workArea.x + workArea.width - width))), y: Math.round(Math.max(workArea.y, Math.min(adoption?.point ? adoption.point.y - 20 : offset.y + 32, workArea.y + workArea.height - height))) } : { center: true }),
         minWidth: 640,
         minHeight: 480,
         frame: false,
@@ -115,8 +116,9 @@ if (instance) {
       nativeTheme.on('updated', systemTheme);
       window.once('closed', () => nativeTheme.removeListener('updated', systemTheme));
       window.removeMenu();
-      const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry, undefined, { id, profileId, privateWindow, fresh,
-        openWindow: (profileId, privateWindow, origin) => { void createWindow(profileId, privateWindow, origin).catch(() => console.error('Window creation failed')); } });
+      const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry, undefined, { id, profileId, privateWindow, fresh, empty: Boolean(adoption),
+        openWindow: (profileId, privateWindow, origin) => { void createWindow(profileId, privateWindow, origin).catch(() => console.error('Window creation failed')); },
+        moveWindow: async (profileId, privateWindow, origin, adopt, point) => { await createWindow(profileId, privateWindow, origin, undefined, true, { adopt, point }); } });
       // A destroyed window can no longer hand out its webContents, so the entry's key is kept from now.
       const chromeContents = window.webContents;
       const entry = { window, browser, ready: false }; windows.set(chromeContents, entry);
@@ -136,8 +138,17 @@ if (instance) {
       };
       window.on('resize', fitScale);
       window.webContents.on('did-finish-load', fitScale);
-      window.once('ready-to-show', () => window.show());
-      await window.loadURL(START_URL);
+      if (!adoption) window.once('ready-to-show', () => window.show());
+      try {
+        await window.loadURL(START_URL);
+        if (adoption) {
+          adoption.adopt(browser.windowId);
+          window.show(); window.focus();
+        }
+      } catch (error) {
+        if (!window.isDestroyed()) window.destroy();
+        throw error;
+      }
       entry.ready = true;
       if (launchWindow === window) launchReady = true;
       if (pendingLaunches.length) deliverLaunches();

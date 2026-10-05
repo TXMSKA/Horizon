@@ -3,6 +3,7 @@ import type { BrowserWindow, DownloadItem, Session, WebContents } from 'electron
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
 import { IPC, SEARCH_ENGINES } from '../src/shared/api';
@@ -32,7 +33,15 @@ import type { DeletedFavorite } from './favorites';
 import { emptySession, lazySession, LEGACY_WINDOW_ID, readWindowSessions, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeWindowSessions } from './session-store';
 import type { SessionTab, WindowSessions } from './session-store';
 
-interface Tab { restore?: SessionTab; restoring?: SessionTab; state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
+interface TabHost { alive(tab: Tab): boolean; update(): void; publish(): void; fail(tab: Tab, description: string): void; close(tab: Tab): void; count(): number }
+interface Tab { host: TabHost; unbind?: () => void; viewNavigation?: { pending?: number; entries: { generation: number; urls: Set<string> }[] }; restore?: SessionTab; restoring?: SessionTab; state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
+interface TabRequest { tab: Tab; pageLoad: number; topURL: string }
+interface DownloadOwner { disposed(): boolean; store: BrowserStore; items: Map<string, DownloadItem>; reserved: Set<string>; bindings: Map<string, DownloadBinding>; trusted: Map<string, string>; persist(): void; publish(): void }
+interface DownloadBinding { tab: Tab; path: string; owner: DownloadOwner }
+interface TabDestination {
+  tabs: Tab[]; requests: Map<number, TabRequest>; permissions: PermissionQueue; downloadBindings: Map<string, DownloadBinding>; downloadOwner: DownloadOwner;
+  active(): Tab | undefined; assertAccept(tab: Tab): void; attachView(tab: Tab): void; detachView(tab: Tab): void; bindTab(tab: Tab): void; activate(tab: Tab): void; select(id: string): void; layout(): void; update(): void; flushSession(): void;
+}
 
 
 const profileSessions = new Set<Session>();
@@ -43,6 +52,7 @@ export const isLaunchNavigation = (contents: WebContents, url: string): boolean 
 
 interface SessionOwner {
   owns(contents: WebContents | number | null | undefined): boolean;
+  ownsRequest?(id: number): boolean;
   request?: NonNullable<Parameters<Session['setPermissionRequestHandler']>[0]>;
   check?: NonNullable<Parameters<Session['setPermissionCheckHandler']>[0]>;
   before?: NonNullable<Parameters<Session['webRequest']['onBeforeRequest']>[0]>;
@@ -60,7 +70,7 @@ function attachSession(target: Session, owner: SessionOwner) {
     const requests = new Map<number, SessionOwner>();
     const requestOwner = (details: { id: number; webContentsId?: number }) => {
       const saved = requests.get(details.id);
-      const owner = saved && owners!.has(saved) ? saved : select(details.webContentsId);
+      const owner = (details.webContentsId === undefined ? undefined : select(details.webContentsId)) ?? [...owners!].find(owner => owner.ownsRequest?.(details.id)) ?? (saved && owners!.has(saved) ? saved : undefined) ?? (!details.webContentsId ? select(undefined) : undefined);
       if (owner) requests.set(details.id, owner);
       return owner;
     };
@@ -73,8 +83,8 @@ function attachSession(target: Session, owner: SessionOwner) {
     target.webRequest.onBeforeRequest((details, callback) => { const owner = requestOwner(details); if (owner?.before) owner.before(details, callback); else callback({ cancel: true }); });
     target.webRequest.onBeforeSendHeaders((details, callback) => { const owner = requestOwner(details); if (owner?.send) owner.send(details, callback); else callback({ requestHeaders: details.requestHeaders }); });
     target.webRequest.onHeadersReceived((details, callback) => { const owner = requestOwner(details); if (owner?.receive) owner.receive(details, callback); else callback({ responseHeaders: details.responseHeaders }); });
-    target.webRequest.onCompleted(details => { requests.get(details.id)?.completed?.(details); requests.delete(details.id); });
-    target.webRequest.onErrorOccurred(details => { requests.get(details.id)?.failed?.(details); requests.delete(details.id); });
+    target.webRequest.onCompleted(details => { requestOwner(details)?.completed?.(details); requests.delete(details.id); });
+    target.webRequest.onErrorOccurred(details => { requestOwner(details)?.failed?.(details); requests.delete(details.id); });
   }
   owners.add(owner);
   return () => { owners!.delete(owner); if (!owners!.size) { sessionOwners.delete(target); profileSessions.delete(target); } };
@@ -106,7 +116,7 @@ export function restoredWindows(userData: string, registry: ProfileRegistry) {
   }
   return [...windows].map(([id, profileId]) => ({ id, profileId }));
 }
-export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void }
+export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; empty?: boolean; moveWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow, adopt: (destinationId: string) => void, point?: { x: number; y: number }) => Promise<void>; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void }
 
 export function createBrowser(window: BrowserWindow, userData: string, downloads: string, settings: ThemeSettings, initialRegistry?: ProfileRegistry, defaultBrowserOverride?: ReturnType<typeof createDefaultBrowser>, options: BrowserOptions = {}) {
   const registryPath = resolve(userData, 'profiles.json');
@@ -195,6 +205,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (privateWindow) assertPrivateCommand(command);
     if (privateWindow && ['switch-profile', 'create-profile', 'update-profile', 'delete-profile', 'set-blocking', 'set-site-permission', 'answer-permission', 'reset-site', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].includes(command.type)) throw new Error('Private window settings are fixed');
     switch (command.type) {
+      case 'move-tab-to-window': {
+        const source = current(), tab = source.tabs.find(tab => tab.state.id === command.id);
+        if (!tab) throw new Error('Unknown tab');
+        source.assertMove(tab);
+        if (!options.moveWindow) throw new Error('Window creation is unavailable');
+        return options.moveWindow(selectedProfile, privateWindow, window, destinationId => moveTab(command.id, destinationId), command.point);
+      }
       case 'new-window': case 'new-private-window':
         if (!options.openWindow) throw new Error('Window creation is unavailable');
         options.openWindow(selectedProfile, command.type === 'new-private-window', window); return;
@@ -347,7 +364,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const requested = requestedPermissions(permission, details);
       return !!site && secureOrigin(site.origin) && requested.length > 0 && requested.every(permission => site.permissions[permission] === 'allow');
     };
-    const requests = new Map<number, { tab: Tab; pageLoad: number; topURL: string }>();
+    const requests = new Map<number, TabRequest>();
+    sessionOwner.ownsRequest = id => requests.has(id);
     const requestContext = (details: { id: number; webContentsId?: number; url: string; resourceType: string }) => {
       const existing = requests.get(details.id);
       if (existing) {
@@ -404,7 +422,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     sessionOwner.completed = details => { requests.delete(details.id); };
     sessionOwner.failed = details => { requests.delete(details.id); };
 
-    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
+    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
@@ -530,12 +548,17 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       }
     };
     const update = () => { persistSession(); layout(); publish(); };
+    const host: TabHost = { alive: tab => !disposed && !closing && tabs.includes(tab), update, publish, fail: (tab, description) => fail(tab, description), close: tab => closeTab(tab), count: () => tabs.length };
+    const downloadBindings = new Map<string, DownloadBinding>();
+    const downloadOwner: DownloadOwner = { disposed: () => disposed, store, items, reserved, bindings: downloadBindings, trusted: trustedDownloads, persist, publish };
+    // Native page dialogs disable their parent window, including commands already queued by chrome.
+    const movable = (tab: Tab) => !tab.retryDownload && window.isEnabled() && !permissions.prompt(tab.state.id);
     const applyDarkCSS = (tab: Tab) => {
       const contents = page(tab.view), generation = tab.pageLoad;
       if (!contents) return;
       // Serialize replacement so a late insertion cannot leave a second stylesheet behind.
       tab.darkCSSWork = (tab.darkCSSWork ?? Promise.resolve()).then(async () => {
-        const current = () => !disposed && !closing && tabs.includes(tab) && page(tab.view) === contents && tab.pageLoad === generation;
+        const current = () => tab.host.alive(tab) && page(tab.view) === contents && tab.pageLoad === generation;
         if (!current()) return;
         if (tab.darkCSS?.contents === contents) {
           const key = tab.darkCSS.key; tab.darkCSS = undefined;
@@ -625,10 +648,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       void tab.view!.webContents.loadURL(url).catch((error: unknown) => {
         // Aborted requests are expected when Stop or a newer navigation wins.
         if (error instanceof Error && error.message.includes('ERR_ABORTED')) return;
-        if (!disposed && tabs.includes(tab) && tab.navigation === navigation) fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
+        if (tab.host.alive(tab) && tab.navigation === navigation) tab.host.fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
       });
     };
-    const makeTab = (url = ''): Tab => ({ pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } });
+    const makeTab = (url = ''): Tab => ({ host, pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), movable: true, settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } });
     const restoredTab = (saved: SessionTab) => {
       const tab = makeTab(saved.url);
       tab.state.title = saved.title; tab.state.zoom = saved.zoom;
@@ -653,9 +676,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const navigation = tab.navigation = (tab.navigation ?? 0) + 1;
       void contents.navigationHistory.restore({ entries: allowed.entries, index: allowed.index }).catch((error: unknown) => {
         if (error instanceof Error && error.message.includes('ERR_ABORTED')) return;
-        if (!disposed && tabs.includes(tab) && page(tab.view) === contents && tab.navigation === navigation) fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
+        if (tab.host.alive(tab) && page(tab.view) === contents && tab.navigation === navigation) tab.host.fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
       }).finally(() => {
-        if (tab.restoring === allowed) { tab.restoring = undefined; if (!disposed && !closing && tabs.includes(tab)) update(); }
+        if (tab.restoring === allowed) { tab.restoring = undefined; if (tab.host.alive(tab)) tab.host.update(); }
       });
     }
     const newTab = (url?: string, foreground = true, contents?: WebContents, launch = false) => {
@@ -727,7 +750,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           const navigation = tab.navigation;
           void next.navigationHistory.restore({ entries, index }).catch((error: unknown) => {
             if (error instanceof Error && error.message.includes('ERR_ABORTED')) return;
-            if (!disposed && tabs.includes(tab) && page(tab.view) === next && tab.navigation === navigation) fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
+            if (tab.host.alive(tab) && page(tab.view) === next && tab.navigation === navigation) tab.host.fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
           });
         } else if (isAllowedURL(url) || trustedLaunch) load(tab, url, trustedLaunch);
         refresh(tab);
@@ -742,19 +765,30 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       tab.view = view;
       view.setVisible(false);
       window.contentView.addChildView(view);
+      tab.viewNavigation = { entries: [] };
+      contentsSetup(tab, view);
+    }
+    function contentsSetup(tab: Tab, view: WebContentsView) {
+      tab.unbind?.(); tab.host = host;
       const contents = view.webContents;
-      const navigations: { generation: number; urls: Set<string> }[] = [];
-      let pendingNavigation: number | undefined;
+      const emitter: EventEmitter = contents;
+      const removers: (() => void)[] = [];
+      const on: WebContents['on'] = (event, listener) => {
+        emitter.on(event, listener); removers.push(() => emitter.removeListener(event, listener)); return contents;
+      };
+      tab.unbind = () => { for (const remove of removers) remove(); tab.unbind = undefined; };
+      const navigationState = tab.viewNavigation!;
+      const navigations = navigationState.entries;
       const finishUncommitted = (generation: number | undefined) => {
-        if (tab.view !== view || generation === undefined || pendingNavigation !== generation || tab.pageLoad !== generation) return;
-        pendingNavigation = undefined;
+        if (tab.view !== view || generation === undefined || navigationState.pending !== generation || tab.pageLoad !== generation) return;
+        navigationState.pending = undefined;
         tab.cosmeticPending = false; tab.navigating = false;
         tab.topURL = tab.committedURL ?? contents.mainFrame.url;
         update();
       };
       contents.setZoomMode('manual');
       contents.setZoomFactor(tab.state.zoom);
-      contents.on('context-menu', (_event, params) => {
+      on('context-menu', (_event, params) => {
         if (tab.view !== view || !isCurrent() || tab.state.id !== activeId || tab.state.error) return;
         invalidateMenu();
         const menu = pageMenu.open(tab.state.id, params, {
@@ -776,18 +810,18 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           },
         };
       });
-      contents.on('destroyed', () => { if (tab.view === view) closeTab(tab); });
-      contents.on('did-start-loading', () => { if (tab.view === view) { tab.state.loading = true; publish(); } });
+      on('destroyed', () => { if (tab.view === view) closeTab(tab); });
+      on('did-start-loading', () => { if (tab.view === view) { tab.state.loading = true; publish(); } });
       // Loading can hand the keyboard to a hidden page; chrome must keep it while Home or an overlay is showing.
-      contents.on('focus', () => setImmediate(() => {
+      on('focus', () => setImmediate(() => {
         if (tab.view === view && !disposed && !closing && !window.isDestroyed() && (area.hidden || !tab.state.url) && isCurrent() && tab.state.id === activeId && window.isFocused()) window.webContents.focus();
       }));
-      contents.on('did-stop-loading', () => {
+      on('did-stop-loading', () => {
         if (tab.view !== view || contents.isLoading()) return;
-        finishUncommitted(pendingNavigation); navigations.length = 0;
+        finishUncommitted(navigationState.pending); navigations.length = 0;
         tab.state.loading = false; tab.navigating = false; refresh(tab); update();
       });
-      contents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+      on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
         if (tab.view !== view) return;
         invalidateMenu(tab.state.id);
         if (isMainFrame) permissions.drop(tab.state.id);
@@ -795,22 +829,22 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (isMainFrame && !isInPlace) {
           tab.navigating = true;
           tab.pageLoad++; tab.topURL = url; tab.refusedCookies = new Set(); tab.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
-          pendingNavigation = tab.pageLoad;
+          navigationState.pending = tab.pageLoad;
           navigations.push({ generation: tab.pageLoad, urls: new Set([url]) });
           tab.cosmeticPending = blockingPolicy(privateWindow, settings.blockAds, settings.blockThirdPartyCookies, siteSettings(store.siteSettings, url)?.blocking ?? true).filters && blocker.ready;
           clearFavicon(tab, url); tab.state.error = null; tab.state.find = { active: 0, total: 0 }; tab.findRequest = undefined; update();
         }
       });
-      contents.on('did-redirect-navigation', (_event, url, _isInPlace, isMainFrame) => {
-        if (tab.view === view && isMainFrame) navigations.find(navigation => navigation.generation === pendingNavigation)?.urls.add(url);
+      on('did-redirect-navigation', (_event, url, _isInPlace, isMainFrame) => {
+        if (tab.view === view && isMainFrame) navigations.find(navigation => navigation.generation === navigationState.pending)?.urls.add(url);
       });
-      contents.on('will-redirect', (event) => {
+      on('will-redirect', (event) => {
         if (tab.view !== view) return;
         if (event.isMainFrame && !isAllowedURL(event.url) && !isLaunchNavigation(contents, event.url)) fail(tab, 'ERR_UNSAFE_REDIRECT');
       });
-      contents.on('did-navigate', (_event, url) => {
+      on('did-navigate', (_event, url) => {
         if (tab.view !== view) return;
-        pendingNavigation = undefined;
+        navigationState.pending = undefined;
         permissions.drop(tab.state.id); tab.navigating = false;
         tab.topURL = url;
         const generation = tab.pageLoad;
@@ -819,34 +853,34 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (css) {
           tab.cosmeticPending = true;
           void contents.insertCSS(css, { cssOrigin: 'user' }).catch(() => undefined).finally(() => {
-            if (disposed || closing || !tabs.includes(tab) || tab.view !== view || tab.pageLoad !== generation) return;
-            tab.cosmeticPending = false; update();
+            if (!tab.host.alive(tab) || tab.view !== view || tab.pageLoad !== generation) return;
+            tab.cosmeticPending = false; tab.host.update();
           });
         } else tab.cosmeticPending = false;
         tab.committed = true;
         record(tab, url);
         applyDarkCSS(tab);
       });
-      contents.on('did-navigate-in-page', (_event, url, mainFrame) => { if (tab.view === view && mainFrame) record(tab, url); });
-      contents.on('page-favicon-updated', (_event, candidates) => {
+      on('did-navigate-in-page', (_event, url, mainFrame) => { if (tab.view === view && mainFrame) record(tab, url); });
+      on('page-favicon-updated', (_event, candidates) => {
         if (tab.view !== view) return;
         tab.faviconRequest?.abort();
         const request = new AbortController(); tab.faviconRequest = request;
         void fetchFavicon(contents.session, candidates, request.signal, tab.state.url).then(bytes => {
-          if (closing || disposed || request.signal.aborted || !tabs.includes(tab) || tab.view !== view || !page(tab.view)) return;
+          if (!tab.host.alive(tab) || request.signal.aborted || tab.view !== view || !page(tab.view)) return;
           tab.faviconBytes = bytes ?? undefined;
           tab.state.favicon = bytes ? createHash('sha256').update(bytes).digest('hex').slice(0, 32) : null;
-          publish();
+          tab.host.publish();
         });
       });
-      contents.on('page-title-updated', (_event, title) => {
+      on('page-title-updated', (_event, title) => {
         if (tab.view !== view) return;
         tab.state.title = title.slice(0, 1024);
         const entry = store.history.find(entry => entry.url === tab.state.url);
         if (recordsBrowsing(privateWindow) && entry && !clearingData && !closing && !disposed) { entry.title = tab.state.title; persist(); }
         persistSession(); publish();
       });
-      contents.on('did-fail-load', (_event, code, description, url, mainFrame) => {
+      on('did-fail-load', (_event, code, description, url, mainFrame) => {
         if (tab.view !== view || !mainFrame) return;
         // Failure events have no navigation ID; retain start order even when two loads use the same URL.
         const index = navigations.findIndex(navigation => navigation.urls.has(url));
@@ -855,17 +889,17 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (isAllowedURL(url)) tab.state.url = url;
         fail(tab, description);
       });
-      contents.on('render-process-gone', () => { if (tab.view === view) fail(tab, 'RENDERER_GONE'); });
-      contents.on('enter-html-full-screen', () => {
+      on('render-process-gone', () => { if (tab.view === view) fail(tab, 'RENDERER_GONE'); });
+      on('enter-html-full-screen', () => {
         if (tab.view !== view || !isCurrent() || tab.state.id !== activeId) return;
         tab.state.fullscreen = true; window.setFullScreen(true); update();
       });
-      contents.on('leave-html-full-screen', () => { if (tab.view === view) { leaveFullscreen(tab); update(); } });
-      contents.on('found-in-page', (_event, result) => {
+      on('leave-html-full-screen', () => { if (tab.view === view) { leaveFullscreen(tab); update(); } });
+      on('found-in-page', (_event, result) => {
         if (tab.view !== view || tab.findRequest !== result.requestId) return;
         tab.state.find = { active: result.activeMatchOrdinal, total: result.matches }; publish();
       });
-      contents.on('before-input-event', (event, input) => {
+      on('before-input-event', (event, input) => {
         contents.setIgnoreMenuShortcuts(Boolean(input.isComposing) || tab.view !== view || !isCurrent() || tab.state.id !== activeId);
         if (tab.view !== view || !isCurrent() || tab.state.id !== activeId) return;
         if (input.type !== 'keyDown' || input.isComposing) return;
@@ -874,7 +908,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         event.preventDefault();
         dispatchShortcut(shortcut);
       });
-      contents.on('zoom-changed', (_event, direction) => { if (tab.view === view && isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
+      on('zoom-changed', (_event, direction) => { if (tab.view === view && isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
     }
 
     const dispatchShortcut = (shortcut: BrowserShortcut) => {
@@ -917,24 +951,28 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (recordsBrowsing(privateWindow)) trustedDownloads.set(entry.id, entry.path);
         store.downloads.splice(10000);
         items.set(entry.id, item); persist(); publish();
+        const binding: DownloadBinding = { tab, path, owner: downloadOwner };
+        downloadBindings.set(entry.id, binding);
         let lastUpdate = 0;
         let interrupted = false;
         item.on('updated', (_event, status) => {
-          if (disposed) return;
+          const owner = binding.owner;
+          if (owner.disposed()) return;
           if (privateWindow) return;
           entry.received = item.getReceivedBytes(); entry.total = item.getTotalBytes();
-          const stored = store.downloads.find(download => download.id === entry.id);
+          const stored = owner.store.downloads.find(download => download.id === entry.id);
           if (stored && status === 'interrupted') { interrupted = true; stored.status = 'failed'; item.cancel(); }
-          if (Date.now() - lastUpdate > 250) { lastUpdate = Date.now(); persist(); publish(); }
+          if (Date.now() - lastUpdate > 250) { lastUpdate = Date.now(); owner.persist(); owner.publish(); }
         });
         item.once('done', (_event, status) => {
-          if (disposed) return;
-          const stored = store.downloads.find(download => download.id === entry.id);
+          const owner = binding.owner;
+          if (owner.disposed()) return;
+          const stored = owner.store.downloads.find(download => download.id === entry.id);
           if (stored) { stored.status = interrupted ? 'failed' : status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed'; stored.received = item.getReceivedBytes(); }
-          items.delete(entry.id); reserved.delete(path); downloadPaths.delete(path); persist(); publish();
+          owner.items.delete(entry.id); owner.bindings.delete(entry.id); owner.reserved.delete(path); downloadPaths.delete(path); owner.persist(); owner.publish();
         });
         accepted = true;
-        if (!tab.committed && tabs.length > 1) setImmediate(() => { if (!tab.committed && tabs.length > 1) closeTab(tab); });
+        if (!tab.committed && tabs.length > 1) setImmediate(() => { if (tab.host.alive(tab) && !tab.committed && tab.host.count() > 1) tab.host.close(tab); });
       } catch { event.preventDefault(); storageError = true; publish(); }
       finally {
         // A retry that never starts must release its lock before another attempt.
@@ -1380,35 +1418,50 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     for (const { tab: saved, active: selected } of lazySession(savedSession, privateWindow || options.fresh ? 'new-page' : settings.onStart)) {
       const tab = restoredTab(saved); tabs.push(tab); if (selected) activeId = tab.state.id;
     }
-    const exportTab = (id: string) => {
-      const tab = tabs.find(tab => tab.state.id === id);
-      if (!tab) throw new Error('Unknown tab');
-      const contents = page(tab.view), launch = contents && launchURLs.get(contents);
-      return { saved: snapshotTab(tab), id: tab.state.id, launch: launch && isLocalHTMLURL(launch) ? launch : undefined };
+    const assertMove = (tab: Tab) => {
+      if (disposed || closing || window.isDestroyed() || shared.quitting) throw new Error('Profile is closed');
+      if (!tabs.includes(tab)) throw new Error('Unknown tab');
+      if (tabs.length <= 1 || !movable(tab)) throw new Error('Tab cannot be moved');
     };
-    const importTab = (saved: SessionTab, id: string, launch?: string) => {
-      if (disposed || closing) throw new Error('Profile is closed');
+    const assertAccept = (tab: Tab) => {
+      if (disposed || closing || window.isDestroyed()) throw new Error('Profile is closed');
       if (tabs.length >= 200) throw new Error('Tab limit reached');
-      const tab = restoredTab(saved); tab.state.id = id;
-      if (launch) tab.restore = undefined;
-      tabs.push(tab);
-      if (launch) {
-        ensureView(tab);
-        const contents = page(tab.view)!;
-        launchURLs.set(contents, launch);
-        const entries = saved.entries.filter(entry => isWebURL(entry.url) || entry.url === 'about:blank' || entry.url === launch);
-        const index = entries.indexOf(saved.entries[saved.index]!);
-        if (index >= 0 && entries[index]!.url === (saved.url || 'about:blank')) {
-          const restoring = { ...saved, entries, index };
-          tab.restoring = restoring; tab.navigating = true; tab.state.loading = Boolean(saved.url);
-          void contents.navigationHistory.restore({ entries, index }).catch(() => {
-            if (!disposed && !closing && tabs.includes(tab) && page(tab.view) === contents && tab.restoring === restoring) fail(tab, 'ERR_FAILED');
-          }).finally(() => { if (tab.restoring === restoring) { tab.restoring = undefined; if (!disposed && !closing && tabs.includes(tab)) update(); } });
-        } else load(tab, saved.url || 'about:blank', saved.url === launch);
-      }
-      activate(tab); update();
+      if (tabs.some(entry => entry.state.id === tab.state.id)) throw new Error('Invalid tab destination');
     };
-    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear, exportTab, importTab, closeTab };
+    const attachView = (tab: Tab) => { if (tab.view) window.contentView.addChildView(tab.view); };
+    const detachView = (tab: Tab) => { if (tab.view && !window.isDestroyed()) window.contentView.removeChildView(tab.view); };
+    const bindTab = (tab: Tab) => { tab.host = host; if (tab.view && page(tab.view)) contentsSetup(tab, tab.view); };
+    const transferTab = (tab: Tab, target: TabDestination): void => {
+      assertMove(tab); target.assertAccept(tab);
+      const index = tabs.indexOf(tab), previous = activeId, destinationActive = target.active()?.state.id ?? '';
+      leaveFullscreen(tab);
+      try {
+        detachView(tab); target.attachView(tab);
+        tabs.splice(index, 1); target.tabs.push(tab);
+        if (activeId === tab.state.id) activeId = tabs[Math.min(index, tabs.length - 1)]!.state.id;
+        target.bindTab(tab); target.activate(tab);
+      } catch (error) {
+        const destinationIndex = target.tabs.indexOf(tab);
+        if (destinationIndex >= 0) target.tabs.splice(destinationIndex, 1);
+        if (!tabs.includes(tab)) tabs.splice(index, 0, tab);
+        activeId = previous; target.select(destinationActive);
+        target.detachView(tab); attachView(tab); bindTab(tab);
+        layout(); target.layout(); throw error;
+      }
+      for (const [id, request] of requests) if (request.tab === tab) { target.requests.set(id, request); requests.delete(id); }
+      for (const [id, binding] of downloadBindings) if (binding.tab === tab) {
+        const item = items.get(id);
+        if (item) { target.downloadOwner.items.set(id, item); items.delete(id); }
+        target.downloadOwner.reserved.add(binding.path); reserved.delete(binding.path);
+        if (trustedDownloads.has(id)) { target.downloadOwner.trusted.set(id, binding.path); trustedDownloads.delete(id); }
+        binding.owner = target.downloadOwner; target.downloadBindings.set(id, binding); downloadBindings.delete(id);
+      }
+      permissions.transfer(tab.state.id, target.permissions);
+      invalidateMenu(tab.state.id); invalidateCaptures();
+      update(); target.update(); flushSession(); target.flushSession();
+    };
+    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear, assertMove, assertAccept, attachView, detachView, bindTab, activate, select: (id: string) => { activeId = id; }, transferTab, requests, permissions, downloadBindings, downloadOwner, update, flushSession };
+
 
   }
   handleChrome(window, IPC.state, (event, ...args: unknown[]) => {
@@ -1584,23 +1637,21 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (runtime.page(runtime.active()?.view)?.isFocused()) runtime.dispatchShortcut(shortcut);
     },
   }))));
-  initial.persist(); if (!initial.tabs.length) initial.newTab(); else layout();
+  initial.persist(); if (!initial.tabs.length && !options.empty) initial.newTab(); else layout();
   void blocker.start();
   refreshDefaultBrowser();
+  const moveTab = (id: string, destinationId: string) => {
+    if (closing || shared.quitting || window.isDestroyed()) throw new Error('Profile is closed');
+    const destination = shared.owners.get(destinationId);
+    if (!destination || destination === owner || destination.privateWindow !== privateWindow) throw new Error('Invalid tab destination');
+    const source = [...runtimes.values()].find(runtime => runtime.tabs.some(tab => tab.state.id === id));
+    if (!source) throw new Error('Unknown tab');
+    const profile = registry.profiles.find(profile => runtimes.get(profile.id) === source)!;
+    if (destination.activeProfile() !== profile.id) throw new Error('Tab profile mismatch');
+    const target = destination.runtime(profile.id) as ReturnType<typeof createRuntime>;
+    if (target.webSession !== source.webSession) throw new Error('Tab session mismatch');
+    source.transferTab(source.tabs.find(tab => tab.state.id === id)!, target);
+  };
   return { layout, flush, windowId, privateWindow, activeProfile: () => selectedProfile, registry: () => shared.registry, settingsChanged: () => { for (const owner of shared.owners.values()) owner.settingsChanged(); }, openLaunch: (url: string) => { if (!privateWindow && (isWebURL(url) || isLocalHTMLURL(url))) current().newTab(url, true, undefined, true); },
-    moveTab: (id: string, destinationId: string) => {
-      if (closing || shared.quitting) throw new Error('Profile is closed');
-      const destination = shared.owners.get(destinationId);
-      if (!destination || destination === owner || destination.privateWindow !== privateWindow) throw new Error('Invalid tab destination');
-      const source = [...runtimes.values()].find(runtime => runtime.tabs.some(tab => tab.state.id === id));
-      if (!source) throw new Error('Unknown tab');
-      const profile = registry.profiles.find(profile => runtimes.get(profile.id) === source)!;
-      if (privateWindow && destination.activeProfile() !== profile.id) throw new Error('Private profile mismatch');
-      const target = destination.runtime(profile.id) as ReturnType<typeof createRuntime>;
-      if (target.webSession !== source.webSession) throw new Error('Tab session mismatch');
-      const exported = source.exportTab(id);
-      if (!sessionAddress(exported.saved.url, url => url.startsWith('horizon://desktop/')) && exported.saved.url !== exported.launch) throw new Error('Tab cannot be moved');
-      target.importTab(exported.saved, exported.id, exported.launch);
-      const tab = source.tabs.find(tab => tab.state.id === id)!; source.closeTab(tab, false);
-    } };
+    moveTab };
 }

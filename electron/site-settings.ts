@@ -151,6 +151,11 @@ ${permission}`);
     for (const request of queue ?? []) for (const callback of request.callbacks) callback(false);
     if (queue?.length) this.changed();
   }
+  transfer(tabId: string, destination: PermissionQueue): void {
+    if (this.queues.has(tabId)) throw new Error('Tab permission is pending');
+    const dismissed = this.dismissed.get(tabId);
+    if (dismissed) { destination.dismissed.set(tabId, dismissed); this.dismissed.delete(tabId); }
+  }
 }
 
 export function cookieSite(value: string): string | null {
