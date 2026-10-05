@@ -5,6 +5,7 @@ const desktopWrites = new Set(['retry-desktop-storage', 'create-project', 'renam
 
 export function assertPrivateCommand(command: BrowserCommand): void {
   if (favoriteWrites.has(command.type) || command.type === 'restore' && command.kind === 'bookmarks') throw new Error('Private window favorites are read-only');
+  if (command.type === 'import-browser-data') throw new Error('Private window import is unavailable');
   if (desktopWrites.has(command.type) || command.type === 'restore' && command.kind === 'desktop'
     || command.type === 'context-menu' && command.item === 'add-to-desktop'
     || command.type === 'open-desktop' || command.type === 'open-desktop-panel') throw new Error('Private window Desktop is unavailable');

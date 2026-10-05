@@ -78,9 +78,9 @@ test('session and closed tabs persist encrypted, recover corrupt data and stay a
 test('On start migrates v5 on read, validates choices and persists both settings', t => {
   const directory = temporaryDirectory(t, 'on-start'), path = join(directory, 'settings.json'), defaults = readSettings(path);
   assert.equal(defaults.onStart, 'restore');
-  const legacy = { ...defaults, version: 5, theme: 'daylight', showCapture: false }; delete legacy.onStart;
+  const legacy = { ...defaults, version: 5, theme: 'daylight', showCapture: false }; delete legacy.onStart; delete legacy.onboarded;
   writeFileSync(path, JSON.stringify(legacy)); const migrated = readSettings(path);
-  assert.equal(migrated.version, 6); assert.equal(migrated.onStart, 'restore'); assert.equal(migrated.theme, 'daylight'); assert.equal(migrated.showCapture, false);
+  assert.equal(migrated.version, 7); assert.equal(migrated.onStart, 'restore'); assert.equal(migrated.theme, 'daylight'); assert.equal(migrated.showCapture, false);
   const settings = createSettings(path, () => {});
   for (const value of ['new-page', 'restore']) { settings.setOnStart(value); assert.equal(readSettings(path).onStart, value); assert.deepEqual(validateCommand({ type: 'set-on-start', value }), { type: 'set-on-start', value }); }
   for (const value of ['last', true, null, undefined]) { assert.throws(() => settings.setOnStart(value), /SETTINGS_COMMAND_INVALID/); assert.equal(validateSettings({ ...migrated, onStart: value }), false); assert.throws(() => validateCommand({ type: 'set-on-start', value }), /SETTINGS_COMMAND_INVALID/); }
@@ -295,7 +295,7 @@ test('On start follows the General board order and uses the existing labelled ke
   const functions = ['GeneralSettings', 'SettingsSegmented'].map(name => source.statements.find(node => ts.isFunctionDeclaration(node) && node.name.text === name));
   const compiled = ts.transpileModule(functions.map(node => 'export ' + node.getText(source)).join('\n'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exported = {}, jsx = (type, props) => ({ type, props });
-  compileFunction(compiled, ['exports', 'require', 'text', 'SEARCH_ENGINES', 'SettingRow', 'SettingsDropdown', 'SettingsToggle', 'Folder'])(exported, () => ({ jsx, jsxs: jsx }), text, require('../dist/src/shared/api.js').SEARCH_ENGINES, 'row', 'dropdown', 'toggle', 'folder');
+  compileFunction(compiled, ['exports', 'require', 'text', 'SEARCH_ENGINES', 'SettingRow', 'SettingsDropdown', 'SettingsToggle', 'ImportSettings', 'Folder'])(exported, () => ({ jsx, jsxs: jsx }), text, require('../dist/src/shared/api.js').SEARCH_ENGINES, 'row', 'dropdown', 'toggle', 'import', 'folder');
   for (const language of ['en', 'es']) {
     const tree = exported.GeneralSettings({ state: { defaultBrowser: 'notDefault', onStart: 'restore', languageSetting: 'system', language, searchEngine: 'duckduckgo' }, language });
     const rows = interfaceChildren(tree); assert.deepEqual(rows.slice(0, 3).map(row => row.props.title), ['defaultBrowser', 'onStart', 'searchEngine']);
@@ -335,6 +335,7 @@ test('chrome Find shortcuts advance in either direction, open Find when closed a
 require('./desktop-recovery.test.cjs');
 require('./popup-position.test.cjs');
 require('./tab-drag.test.cjs');
+require('./import.test.cjs')({ temporaryDirectory, authenticatedCipher });
 
 test('Desktop paste uses drop validation and saves a link or text in the chosen project folder', t => {
   const { readDesktopTransfer } = require('../dist/src/shared/desktop-drag.js');
@@ -537,18 +538,18 @@ test('changing the drop folder during draft flush cancels the save without leavi
 test('quick access migrates settings versions 1 through 3 without losing their saved choices', t => {
   const directory = temporaryDirectory(t, 'quick-access-migration'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
-  assert.equal(defaults.version, 6); assert.deepEqual(defaults.quickAccess, []);
-  const third = { ...defaults, version: 3, searchEngine: 'brave', language: 'es', askWhereToSave: true, blockAds: false, blockThirdPartyCookies: false }; delete third.quickAccess; delete third.showCapture; delete third.onStart;
+  assert.equal(defaults.version, 7); assert.deepEqual(defaults.quickAccess, []);
+  const third = { ...defaults, version: 3, searchEngine: 'brave', language: 'es', askWhereToSave: true, blockAds: false, blockThirdPartyCookies: false }; delete third.quickAccess; delete third.showCapture; delete third.onStart; delete third.onboarded;
   const versions = [{ version: 1, theme: 'amber', contrast: 'high' }, { version: 2, theme: 'daylight', contrast: 'standard', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' }, third];
   for (const previous of versions) {
     writeFileSync(path, JSON.stringify(previous));
-    const expected = { ...defaults, ...previous, version: 6, quickAccess: [], showCapture: true };
+    const expected = { ...defaults, ...previous, version: 7, onboarded: true, quickAccess: [], showCapture: true };
     assert.deepEqual(readSettings(path), expected); assert.deepEqual(JSON.parse(readFileSync(path)), expected);
   }
   const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   writeFileSync(path, JSON.stringify(third));
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...localRequire(name), writeFileSync() { throw new Error('Read-only settings'); } } : localRequire(name));
-  assert.deepEqual(exported.readSettings(path), { ...defaults, ...third, version: 6, quickAccess: [], showCapture: true });
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...third, version: 7, onboarded: true, quickAccess: [], showCapture: true });
   assert.deepEqual(JSON.parse(readFileSync(path)), third);
 });
 
@@ -1100,7 +1101,7 @@ test('profiles are managed in settings and the profiles panel route is removed',
 });
 
 function settingsInterface(react = {}) {
-  return interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './HorizonMark': {}, './Menu': {}, './PopupAnchor': {}, './Profiles': {}, './Switch': {} });
+  return interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './HorizonMark': {}, './Import': {}, './Menu': {}, './PopupAnchor': {}, './Profiles': {}, './Switch': {} });
 }
 
 test('settings failures use the complete named code and never expose command messages', () => {
@@ -2602,14 +2603,14 @@ test('settings validate themes, write atomically and preserve corrupt or oversiz
   assert.equal(settings.theme, 'system');
   assert.equal(createSettings(path, () => {}).migrationAllowed, false);
   assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
-  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 6, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true }), true);
+  for (const theme of ['system', 'amber', 'daylight']) assert.equal(validateSettings({ version: 7, onboarded: false, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true }), true);
   for (const value of [null, [], {}, { version: 2, theme: 'system' }, { version: 1, theme: 'dark' }, { version: 1, theme: 'amber', extra: true }, { version: 1, theme: 'amber' }, { version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', contrast: null }, { version: 1, theme: 'amber', contrast: 'high', extra: true }]) {
     assert.equal(validateSettings(value), false);
     assert.throws(() => writeSettings(path, value));
   }
   for (const corrupt of ['{broken', JSON.stringify({ version: 2, theme: 'amber' }), ' '.repeat(4097)]) {
     writeFileSync(path, corrupt);
-    assert.deepEqual(readSettings(path), { version: 6, onStart: 'restore', theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+    assert.deepEqual(readSettings(path), { version: 7, onboarded: false, onStart: 'restore', theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
     assert.ok(readdirSync(directory).filter(name => name.startsWith('settings.json.corrupt-')).some(name => readFileSync(join(directory, name), 'utf8') === corrupt));
   }
   const existing = createSettings(path, () => {});
@@ -2772,7 +2773,7 @@ test('dark page flips replace views in every profile without closing tabs and si
 
 test('dark page settings validate exact values, migrate version 1 and retain valid data when migration cannot be saved', t => {
   const directory = temporaryDirectory(t, 'dark-settings'), path = join(directory, 'settings.json');
-  const defaults = { version: 6, onStart: 'restore', theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true };
+  const defaults = { version: 7, onboarded: false, onStart: 'restore', theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true };
   assert.deepEqual(readSettings(path), defaults);
   for (const darkPages of ['off', 'on', 'system']) for (const darkStrength of ['soft', 'standard', 'deep']) for (const darkTone of ['neutral', 'warm']) {
     const valid = { ...defaults, darkPages, darkStrength, darkTone };
@@ -2792,7 +2793,7 @@ test('dark page settings validate exact values, migrate version 1 and retain val
     assert.equal(settings[key], value);
   }
   for (const contrast of ['standard', 'high']) for (const theme of ['system', 'amber', 'daylight']) {
-    const legacy = { version: 1, theme, contrast }, migrated = { ...defaults, theme, contrast };
+    const legacy = { version: 1, theme, contrast }, migrated = { ...defaults, theme, contrast, onboarded: true };
     writeFileSync(path, JSON.stringify(legacy)); assert.deepEqual(readSettings(path), migrated);
     assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), migrated);
   }
@@ -2800,7 +2801,7 @@ test('dark page settings validate exact values, migrate version 1 and retain val
   writeFileSync(path, JSON.stringify({ version: 1, theme: 'daylight', contrast: 'high' }));
   const original = readFileSync(path, 'utf8');
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...localRequire(name), writeFileSync() { throw new Error('Read-only settings'); } } : localRequire(name));
-  assert.deepEqual(exported.readSettings(path), { ...defaults, theme: 'daylight', contrast: 'high' });
+  assert.deepEqual(exported.readSettings(path), { ...defaults, theme: 'daylight', contrast: 'high', onboarded: true });
   assert.equal(readFileSync(path, 'utf8'), original);
   assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
   for (const corrupt of [{ version: 1, theme: 'amber', contrast: 'invalid' }, { version: 1, theme: 'amber', extra: true }, { ...defaults, darkTone: 'blue' }]) {
@@ -2947,25 +2948,25 @@ test('contrast defaults follow the OS only on first run and legacy settings migr
   const directory = temporaryDirectory(t, 'contrast');
   const first = join(directory, 'first.json');
   const settings = createSettings(first, () => {}, true);
-  assert.deepEqual(readSettings(first), { version: 6, onStart: 'restore', theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+  assert.deepEqual(readSettings(first), { version: 7, onboarded: false, onStart: 'restore', theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   settings.setTheme('amber', true);
   assert.equal(settings.contrast, 'high');
   settings.setContrast('standard');
   assert.equal(settings.theme, 'amber');
-  assert.deepEqual(readSettings(first, true), { version: 6, onStart: 'restore', theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+  assert.deepEqual(readSettings(first, true), { version: 7, onboarded: false, onStart: 'restore', theme: 'amber', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   assert.throws(() => settings.setContrast('invalid'));
   assert.equal(settings.contrast, 'standard');
   for (const theme of ['system', 'amber', 'daylight']) {
     const legacy = join(directory, theme + '.json');
     writeFileSync(legacy, JSON.stringify({ version: 1, theme }));
-    assert.deepEqual(readSettings(legacy, true), { version: 6, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
-    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 6, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+    assert.deepEqual(readSettings(legacy, true), { version: 7, onboarded: true, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+    assert.deepEqual(JSON.parse(readFileSync(legacy, 'utf8')), { version: 7, onboarded: true, onStart: 'restore', theme, contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
     assert.equal(createSettings(legacy, () => {}, true).migrationAllowed, false);
   }
   assert.equal(readdirSync(directory).some(name => name.includes('.corrupt-') || name.endsWith('.tmp')), false);
   const blocked = join(directory, 'blocked');
   writeFileSync(blocked, 'file');
-  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 6, onStart: 'restore', theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
+  assert.deepEqual(readSettings(join(blocked, 'settings.json'), true), { version: 7, onboarded: false, onStart: 'restore', theme: 'system', contrast: 'high', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', searchEngine: 'duckduckgo', language: 'system', downloadsFolder: null, askWhereToSave: false, blockAds: true, blockThirdPartyCookies: true, quickAccess: [], showCapture: true });
   const unavailable = createSettings(join(blocked, 'settings.json'), () => {}, true);
   assert.throws(() => unavailable.setContrast('standard'));
   assert.equal(unavailable.contrast, 'high');
@@ -5232,19 +5233,19 @@ test('locked project creation and capture explain refusal in place before sendin
 test('settings v6 validates every new field and migrates v2 without losing appearance', t => {
   const directory = temporaryDirectory(t, 'settings-v3'), path = join(directory, 'settings.json');
   const defaults = readSettings(path);
-  assert.equal(defaults.version, 6);
+  assert.equal(defaults.version, 7);
   for (const [key, bad] of [['searchEngine', 'unknown'], ['language', 'fr'], ['downloadsFolder', 'relative'], ['askWhereToSave', 1], ['showCapture', 'false'], ['blockAds', null], ['blockThirdPartyCookies', 'false']]) {
     assert.equal(validateSettings({ ...defaults, [key]: bad }), false);
     const missing = { ...defaults }; delete missing[key]; assert.equal(validateSettings(missing), false);
   }
   const legacy = { version: 2, theme: 'daylight', contrast: 'high', darkPages: 'on', darkStrength: 'deep', darkTone: 'warm' };
   writeFileSync(path, JSON.stringify(legacy));
-  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 6 });
-  assert.equal(JSON.parse(readFileSync(path)).version, 6);
+  assert.deepEqual(readSettings(path), { ...defaults, ...legacy, version: 7, onboarded: true });
+  assert.equal(JSON.parse(readFileSync(path)).version, 7);
   const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/settings.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   writeFileSync(path, JSON.stringify(legacy));
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === 'node:fs' ? { ...require(name), renameSync() { throw new Error('Read-only'); } } : localRequire(name));
-  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 6 });
+  assert.deepEqual(exported.readSettings(path), { ...defaults, ...legacy, version: 7, onboarded: true });
   assert.equal(JSON.parse(readFileSync(path)).version, 2);
 });
 

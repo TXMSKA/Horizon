@@ -360,6 +360,10 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .settings-checkbox input:focus-visible + span { outline: var(--focus-width) solid var(--focus); outline-offset: var(--focus-offset); }
 .settings-checkbox svg { width: var(--size-14); height: var(--size-14); }
 .settings-dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-10); }
+.import-dialog { overflow-y: auto; }
+.import-label { color: var(--text-secondary); font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--line-caption); }
+.settings-radio > span:first-of-type { border-radius: var(--radius-pill); }
+.settings-checkbox:has(input:disabled) { color: var(--text-secondary); cursor: default; }
 .settings-profiles { display: flex; flex-direction: column; gap: var(--space-24); }
 .settings-folder-unavailable { display: block; color: var(--text-error); }
 .settings-profile-row { display: flex; align-items: center; gap: var(--space-12); padding-block: var(--space-12); }
