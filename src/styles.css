@@ -492,6 +492,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .favorites-undo { position: fixed; left: var(--space-12); bottom: var(--space-12); z-index: calc(var(--layer-overlay) + 2); }
 .browser-tools-menu > button { min-height: var(--height-menu-row); height: var(--height-menu-row); }
 .browser-tools-menu > hr { margin: 0; }
+#tab-menu > .settings-note { margin: 0; padding-inline: calc(var(--gap-control) * 2 + var(--icon-control)) var(--gap-control); }
 .browser-menu-zoom { display: flex; flex: none; align-items: center; gap: var(--space-10); height: var(--height-menu-row); padding-inline: var(--space-10); font-size: var(--type-label); line-height: var(--line-label); }
 .browser-menu-zoom > svg { color: var(--text-secondary); }
 .browser-menu-zoom > span { flex: 1; }

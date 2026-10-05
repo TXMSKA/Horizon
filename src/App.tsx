@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Download, Ellipsis, LayoutGrid,
+  AppWindow, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Download, Ellipsis, LayoutGrid,
   ClipboardPaste, Copy, ExternalLink, Folder, History, Image, LoaderCircle, Minus, Scan, Plus, Redo2, Scissors, SpellCheck, TextSelect, Undo2,
   RotateCw, Search, SearchX, ServerOff, Shield, ShieldAlert, ShieldCheck, ShieldOff, Sparkles, Square, Star, TriangleAlert, WifiOff, X,
 } from 'lucide-react';
@@ -113,6 +113,12 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const profileButtonRef = useRef<HTMLButtonElement>(null);
   const [contextMenu, setContextMenu] = useState<PageContextMenu | null>(null);
   const contextMenuRef = useRef<PageContextMenu | null>(null);
+  const [tabMenu, setTabMenu] = useState<string | null>(null);
+  const tabMenuOpener = useRef<HTMLButtonElement>(null);
+  const tabStripRef = useRef<HTMLDivElement>(null);
+  const tabDragClick = useRef<string | null>(null);
+  const tabDragPreview = useRef<HTMLElement | null>(null);
+  const tabDrag = useRef<{ id: string; profile: string; move: boolean; cancelled: boolean; accepted: boolean; dropped: boolean; pointer: number; opener: HTMLButtonElement; start: { x: number; y: number }; point: { clientX: number; clientY: number; screenX: number; screenY: number }; transfer: DataTransfer; target: Element | null; started: boolean } | null>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [findText, setFindText] = useState('');
 
@@ -142,9 +148,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.privateWindow ? null : state?.permissionPrompt;
-  const permissionOpen = Boolean(!favoritesOpen && !desktopModalOpen && !aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !shieldOpen && !panel && !findOpen);
+  const permissionOpen = Boolean(!favoritesOpen && !desktopModalOpen && !aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
-  const popover = favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || shieldOpen || permissionOpen;
+  const popover = favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
@@ -164,7 +170,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     const leaving = command.type === 'switch-profile' || command.type === 'delete-profile';
     if (leaving) { desktopLeaves.current++; setDesktopLeaving(true); }
     try { await edits.flush(); await window.horizon.command(command); setError(''); return true; }
-    catch (reason) { setError(command.type.includes('favorite') || command.type === 'bookmark' ? favoritesError(reason, language) : command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
+    catch (reason) { setError(command.type === 'move-tab-to-window' ? text('actionError', language) : command.type.includes('favorite') || command.type === 'bookmark' ? favoritesError(reason, language) : command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
     finally { if (leaving && --desktopLeaves.current === 0) setDesktopLeaving(false); }
   }, [language, edits]);
   const closeCapture = useCallback(() => {
@@ -223,9 +229,52 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (menu) void window.horizon.command({ type: 'dismiss-context-menu', id: menu.id }).catch(() => {});
     if (focusPage) requestAnimationFrame(() => { void run({ type: 'focus-page' }); });
   }, [run]);
+  const closeTabMenu = useCallback((focus = false) => { setTabMenu(null); if (focus) tabMenuOpener.current?.focus(); }, []);
+  const showTabMenu = (id: string, opener: HTMLButtonElement) => {
+    closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
+    tabMenuOpener.current = opener; setTabMenu(id);
+  };
+  const overTabDrag = useCallback((point: { clientX: number; clientY: number; screenX: number; screenY: number }) => {
+    const drag = tabDrag.current;
+    if (!drag?.started) return;
+    drag.point = point;
+    tabDragPreview.current?.style.setProperty('transform', `translate(${point.clientX - drag.start.x}px, ${point.clientY - drag.start.y}px)`);
+    const target = document.elementFromPoint(point.clientX, point.clientY);
+    const options = { bubbles: true, cancelable: true, dataTransfer: drag.transfer, ...point };
+    if (drag.target !== target) {
+      drag.target?.dispatchEvent(new DragEvent('dragleave', { ...options, relatedTarget: target }));
+      target?.dispatchEvent(new DragEvent('dragenter', options)); drag.target = target;
+    }
+    drag.accepted = target?.dispatchEvent(new DragEvent('dragover', options)) === false;
+  }, []);
+  const finishTabDrag = useCallback((cancelled: boolean) => {
+    const drag = tabDrag.current;
+    if (!drag) return;
+    drag.cancelled = cancelled;
+    if (drag.started) {
+      tabDragClick.current = drag.id;
+      const options = { bubbles: true, cancelable: true, dataTransfer: drag.transfer, ...drag.point };
+      if (!cancelled && drag.accepted && drag.target) { drag.dropped = true; drag.target.dispatchEvent(new DragEvent('drop', options)); }
+      drag.target?.dispatchEvent(new DragEvent('dragleave', options));
+      drag.opener.dispatchEvent(new DragEvent('dragend', options));
+    }
+    tabDrag.current = null;
+    tabDragPreview.current?.remove(); tabDragPreview.current = null;
+    drag.opener.style.removeProperty('cursor');
+    if (drag.opener.hasPointerCapture(drag.pointer)) drag.opener.releasePointerCapture(drag.pointer);
+  }, []);
+  useEffect(() => {
+    const cancel = (event: KeyboardEvent) => { if (event.key === 'Escape' && tabDrag.current) { event.preventDefault(); event.stopPropagation(); finishTabDrag(true); } };
+    const drop = () => { if (tabDrag.current) tabDrag.current.dropped = true; };
+    const blur = () => finishTabDrag(true);
+    document.addEventListener('keydown', cancel, true); document.addEventListener('drop', drop, true);
+    window.addEventListener('blur', blur);
+    return () => { document.removeEventListener('keydown', cancel, true); document.removeEventListener('drop', drop, true); window.removeEventListener('blur', blur); finishTabDrag(true); };
+  }, [finishTabDrag]);
+  useEffect(() => { if (tabMenu && !state?.tabs.some(tab => tab.id === tabMenu)) closeTabMenu(); }, [tabMenu, state?.tabs, closeTabMenu]);
   useEffect(() => window.horizon.onContextMenu(menu => {
     contextMenuRef.current = menu; setContextMenu(menu);
-    if (menu) { setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }
+    if (menu) { setTabMenu(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }
   }), []);
   const dismissUndo = useCallback(() => {
     undoGeneration.current++; window.clearTimeout(undoTimeout.current); undoTimeout.current = undefined;
@@ -461,6 +510,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   }, [state?.activeId]);
 
   const shortcut = useCallback((action: BrowserShortcut) => {
+    if (action === 'stop' && tabDrag.current) { finishTabDrag(true); return; }
+    if (tabDrag.current) finishTabDrag(true);
+    if (action !== 'stop') closeTabMenu();
     if (state?.privateWindow && action === 'bookmark') return;
     const tabs = state?.tabs ?? [];
     const index = tabs.findIndex(tab => tab.id === state?.activeId);
@@ -492,6 +544,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       if (aboutOpen) setAboutOpen(false);
       else if (desktopMode) closeCapture();
       else if (captureHint) setCaptureHint(false);
+      else if (tabMenu) closeTabMenu(true);
       else if (contextMenu) closeContextMenu(true);
       else if (shieldOpen) closeShield();
       else if (permissionOpen) void answerPermission('dismiss');
@@ -505,7 +558,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'reload-no-cache' || action === 'bookmark') {
       openPanel(null); setSuggestionsOpen(false); void run({ type: action });
     }
-  }, [aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
+  }, [aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, tabMenu, closeTabMenu, finishTabDrag, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
   useEffect(() => {
     const unsubscribe = window.horizon.onShortcut(shortcut);
     const keydown = (event: KeyboardEvent) => {
@@ -545,26 +598,67 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const [addedItem, setAddedItem] = useState<{ profile: string; project: string; id: string } | null>(null);
   useEffect(() => { if (addedItem) { const timer = window.setTimeout(() => setAddedItem(null), 8000); return () => window.clearTimeout(timer); } }, [addedItem]);
   const desktopProps = state ? { state, language, edits, readOnly: desktopLeaving, run, onPage: openDesktopPanel, onDelete: deleteDesktopEntry, onModalChange: setDesktopModalOpen, addedItem, onDropped: (project: string, id: string) => setAddedItem({ profile: state.activeProfileId, project, id }), onRejected: (message: string) => setDesktopNotice({ message, failure: true }) } : null;
+  const menuTab = state?.tabs.find(tab => tab.id === tabMenu);
+  const tabMoveReason = state?.tabs.length === 1 ? 'tabMoveOnlyTab' : menuTab && !menuTab.movable ? 'tabMovePending' : null;
 
   return <>
     <div className="visually-hidden" role="status" aria-live="polite">{announcement}</div>
     <DesktopStatus notice={desktopNotice} language={language} onClose={closeDesktopNotice} />
     <a className="skip-link" href="#content" onClick={event => { event.preventDefault(); if (activeUrl && !active?.desktop && !active?.settings && !hidden && !active?.error) void run({ type: 'focus-page' }); else document.getElementById('content')?.focus(); }}>{t('skip')}</a>
     <header className="chrome" ref={headerRef} hidden={active?.fullscreen}>
-      <div className="tab-strip">
+      <div className="tab-strip" ref={tabStripRef}>
         <nav className="tabs" role="tablist" aria-label={t('tabs')}>
-          {state?.tabs.map((tab, index) => <div className={`tab${tab.id === state.activeId ? ' active' : ''}`} key={tab.id} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'close-tab', id: tab.id }); } }}>
-            <button id={`tab-${tab.id}`} className="tab-select" role="tab" type="button" aria-selected={tab.id === state.activeId} aria-controls="content" tabIndex={tab.id === state.activeId ? 0 : -1}
-              draggable={!tab.desktop && !tab.settings && Boolean(parseDesktopDrag({ tab: { url: tab.url, title: tab.title } }))}
+          {state?.tabs.map((tab, index) => <div className={`tab${tab.id === state.activeId ? ' active' : ''}`} key={tab.id} onContextMenu={event => { event.preventDefault(); const opener = event.currentTarget.querySelector<HTMLButtonElement>('.tab-select'); if (opener) showTabMenu(tab.id, opener); }} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'close-tab', id: tab.id }); } }}>
+            <button id={`tab-${tab.id}`} className="tab-select" role="tab" type="button" aria-selected={tab.id === state.activeId} aria-controls="content" aria-haspopup="menu" aria-expanded={tabMenu === tab.id} tabIndex={tab.id === state.activeId ? 0 : -1}
               onDragStart={event => {
-                if (tab.desktop || tab.settings || !parseDesktopDrag({ tab: { url: tab.url, title: tab.title } })) { event.preventDefault(); return; }
-                event.dataTransfer.effectAllowed = 'copy';
-                event.dataTransfer.setData(DESKTOP_TAB_DRAG, JSON.stringify({ profile: state.activeProfileId, tab: tab.id }));
-                event.dataTransfer.setData('text/uri-list', tab.url);
-                event.dataTransfer.setData('text/plain', tab.title || tab.url);
+                // Favicon images can start a native drag that competes with pointer capture.
+                event.preventDefault();
               }}
-              title={tab.settings ? t('settings') : tab.desktop ? desktopTabTitle(tab, language) : webTabTitle(tab, t('home'))} onClick={() => { closeFind(); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }); }}
+              onPointerDown={event => {
+                if (event.button !== 0 || tabDrag.current) return;
+                tabDragClick.current = null;
+                const copy = !tab.desktop && !tab.settings && Boolean(parseDesktopDrag({ tab: { url: tab.url, title: tab.title } })), move = state.tabs.length > 1 && tab.movable;
+                if (!copy && !move) return;
+                const transfer = new DataTransfer(); transfer.effectAllowed = copy ? 'copy' : 'move';
+                if (copy) {
+                  transfer.setData(DESKTOP_TAB_DRAG, JSON.stringify({ profile: state.activeProfileId, tab: tab.id }));
+                  transfer.setData('text/uri-list', tab.url); transfer.setData('text/plain', tab.title || tab.url);
+                } else transfer.setData('application/x-horizon-window-tab', tab.id);
+                tabDrag.current = { id: tab.id, profile: state.activeProfileId, move, cancelled: false, accepted: false, dropped: false, pointer: event.pointerId, opener: event.currentTarget, start: { x: event.clientX, y: event.clientY }, point: { clientX: event.clientX, clientY: event.clientY, screenX: event.screenX, screenY: event.screenY }, transfer, target: null, started: false };
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerMove={event => {
+                const drag = tabDrag.current;
+                if (!drag || drag.id !== tab.id || drag.pointer !== event.pointerId) return;
+                if (!drag.started && Math.hypot(event.clientX - drag.start.x, event.clientY - drag.start.y) < 6) return;
+                if (!drag.started) {
+                  drag.started = true; closeTabMenu(); drag.opener.style.setProperty('cursor', 'grabbing');
+                  const preview = drag.opener.parentElement?.cloneNode(true) as HTMLElement | undefined;
+                  if (preview) {
+                    preview.removeAttribute('id'); preview.querySelectorAll('[id]').forEach(element => element.removeAttribute('id')); preview.setAttribute('aria-hidden', 'true'); preview.inert = true; preview.classList.add('active');
+                    const bounds = drag.opener.parentElement!.getBoundingClientRect();
+                    preview.style.setProperty('position', 'fixed'); preview.style.setProperty('left', `${bounds.left}px`); preview.style.setProperty('top', `${bounds.top}px`); preview.style.setProperty('width', `${bounds.width}px`); preview.style.setProperty('height', `${bounds.height}px`); preview.style.setProperty('pointer-events', 'none'); preview.style.setProperty('z-index', 'calc(var(--layer-overlay) + 2)');
+                    document.body.append(preview); tabDragPreview.current = preview;
+                  }
+                }
+                overTabDrag({ clientX: event.clientX, clientY: event.clientY, screenX: event.screenX, screenY: event.screenY });
+              }}
+              onPointerUp={event => {
+                const drag = tabDrag.current;
+                if (!drag || drag.pointer !== event.pointerId) return;
+                if (drag.started) { event.preventDefault(); overTabDrag({ clientX: event.clientX, clientY: event.clientY, screenX: event.screenX, screenY: event.screenY }); }
+                finishTabDrag(false);
+              }}
+              onPointerCancel={() => finishTabDrag(true)} onLostPointerCapture={() => finishTabDrag(true)}
+              onDragEnd={event => {
+                const drag = tabDrag.current; tabDrag.current = null;
+                const strip = tabStripRef.current?.getBoundingClientRect();
+                if (!drag?.move || drag.cancelled || drag.accepted || drag.dropped || drag.id !== tab.id || drag.profile !== state.activeProfileId || !tab.movable || state.tabs.length < 2 || !strip || event.clientX >= strip.left && event.clientX <= strip.right && event.clientY >= strip.top && event.clientY <= strip.bottom) return;
+                void run({ type: 'move-tab-to-window', id: tab.id, point: { x: event.screenX, y: event.screenY } });
+              }}
+              title={tab.settings ? t('settings') : tab.desktop ? desktopTabTitle(tab, language) : webTabTitle(tab, t('home'))} onClick={event => { if (event.detail > 0 && tabDragClick.current === tab.id) { tabDragClick.current = null; event.preventDefault(); return; } closeTabMenu(); closeFind(); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }); }}
               onKeyDown={event => {
+                if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) { event.preventDefault(); showTabMenu(tab.id, event.currentTarget); return; }
                 let next = index;
                 if (event.key === 'ArrowRight') next = (index + 1) % state.tabs.length;
                 else if (event.key === 'ArrowLeft') next = (index + state.tabs.length - 1) % state.tabs.length;
@@ -617,7 +711,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
           <button className="icon-button lyra-button" ref={lyraButtonRef} type="button" aria-label={t('lyra')} title={t('lyra')} aria-haspopup="dialog" aria-expanded={lyraOpen} aria-controls="lyra-preview" onClick={() => { closeFind(); dismissUndo(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(previous => !previous); }}><span><Sparkles aria-hidden="true" /></span></button>
         </div>
       </div>
-      {state && <FavoritesBar key={`${state.activeProfileId}:${state.activeId}`} state={state} language={language} run={run} onDelete={destructive} onOverlay={setFavoritesOpen} dismiss={Boolean(panel || menuOpen || profileOpen || hubPage || lyraOpen || desktopMode || suggestionsOpen || contextMenu || shieldOpen || aboutOpen || desktopModalOpen)} onActivate={() => { closeFind(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }} undo={panel === 'bookmarks' ? null : undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} />}
+      {state && <FavoritesBar key={`${state.activeProfileId}:${state.activeId}`} state={state} language={language} run={run} onDelete={destructive} onOverlay={setFavoritesOpen} dismiss={Boolean(panel || menuOpen || profileOpen || hubPage || lyraOpen || desktopMode || suggestionsOpen || contextMenu || tabMenu || shieldOpen || aboutOpen || desktopModalOpen)} onActivate={() => { closeFind(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }} undo={panel === 'bookmarks' ? null : undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} />}
       {findOpen && <div className="find-bar" role="search" aria-label={t('find')}>
         <Search aria-hidden="true" /><input ref={findRef} spellCheck={false} autoComplete="off" aria-label={t('find')} placeholder={t('find')} value={findText} maxLength={1024} onChange={event => { const value = event.target.value; setFindText(value); if (value) void run({ type: 'find', text: value, forward: true, next: false }); else void run({ type: 'stop-find' }); }}
           onKeyDown={event => { if (event.key === 'Enter' && findText) { event.preventDefault(); void run({ type: 'find', text: findText, forward: !event.shiftKey, next: true }); } }} />
@@ -627,6 +721,10 @@ export function App({ language: initialLanguage }: { language: Language }) {
       {(error || state?.storageReadError || state?.storageError || (state?.desktopReadError && dismissedDesktopRead !== state.activeProfileId) || state?.desktopLocked || state?.desktopStorageError) && <div className="shell-status" role="alert"><span>{error || t(state?.desktopLocked ? 'DESKTOP_LOCKED' : state?.desktopReadError && dismissedDesktopRead !== state.activeProfileId ? 'desktopReadFailed' : state?.desktopStorageError ? 'DESKTOP_STORAGE_FAILED' : state?.storageReadError ? 'storageReadError' : 'storageError')}</span>{state?.desktopLocked && <button className="text-button" type="button" onClick={() => { void retryDesktopStorage(); }}>{t('retry')}</button>}{(error || state?.desktopReadError && !state.desktopLocked && dismissedDesktopRead !== state.activeProfileId) && iconButton(X, 'close', () => { if (error) setError(''); else if (state) setDismissedDesktopRead(state.activeProfileId); })}</div>}
       <div className={`loading-line${active?.loading ? ' loading' : ''}`} aria-hidden="true" />
     </header>
+    {menuTab && <ToolbarPopover opener={tabMenuOpener}><Menu id="tab-menu" className="browser-tools-menu" label={t('tabActions').replace('{name}', menuTab.settings ? t('settings') : menuTab.desktop ? desktopTabTitle(menuTab, language) : webTabTitle(menuTab, t('home')))} describedBy={tabMoveReason ? 'tab-move-reason' : undefined} keyboard opener={tabMenuOpener} onDismiss={reason => closeTabMenu(reason !== 'outside')}>
+      <button type="button" role="menuitem" tabIndex={-1} disabled={Boolean(tabMoveReason)} aria-describedby={tabMoveReason ? 'tab-move-reason' : undefined} onClick={() => { closeTabMenu(true); void run({ type: 'move-tab-to-window', id: menuTab.id }); }}><AppWindow aria-hidden="true" /><span>{t('moveTabToWindow')}</span></button>
+      {tabMoveReason && <p className="settings-note" id="tab-move-reason">{t(tabMoveReason)}</p>}
+    </Menu></ToolbarPopover>}
     {showCaptureHint && <ToolbarPopover opener={desktopButtonRef}><span className="capture-shortcut-tooltip" id="capture-shortcut" role="tooltip">{t('captureShortcut')}</span></ToolbarPopover>}
     {desktopMode === 'capture' && state && <CapturePreview state={state} language={language} shot={captureShot} header={headerRef} opener={desktopButtonRef} onClose={closeCapture} onSave={saveDesktopCapture} onVisible={captureVisible} onShot={setCaptureShot} />}
     {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} privateWindow={state.privateWindow} counts={active.blocked} ready={state.blockingReady} blockAds={state.blockAds} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}

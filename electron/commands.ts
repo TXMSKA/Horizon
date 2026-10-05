@@ -139,6 +139,14 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
       break;
     case 'context-menu': keys(command, ['type', 'id', 'item']); valid = string(command.id, 128) && isContextMenuItemId(command.item); break;
     case 'dismiss-context-menu': keys(command, ['type', 'id']); valid = string(command.id, 128); break;
+    case 'move-tab-to-window': {
+      valid = exact(['id'], ['point']) && string(command.id, 128);
+      if (Object.hasOwn(command, 'point')) {
+        const point = object(command.point); keys(point, ['x', 'y']);
+        valid = valid && Object.keys(point).length === 2 && ['x', 'y'].every(key => typeof point[key] === 'number' && Number.isFinite(point[key]) && Math.abs(point[key] as number) <= 1000000);
+      }
+      break;
+    }
     case 'activate-tab': case 'close-tab': case 'cancel-download': case 'show-download': case 'remove-download': case 'retry-download':
       keys(command, ['type', 'id']); valid = string(command.id, 128); break;
     case 'navigate': keys(command, ['type', 'input']); valid = string(command.input, 8192); break;

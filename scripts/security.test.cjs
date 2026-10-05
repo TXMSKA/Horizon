@@ -318,10 +318,10 @@ test('chrome Find shortcuts advance in either direction, open Find when closed a
   const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'shortcut' && ts.isCallExpression(node.initializer) && node.initializer.expression.getText(source) === 'useCallback') callback = node.initializer.arguments[0]; ts.forEachChild(node, visit); };
   visit(source); assert.ok(callback);
   const compiled = ts.transpileModule('export const shortcut = ' + callback.getText(source), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
-  const args = ['exports', 'state', 'active', 'activeUrl', 'findOpen', 'findText', 'run', 'openPanel', 'setSuggestionsOpen', 'setFindOpen', 'requestAnimationFrame', 'findRef', 'openSettings', 'menuByKeyboard', 'setMenuOpen', 'focusAddress', 'setAddress', 'setDirty', 'addressRef'];
+  const args = ['exports', 'state', 'active', 'activeUrl', 'findOpen', 'findText', 'run', 'openPanel', 'setSuggestionsOpen', 'setFindOpen', 'requestAnimationFrame', 'findRef', 'openSettings', 'menuByKeyboard', 'setMenuOpen', 'focusAddress', 'setAddress', 'setDirty', 'addressRef', 'tabDrag', 'closeTabMenu', 'finishTabDrag'];
   for (const open of [false, true]) {
     const exported = {}, commands = [], calls = [];
-    compileFunction(compiled, args)(exported, { tabs: [], canReopenTab: false }, {}, 'https://example.com/', open, 'needle', async command => commands.push(command), () => {}, () => {}, value => calls.push(['find', value]), callback => callback(), { current: { focus() {}, select() {} } }, (...values) => calls.push(['settings', ...values]), { current: false }, value => calls.push(['menu', value]), () => {}, value => calls.push(['address', value]), () => {}, { current: { setSelectionRange() {} } });
+    compileFunction(compiled, args)(exported, { tabs: [], canReopenTab: false }, {}, 'https://example.com/', open, 'needle', async command => commands.push(command), () => {}, () => {}, value => calls.push(['find', value]), callback => callback(), { current: { focus() {}, select() {} } }, (...values) => calls.push(['settings', ...values]), { current: false }, value => calls.push(['menu', value]), () => {}, value => calls.push(['address', value]), () => {}, { current: { setSelectionRange() {} } }, { current: null }, () => {}, () => {});
     exported.shortcut('find-next'); exported.shortcut('find-previous');
     if (open) assert.deepEqual(commands, [{ type: 'find', text: 'needle', forward: true, next: true }, { type: 'find', text: 'needle', forward: false, next: true }]);
     else { assert.deepEqual(commands, []); assert.deepEqual(calls, [['find', true], ['find', true]]); }
@@ -334,6 +334,7 @@ test('chrome Find shortcuts advance in either direction, open Find when closed a
 });
 require('./desktop-recovery.test.cjs');
 require('./popup-position.test.cjs');
+require('./tab-drag.test.cjs');
 
 test('Desktop paste uses drop validation and saves a link or text in the chosen project folder', t => {
   const { readDesktopTransfer } = require('../dist/src/shared/desktop-drag.js');
@@ -1809,6 +1810,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const window = new EventEmitter();
   window.webContents = new Contents();
   window.isDestroyed = () => false;
+  window.isEnabled = () => true;
   let windowFocused = true;
   window.isFocused = () => windowFocused;
   window.getContentBounds = () => ({ width: 800, height: 600 });
@@ -2550,7 +2552,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   assert.equal(loaded.exports.isProfileSession(webSession), false);
   const freshWindow = new EventEmitter();
   freshWindow.webContents = new Contents();
-  for (const key of ['isDestroyed', 'getContentBounds', 'setFullScreen', 'setTitle', 'setMenu', 'contentView']) freshWindow[key] = window[key];
+  for (const key of ['isDestroyed', 'isEnabled', 'getContentBounds', 'setFullScreen', 'setTitle', 'setMenu', 'contentView']) freshWindow[key] = window[key];
   loaded.exports.createBrowser(freshWindow, directory, join(directory, 'downloads'), settings);
   assert.equal(existsSync(join(directory, 'profiles', work.id)), false, 'Tombstone cleanup retries the store folder');
   const freshEvent = { sender: freshWindow.webContents, senderFrame: freshWindow.webContents.mainFrame };
@@ -2680,7 +2682,7 @@ test('dark page flips replace views in every profile without closing tabs and si
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name),
     createBlockingEngine: () => ({ ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '', match: () => undefined }),
   } : localRequire(name), require('node:path').dirname(filename));
-  const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
+  const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen(value) { this.fullscreen = value; }, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} },
   });
   const settings = createSettings(join(directory, 'settings.json'), () => {});
@@ -4078,7 +4080,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
     name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
-  const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
+  const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
   electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialog: async (...args) => { options.captureSaveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.captureSaveChoice ?? { canceled: true }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
   electron.shell = { openExternal: async () => assert.fail('System settings must stay mocked'), showItemInFolder: path => { options.shownPath = path; }, openPath: async () => '' };
@@ -4089,7 +4091,11 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const settings = createSettings(join(directory, 'settings.json'), () => {});
   const children = [];
   const openWindow = (profileId, privateWindow) => { children.push(addWindow({ profileId, privateWindow, fresh: true })); };
-  const browser = exported.createBrowser(window, directory, join(directory, 'downloads'), settings, undefined, { status: 'developmentBuild', refresh: async () => {}, register: async () => {} }, { ...options.browserOptions, openWindow });
+  const moveWindow = async (profileId, privateWindow, origin, adopt, point) => {
+    const child = addWindow({ profileId, privateWindow, fresh: true, empty: true }); children.push(child); child.point = point;
+    try { if (options.beforeAdopt) await options.beforeAdopt(child); adopt(child.browser.windowId); } catch (error) { child.close(); throw error; }
+  };
+  const browser = exported.createBrowser(window, directory, join(directory, 'downloads'), settings, undefined, { status: 'developmentBuild', refresh: async () => {}, register: async () => {} }, { ...options.browserOptions, openWindow, moveWindow });
   let closed = false; close = () => { if (!closed) { closed = true; window.emit('closed'); } };
   const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
   const state = () => handlers.get('horizon:state')(event), command = value => handlers.get('horizon:command')(event, value);
@@ -4097,9 +4103,9 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const area = hidden => handlers.get('horizon:content-area')(event, { top: 100, hidden });
   const navigate = (url = 'https://example.com/') => { command({ type: 'navigate', input: url }); views.at(-1).webContents.emit('did-navigate', {}, url); views.at(-1).webContents.emit('did-stop-loading'); };
   function addWindow(browserOptions = {}) {
-    const childWindow = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true,
+    const childWindow = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
       getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
-    const childBrowser = exported.createBrowser(childWindow, directory, join(directory, 'downloads'), settings, undefined, { status: 'developmentBuild', refresh: async () => {}, register: async () => {} }, { ...browserOptions, openWindow });
+    const childBrowser = exported.createBrowser(childWindow, directory, join(directory, 'downloads'), settings, undefined, { status: 'developmentBuild', refresh: async () => {}, register: async () => {} }, { ...browserOptions, openWindow, moveWindow });
     const childEvent = { sender: childWindow.webContents, senderFrame: childWindow.webContents.mainFrame };
     const childState = () => handlers.get('horizon:state')(childEvent), childCommand = value => handlers.get('horizon:command')(childEvent, value);
     let childClosed = false;
@@ -5561,13 +5567,14 @@ test('closing a normal peer removes its saved ID from unopened parked profiles t
   peer.close(); assert.deepEqual(readWindowSessions(path, cipher, () => false, { readError: false, memoryOnly: false }).windows, []);
 });
 
-test('moving a tab preserves its ID and safe native history without recording a closed tab', async t => {
+test('moving a tab preserves its live contents and native history without recording a closed tab', async t => {
   const cipher = authenticatedCipher(), first = notebookBrowser(t, cipher), second = first.addWindow({ fresh: true }); first.navigate();
   const tab = first.state().activeId, contents = first.views[0].webContents;
   contents.entries = sessionTab('https://example.com/', 'Moved').entries; contents.entryIndex = 1;
+  first.command({ type: 'new-tab' });
   first.browser.moveTab(tab, second.browser.windowId);
   assert.equal(first.state().canReopenTab, false); assert.equal(first.state().tabs[0].url, ''); assert.equal(second.state().activeId, tab);
-  assert.deepEqual(first.views.at(-1).webContents.restored, { entries: contents.entries, index: 1 }); assert.equal(contents.isDestroyed(), true);
+  assert.equal(first.views.length, 1); assert.equal(contents.restored, undefined); assert.equal(contents.isDestroyed(), false);
   const privatePeer = first.addWindow({ privateWindow: true }); assert.throws(() => second.browser.moveTab(tab, privatePeer.browser.windowId), /destination/);
   const otherProfile = first.state().profiles.find(profile => profile.id !== first.state().activeProfileId).id, otherPrivate = first.addWindow({ privateWindow: true, profileId: otherProfile });
   assert.throws(() => privatePeer.browser.moveTab(privatePeer.state().activeId, otherPrivate.browser.windowId), /profile/);
@@ -5584,12 +5591,104 @@ test('moving an authorized local HTML tab carries only its exact file authorizat
   contents.entries = [{ url: 'https://example.com/', title: 'Before' }, { url, title: 'Local' }]; contents.entryIndex = 1;
   first.browser.moveTab(id, peer.browser.windowId);
   const moved = first.views.at(-1).webContents;
-  assert.equal(peer.state().activeId, id); assert.equal(peer.state().tabs.at(-1).url, url); assert.equal(contents.isDestroyed(), true);
-  assert.deepEqual(moved.restored, { entries: contents.entries, index: 1 });
+  assert.equal(peer.state().activeId, id); assert.equal(peer.state().tabs.at(-1).url, url); assert.equal(contents.isDestroyed(), false);
+  assert.equal(moved, contents); assert.equal(moved.restored, undefined);
   assert.equal(first.isLaunchNavigation(moved, url), true); assert.equal(first.isLaunchNavigation(moved, otherURL), false);
   moved.session.onBeforeRequest({ id: 1, url, resourceType: 'mainFrame', webContentsId: moved.id }, result => assert.equal(result.cancel, false));
   moved.session.onBeforeRequest({ id: 2, url: otherURL, resourceType: 'mainFrame', webContentsId: moved.id }, result => assert.equal(result.cancel, true));
   await new Promise(setImmediate);
+});
+
+test('live transfer rebinds page events, fullscreen, find, popup and request ownership after the source closes', t => {
+  const cipher = authenticatedCipher(), first = notebookBrowser(t, cipher), second = first.addWindow({ fresh: true, empty: true });
+  first.navigate('https://moved.example/'); const contents = first.views[0].webContents, id = first.state().activeId, session = contents.session;
+  first.command({ type: 'find', text: 'needle', forward: true, next: false });
+  contents.emit('enter-html-full-screen'); assert.equal(first.state().tabs[0].fullscreen, true);
+  contents.loadURL = () => assert.fail('A live move cannot load a page'); contents.navigationHistory.restore = () => assert.fail('A live move cannot restore history');
+  const before = contents.listenerCount('did-navigate');
+  session.onBeforeRequest({ id: 90, url: 'https://third.example/resource', resourceType: 'xhr', webContentsId: contents.id }, () => {});
+  first.command({ type: 'new-tab' }); first.command({ type: 'activate-tab', id }); contents.emit('enter-html-full-screen');
+  const sourceViews = new Set([first.views[0]]), targetViews = new Set();
+  first.window.contentView = { removeChildView(view) { assert.ok(sourceViews.delete(view)); }, addChildView(view) { sourceViews.add(view); } };
+  second.window.contentView = { addChildView(view) { assert.equal(sourceViews.has(view), false); targetViews.add(view); }, removeChildView(view) { targetViews.delete(view); } };
+  first.browser.moveTab(id, second.browser.windowId);
+  assert.equal(contents.listenerCount('did-navigate'), before); assert.equal(first.views.length, 1); assert.equal(targetViews.has(first.views[0]), true); assert.equal(contents.isDestroyed(), false);
+  assert.equal(second.state().tabs[0].fullscreen, false); assert.equal(second.state().tabs[0].id, id);
+  contents.emit('found-in-page', {}, { requestId: 1, activeMatchOrdinal: 2, matches: 4 }); assert.deepEqual(second.state().tabs[0].find, { active: 2, total: 4 });
+  contents.emit('did-start-loading'); assert.equal(second.state().tabs[0].loading, true); assert.equal(first.state().tabs[0].loading, false);
+  contents.emit('page-title-updated', {}, 'In destination'); assert.equal(second.state().tabs[0].title, 'In destination');
+  assert.equal(contents.popup({ url: 'https://popup.example/', disposition: 'foreground-tab' }).action, 'allow');
+  first.close(); assert.equal(contents.isDestroyed(), false);
+  session.onBeforeSendHeaders({ id: 90, url: 'https://third.example/resource', resourceType: 'xhr', requestHeaders: { Cookie: 'id=1' } }, result => assert.deepEqual(result.requestHeaders, {}));
+  assert.equal(second.state().tabs[0].blocked.cookies, 1);
+  contents.emit('did-navigate-in-page', {}, 'https://moved.example/next', true); assert.equal(second.state().tabs[0].url, 'https://moved.example/next');
+  let allowed; session.request(contents, 'notifications', value => { allowed = value; }, {});
+  assert.equal(second.state().permissionPrompt.origin, 'https://moved.example');
+  second.command({ type: 'answer-permission', id: second.state().permissionPrompt.id, answer: 'block' }); assert.equal(allowed, false);
+});
+
+test('live move refuses the only tab, pending prompts, modal dialogs, a full or closed destination and rolls back attachment failure', t => {
+  const first = notebookBrowser(t), second = first.addWindow({ fresh: true, empty: true }); first.navigate();
+  const contents = first.views[0].webContents, id = first.state().activeId;
+  assert.throws(() => first.browser.moveTab(id, second.browser.windowId), /cannot be moved/);
+  first.command({ type: 'new-tab' });
+  let allowed; contents.session.request(contents, 'notifications', value => { allowed = value; }, {});
+  assert.equal(first.state().tabs.find(tab => tab.id === id).movable, false); assert.throws(() => first.browser.moveTab(id, second.browser.windowId), /cannot be moved/); assert.equal(allowed, undefined);
+  first.command({ type: 'activate-tab', id }); first.command({ type: 'answer-permission', id: first.state().permissionPrompt.id, answer: 'dismiss' });
+  first.window.enabled = false; assert.throws(() => first.browser.moveTab(id, second.browser.windowId), /cannot be moved/); first.window.enabled = true;
+  const before = structuredClone(first.state().tabs);
+  second.window.contentView.addChildView = () => { throw new Error('Synthetic attachment failure'); };
+  assert.throws(() => first.browser.moveTab(id, second.browser.windowId), /attachment failure/);
+  assert.deepEqual(first.state().tabs, before); assert.equal(first.state().activeId, id); assert.equal(second.state().tabs.length, 0); assert.equal(contents.isDestroyed(), false);
+  second.window.contentView.addChildView = () => {};
+  const full = first.addWindow({ fresh: true });
+  for (let index = 1; index < 200; index++) full.command({ type: 'new-tab' });
+  assert.throws(() => first.browser.moveTab(id, full.browser.windowId), /limit/); assert.deepEqual(first.state().tabs, before);
+  second.close(); assert.throws(() => first.browser.moveTab(id, second.browser.windowId), /destination/); assert.equal(contents.isDestroyed(), false);
+  const third = first.addWindow({ fresh: true, empty: true }); first.browser.moveTab(id, third.browser.windowId);
+  contents.session.request(contents, 'notifications', value => { allowed = value; }, {});
+  assert.equal(allowed, false); assert.equal(third.state().permissionPrompt, null, 'A dismissed prompt remains dismissed after moving');
+});
+
+test('move commands validate DIP coordinates and adopt only the moved tab, with failures before adoption retaining the source', async t => {
+  for (const point of [undefined, { x: -1200.5, y: 320.25 }]) {
+    const value = { type: 'move-tab-to-window', id: 'tab', ...(point ? { point } : {}) }; assert.deepEqual(validateCommand(value), value);
+  }
+  for (const change of [{ id: '' }, { id: 'tab', point: null }, { id: 'tab', point: { x: 0 } }, { id: 'tab', point: { x: NaN, y: 0 } }, { id: 'tab', point: { x: 0, y: Infinity } }, { id: 'tab', point: { x: 1000001, y: 0 } }, { id: 'tab', point: { x: 0, y: 0, extra: true } }, { id: 'tab', extra: true }]) assert.throws(() => validateCommand({ type: 'move-tab-to-window', ...change }));
+  const options = {}, cipher = authenticatedCipher(), first = notebookBrowser(t, cipher, options); first.navigate(); const contents = first.views[0].webContents, id = first.state().activeId; first.command({ type: 'new-tab' });
+  options.beforeAdopt = child => { assert.equal(child.state().tabs.length, 0); throw new Error('Receiver failed'); };
+  await assert.rejects(first.command({ type: 'move-tab-to-window', id }), /Receiver failed/); assert.equal(first.state().tabs.some(tab => tab.id === id), true); assert.equal(contents.isDestroyed(), false);
+  options.beforeAdopt = child => assert.equal(child.state().tabs.length, 0);
+  const point = { x: -200, y: 340 }; await first.command({ type: 'move-tab-to-window', id, point });
+  const moved = first.children.at(-1); assert.deepEqual(moved.state().tabs.map(tab => tab.id), [id]); assert.deepEqual(moved.point, point);
+  const { readWindowSessions } = require('../dist/electron/session-store.js'), path = join(first.directory, 'profiles', first.state().activeProfileId, 'session.json');
+  const sessions = readWindowSessions(path, cipher, () => false, { readError: false, memoryOnly: false });
+  assert.deepEqual(sessions.windows.find(window => window.id === first.browser.windowId).session.tabs.map(tab => tab.url), ['']);
+  assert.deepEqual(sessions.windows.find(window => window.id === moved.browser.windowId).session.tabs.map(tab => tab.url), ['https://example.com/']);
+});
+
+test('Home, Settings and Desktop tabs move their state and private tabs retain the ephemeral session without saving', async t => {
+  for (const kind of ['home', 'settings', 'desktop']) {
+    const first = notebookBrowser(t), second = first.addWindow({ fresh: true, empty: true });
+    if (kind === 'settings') first.command({ type: 'open-settings', section: 'privacy' });
+    if (kind === 'desktop') { first.command({ type: 'create-project', name: 'Research' }); first.command({ type: 'open-desktop', id: first.state().projects[0].id }); }
+    const tab = structuredClone(first.state().tabs.find(tab => tab.id === first.state().activeId)); first.command({ type: 'new-tab' });
+    first.browser.moveTab(tab.id, second.browser.windowId); assert.deepEqual(second.state().tabs, [tab]); assert.equal(first.views.length, 0);
+  }
+  const normal = notebookBrowser(t, authenticatedCipher()), privateSource = normal.addWindow({ privateWindow: true }), privateTarget = normal.addWindow({ privateWindow: true, fresh: true, empty: true });
+  normal.browser.flush(); const profile = normal.state().activeProfileId, path = join(normal.directory, 'profiles', profile, 'session.json'), before = readFileSync(path);
+  privateSource.navigate(); const contents = normal.views.at(-1).webContents, id = privateSource.state().activeId; privateSource.command({ type: 'new-tab' });
+  privateSource.browser.moveTab(id, privateTarget.browser.windowId); assert.equal(privateTarget.state().privateWindow, true); assert.equal(contents.isDestroyed(), false); assert.equal(privateTarget.state().tabs.length, 1);
+  privateSource.close(); privateTarget.browser.flush(); assert.deepEqual(readFileSync(path), before); assert.equal(contents.session.partition.startsWith('persist:'), false);
+});
+
+test('active downloads follow the moved tab and are not cancelled when the source window closes', t => {
+  const first = notebookBrowser(t), second = first.addWindow({ fresh: true, empty: true }); first.navigate(); const contents = first.views[0].webContents, id = first.state().activeId;
+  const { EventEmitter } = require('node:events'); let cancelled = false;
+  const item = Object.assign(new EventEmitter(), { getURL: () => 'https://example.com/download', getFilename: () => 'file.txt', getTotalBytes: () => 100, getReceivedBytes: () => 50, setSavePath(path) { this.path = path; }, cancel() { cancelled = true; } });
+  contents.session.emit('will-download', { preventDefault() { assert.fail('Download should start'); } }, item, contents);
+  const downloadId = first.state().store.downloads[0].id; first.command({ type: 'new-tab' }); first.browser.moveTab(id, second.browser.windowId); first.close(); assert.equal(cancelled, false);
+  item.emit('done', {}, 'completed'); assert.equal(second.state().store.downloads[0].status, 'completed'); assert.doesNotThrow(() => second.command({ type: 'show-download', id: downloadId }));
 });
 
 test('private windows share an ephemeral session, force strict handlers and never record browsing', async t => {
@@ -5812,16 +5911,19 @@ function settingsMain(t, options) {
     constructor(windowOptions) { super(); windows.push(this); this.options = windowOptions; this.webContents = new EventEmitter(); this.webContents.mainFrame = { url: 'horizon://app/' }; this.minimized = true; }
     isDestroyed() { return !!this.destroyed; } isMinimized() { return this.minimized; } restore() { this.minimized = false; this.restored = true; }
     getBounds() { return this.bounds ?? { x: 20, y: 20, width: this.options.width, height: this.options.height }; }
+    isMaximized() { return !!this.maximized; } isFullScreen() { return !!this.fullscreen; }
+    getNormalBounds() { return this.normalBounds ?? this.getBounds(); }
     close() { this.destroyed = true; this.emit('closed'); }
+    destroy() { this.close(); }
     removeMenu() {} setBackgroundColor() {} show() { this.shown = true; } focus() { this.focused = true; }
-    async loadURL() { if (options.stall) await new Promise(done => { options.finish = done; }); this.loaded = true; }
+    async loadURL() { if (options.loadError) throw new Error('Synthetic chrome load failure'); if (options.stall) await new Promise(done => { options.finish = done; }); this.loaded = true; }
   }
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname', 'process'])({}, name => {
-    if (name === 'electron') return { app, BrowserWindow: Window, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), protocol: { registerSchemesAsPrivileged() {} }, screen: { getPrimaryDisplay: () => primary, getDisplayMatching: () => secondary }, safeStorage: plainCipher, session: { defaultSession: { protocol: {} } }, ipcMain: { handle(name, fn) { handlers.set(name, fn); } } };
+    if (name === 'electron') return { app, BrowserWindow: Window, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), protocol: { registerSchemesAsPrivileged() {} }, screen: { getPrimaryDisplay: () => primary, getDisplayMatching: () => secondary, getDisplayNearestPoint: point => { options.point = point; return secondary; } }, safeStorage: plainCipher, session: { defaultSession: { protocol: {} } }, ipcMain: { handle(name, fn) { handlers.set(name, fn); } } };
     if (name === './settings') return { ...localRequire(name), createSettings: () => settings };
     if (name === './browser') return { restoredWindows: () => options.restoreWindows ?? [], createBrowser: (window, _userData, _downloads, _settings, registry, _defaultBrowser, browserOptions) => {
       window.browserOptions = browserOptions;
-      return { privateWindow: browserOptions.privateWindow, activeProfile: () => browserOptions.profileId, registry: () => registry, layout() {}, openLaunch(url) { if (options.launchFail) throw new Error('Tab limit reached'); launches.push(url); } };
+      return { windowId: randomUUID(), privateWindow: browserOptions.privateWindow, activeProfile: () => browserOptions.profileId, registry: () => registry, layout() {}, openLaunch(url) { if (options.launchFail) throw new Error('Tab limit reached'); launches.push(url); } };
     }, isProfileSession: () => false, isLaunchNavigation: () => false };
     if (name === './protocol') return { serveHorizon: async () => {} };
     if (name === './security') return { ...localRequire(name), secureSession() {}, validateSender() {} };
@@ -5862,6 +5964,29 @@ test('main creates default-sized offset normal and private windows, routes chrom
   const origin = clamped.windows[0]; origin.bounds = { x: 2430, y: 730, width: 1000, height: 700 }; origin.browserOptions.openWindow(origin.browserOptions.profileId, false, origin); await new Promise(setImmediate);
   assert.deepEqual([clamped.windows[1].options.width, clamped.windows[1].options.height, clamped.windows[1].options.x, clamped.windows[1].options.y], [900, 630, 1540, 110]);
 });
+test('receiving windows keep the source size, use drop display DIPs or menu offsets, focus after adoption and close on failure', async t => {
+  const options = { display: { workAreaSize: { width: 1000, height: 700 }, workArea: { x: 1440, y: 40, width: 1000, height: 700 } } }, main = settingsMain(t, options); await new Promise(setImmediate);
+  const source = main.windows[0], profile = source.browserOptions.profileId; source.bounds = { x: 1500, y: 80, width: 800, height: 600 };
+  const point = { x: 2000, y: 100 }; let adopted;
+  await source.browserOptions.moveWindow(profile, true, source, id => { const receiver = main.windows.at(-1); assert.equal(receiver.loaded, true); assert.equal(receiver.shown, undefined); assert.equal(receiver.browserOptions.empty, true); adopted = id; }, point);
+  const receiver = main.windows.at(-1); assert.ok(adopted); assert.deepEqual(options.point, point);
+  assert.deepEqual([receiver.options.width, receiver.options.height, receiver.options.x, receiver.options.y], [800, 600, 1640, 80]); assert.equal(receiver.browserOptions.privateWindow, true); assert.equal(receiver.browserOptions.profileId, profile); assert.equal(receiver.shown, true); assert.equal(receiver.focused, true);
+  await source.browserOptions.moveWindow(profile, false, source, () => {}); const offset = main.windows.at(-1);
+  assert.deepEqual([offset.options.width, offset.options.height, offset.options.x, offset.options.y], [800, 600, 1532, 112]);
+  source.normalBounds = source.bounds; source.bounds = { x: 1440, y: 40, width: 1000, height: 700 };
+  for (const mode of ['maximized', 'fullscreen']) {
+    source[mode] = true;
+    await source.browserOptions.moveWindow(profile, false, source, () => {}, point); const dragged = main.windows.at(-1);
+    assert.deepEqual([dragged.options.width, dragged.options.height, dragged.options.x, dragged.options.y], [800, 600, 1640, 80]);
+    await source.browserOptions.moveWindow(profile, false, source, () => {}); const moved = main.windows.at(-1);
+    assert.deepEqual([moved.options.width, moved.options.height, moved.options.x, moved.options.y], [800, 600, 1472, 72]);
+    source[mode] = false;
+  }
+  await assert.rejects(source.browserOptions.moveWindow(profile, false, source, () => { throw new Error('Synthetic adoption failure'); }), /adoption failure/); assert.equal(main.windows.at(-1).destroyed, true); assert.equal(source.destroyed, undefined);
+  options.loadError = true;
+  await assert.rejects(source.browserOptions.moveWindow(profile, false, source, () => assert.fail('Failed chrome cannot adopt')), /chrome load failure/); assert.equal(main.windows.at(-1).destroyed, true);
+});
+
 test('context selection searches use every chosen engine prefix', t => {
   const browser = notebookBrowser(t), { command, state } = browser; browser.navigate();
   const original = state().activeId, contents = browser.views[0].webContents;
