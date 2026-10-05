@@ -1,3 +1,4 @@
+import { IMPORT_BROWSERS } from '../src/shared/api';
 import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
 import { isWebURL } from './browsing';
 import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart } from './settings';
@@ -21,6 +22,7 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected browser argument');
 }
 const desktopCommands = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'open-desktop', 'open-desktop-panel', 'close-desktop-panel', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'delete-capture', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'take-capture', 'capture-full-page', 'capture-screen', 'edit-capture', 'copy-capture']);
+const importCommands = new Set(['list-import-sources', 'import-browser-data']);
 const favoriteCommands = new Set(['add-favorite', 'create-favorite-folder', 'rename-favorite', 'move-favorite', 'delete-favorite', 'open-favorite', 'open-favorite-new-tab', 'open-all-favorites']);
 export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
   try { return validatedCommand(value, profileIds, projects, captures, favorites); }
@@ -29,6 +31,8 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
       && !(error instanceof Error && /^(PROJECT_|FOLDER_|DESKTOP_|LINK_INVALID$|TEXT_INVALID$)/.test(error.message))) throw new Error('DESKTOP_COMMAND_INVALID');
     if (value && typeof value === 'object' && 'type' in value && favoriteCommands.has(value.type as string)
       && !(error instanceof Error && /^FAVORITE_/.test(error.message))) throw new Error('FAVORITE_COMMAND_INVALID');
+    if (value && typeof value === 'object' && 'type' in value && importCommands.has(value.type as string)
+      && !(error instanceof Error && /^IMPORT_/.test(error.message))) throw new Error('IMPORT_COMMAND_INVALID');
     throw error;
   }
 }
@@ -199,6 +203,12 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
       if (!favoriteParent(command.id)) throw new Error('FAVORITE_COMMAND_INVALID');
       favoriteDestination(favorites, command.id);
       valid = Object.keys(command).length === 2; break;
+    case 'list-import-sources': case 'finish-first-run': valid = exact([]); break;
+    case 'import-browser-data':
+      valid = exact(['browser', 'profile', 'favorites', 'history', 'searchEngine']) && IMPORT_BROWSERS.includes(command.browser as typeof IMPORT_BROWSERS[number]) && string(command.profile, 255)
+        && ['favorites', 'history', 'searchEngine'].every(key => typeof command[key] === 'boolean');
+      if (valid && !command.favorites && !command.history && !command.searchEngine) throw new Error('IMPORT_NO_CHOICE');
+      break;
     case 'zoom': keys(command, ['type', 'delta']); valid = command.delta === -1 || command.delta === 0 || command.delta === 1; break;
     case 'find':
       keys(command, ['type', 'text', 'forward', 'next']);

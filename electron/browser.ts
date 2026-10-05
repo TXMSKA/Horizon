@@ -7,7 +7,7 @@ import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
 import { GROUP_COLORS, IPC, SEARCH_ENGINES } from '../src/shared/api';
-import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, Profile, SettingsSection, TabState } from '../src/shared/api';
+import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, ImportProgress, ImportResult, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } from '../src/shared/shortcuts';
 import { groupBoundaryIndex, moveGroupedTab, nearestVisibleTab, retainedTabGroups } from '../src/shared/tab-groups';
 import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName, settingsAddress, settingsSection } from './browsing';
@@ -17,6 +17,7 @@ import { validateCommand, validateContentArea } from './commands';
 import { fetchFavicon } from './favicon';
 import type { ThemeSettings } from './settings';
 import { resolvedDownloadsFolder, resolveLanguage } from './settings';
+import { text } from '../src/copy';
 import { createDefaultBrowser } from './default-browser';
 import { isLocalHTMLURL } from './launch';
 import { PageMenuSession } from './context-menu';
@@ -31,6 +32,8 @@ import { captureWholePage, deadline, pngSize } from './captures';
 import { validCaptureRect } from '../src/shared/capture';
 import { addFavorite, createFavoriteFolder, deletedFavorite, favoriteDestination, favoriteLinks, favoriteLocation, favoriteName, favoriteTitle, moveFavorite, restoreFavorite } from './favorites';
 import type { DeletedFavorite } from './favorites';
+import { discoverImportSources, readImport } from './import';
+import { HISTORY_LIMIT, mergeFavorites, mergeHistory } from './import-merge';
 import { emptySession, lazySession, LEGACY_WINDOW_ID, migrateSession, readWindowSessions, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeWindowSessions } from './session-store';
 import type { SessionTab, WindowSessions } from './session-store';
 
@@ -92,7 +95,7 @@ function attachSession(target: Session, owner: SessionOwner) {
 }
 
 type BrowserOwner = { window: BrowserWindow; privateWindow: boolean; activeProfile(): string; publish(): void; flush(): void; stop(): void; releasePrivate(): void; persistSessions(): void; settingsChanged(): void; disposeProfile(id: string): void; registryChanged(): void; runtime(id: string): unknown };
-interface ProfileData { store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number }
+interface ProfileData { store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number; importProgress: ImportProgress | null }
 export interface BrowserGroup {
   registry: ProfileRegistry; owners: Map<string, BrowserOwner>; profiles: Map<string, ProfileData>;
   privatePartition?: string; privateCount: number; privateCleanup: Set<Promise<unknown>>; quitting?: Promise<void>; quitCleared: boolean; quitRequested?: boolean;
@@ -118,6 +121,9 @@ export function restoredWindows(userData: string, registry: ProfileRegistry) {
   return [...windows].map(([id, profileId]) => ({ id, profileId }));
 }
 export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; empty?: boolean; moveWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow, adopt: (destinationId: string) => void, point?: { x: number; y: number }) => Promise<void>; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void }
+
+// Development builds can point the importers at synthetic browser folders; shipped builds always read the user's own.
+const importEnvironment = () => ({ local: app.isPackaged ? process.env.LOCALAPPDATA : process.env.HORIZON_IMPORT_LOCALAPPDATA ?? process.env.LOCALAPPDATA, roaming: app.isPackaged ? process.env.APPDATA : process.env.HORIZON_IMPORT_APPDATA ?? process.env.APPDATA });
 
 export function createBrowser(window: BrowserWindow, userData: string, downloads: string, settings: ThemeSettings, initialRegistry?: ProfileRegistry, defaultBrowserOverride?: ReturnType<typeof createDefaultBrowser>, options: BrowserOptions = {}) {
   const registryPath = resolve(userData, 'profiles.json');
@@ -151,7 +157,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   };
   const current = () => runtimes.get(selectedProfile)!;
   const state = (): BrowserState => ({
-    ...current().state(), version: app.getVersion(), activeProfileId: selectedProfile, privateWindow,
+    ...current().state(), firstRun: !settings.onboarded && !privateWindow, version: app.getVersion(), activeProfileId: selectedProfile, privateWindow,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
     quickAccess: settings.quickAccess, showCapture: settings.showCapture,
@@ -240,6 +246,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const target = current(); clearingBrowsingData = true; publish();
         return target.clearData(command).finally(() => { clearingBrowsingData = false; publish(); });
       }
+      case 'list-import-sources': return discoverImportSources(importEnvironment());
+      case 'import-browser-data': return current().importBrowserData(command);
+      case 'finish-first-run': settings.finishFirstRun(); publish(); return;
       case 'dark-pages': settings.setDarkPages(command.value); updateDarkPages(); return;
       case 'dark-strength': settings.setDarkStrength(command.value); updateDarkPages(); return;
       case 'dark-tone': settings.setDarkTone(command.value); updateDarkPages(); return;
@@ -298,7 +307,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const store = readStore(storePath, safeStorage, status);
       const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { for (const owner of shared.owners.values()) { owner.persistSessions(); owner.publish(); } });
       const own = (url: string) => url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
-      data = { store, status, desktop, sessions: readWindowSessions(resolve(dirname(storePath), 'session.json'), safeStorage, own, sessionStatus), sessionStatus, favoritesVersion: 0 };
+      data = { store, status, desktop, sessions: readWindowSessions(resolve(dirname(storePath), 'session.json'), safeStorage, own, sessionStatus), sessionStatus, favoritesVersion: 0, importProgress: null };
       shared.profiles.set(profile.id, data);
     }
     const profileData = data;
@@ -426,7 +435,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     sessionOwner.completed = details => { requests.delete(details.id); };
     sessionOwner.failed = details => { requests.delete(details.id); };
 
-    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
+    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
@@ -477,9 +486,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       try { writeStore(storePath, store, safeStorage); storageError = false; }
       catch { storageError = true; throw new Error('PROFILE_SETTINGS_SAVE_FAILED'); }
     };
-    const editFavorites = (edit: () => void) => {
+    const editStore = (edit: () => void, failure: string) => {
       if (privateWindow) throw new Error('Private window favorites are read-only');
-      const previous = structuredClone(store.favorites);
+      const previous = { favorites: structuredClone(store.favorites), history: store.history };
       try {
         edit();
         try {
@@ -487,12 +496,36 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           writeStore(storePath, profileData.store, safeStorage);
         } catch {
           storageError = true;
-          throw new Error('FAVORITE_STORAGE_FAILED');
+          throw new Error(failure);
         }
-      } catch (error) { store.favorites = previous; publish(); throw error; }
+      } catch (error) { store.favorites = previous.favorites; store.history = previous.history; publish(); throw error; }
       clearTimeout(pendingWrite); pendingWrite = undefined;
       storageError = false; profileData.favoritesVersion++;
       for (const owner of shared.owners.values()) owner.publish();
+    };
+    const editFavorites = (edit: () => void) => editStore(edit, 'FAVORITE_STORAGE_FAILED');
+    const importBrowserData = async (command: Extract<BrowserCommand, { type: 'import-browser-data' }>): Promise<ImportResult> => {
+      if (profileData.importProgress) throw new Error('IMPORT_IN_PROGRESS');
+      const announce = (progress: ImportProgress | null) => { profileData.importProgress = progress; for (const owner of shared.owners.values()) owner.publish(); };
+      announce({ current: 0, total: 0 });
+      try {
+        const language = resolveLanguage(settings.language, app.getLocale());
+        const data = await readImport(importEnvironment(), command, { mobile: text('importMobileFavorites', language), menu: text('importMenuFavorites', language) }, resolve(userData, 'import'), (current, total) => announce({ current, total }));
+        if (disposed || closing) throw new Error('IMPORT_STORAGE_FAILED');
+        const result: ImportResult = { favorites: 0, history: 0, skipped: (data.favorites?.skipped ?? 0) + (data.history?.skipped ?? 0), searchEngine: data.searchEngine !== settings.searchEngine ? data.searchEngine : null };
+        const previousEngine = settings.searchEngine;
+        try {
+          if (result.searchEngine) settings.setSearchEngine(result.searchEngine);
+          editStore(() => {
+            if (data.favorites) { const merged = mergeFavorites(store.favorites, data.favorites); result.favorites = merged.links; result.skipped += merged.skipped; }
+            if (data.history) { const merged = mergeHistory(store.history, data.history.entries); store.history = merged.history; result.history = merged.imported; }
+          }, 'IMPORT_STORAGE_FAILED');
+        } catch (error) {
+          if (result.searchEngine) try { settings.setSearchEngine(previousEngine); } catch { /* The saved engine stays as it was written. */ }
+          throw error;
+        }
+        return result;
+      } finally { announce(null); }
     };
     const deleteFavorite = (id: string) => {
       const deleted = deletedFavorite(store.favorites, id);
@@ -627,7 +660,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (existing) { existing.lastVisit = Date.now(); existing.visitCount++; existing.title = tab.state.title; }
         else store.history.push({ url, title: tab.state.title, lastVisit: Date.now(), visitCount: 1 });
         store.history.sort((a, b) => b.lastVisit - a.lastVisit);
-        store.history.splice(10000);
+        store.history.splice(HISTORY_LIMIT);
         persist();
       }
       refresh(tab); update();
@@ -1519,7 +1552,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       invalidateMenu(tab.state.id); invalidateCaptures();
       update(); target.update(); flushSession(); target.flushSession();
     };
-    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, clearOnClose, stopForClear, assertMove, assertAccept, attachView, detachView, bindTab, activate, select: (id: string) => { activeId = id; }, transferTab, requests, permissions, downloadBindings, downloadOwner, update, flushSession };
+    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, importBrowserData, clearOnClose, stopForClear, assertMove, assertAccept, attachView, detachView, bindTab, activate, select: (id: string) => { activeId = id; }, transferTab, requests, permissions, downloadBindings, downloadOwner, update, flushSession };
 
 
   }

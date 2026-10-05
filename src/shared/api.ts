@@ -13,7 +13,13 @@ export type SearchEngine = keyof typeof SEARCH_ENGINES;
 export type SettingsSection = 'general' | 'appearance' | 'privacy' | 'privacy/sites' | 'profiles';
 export type DefaultBrowserStatus = 'default' | 'notDefault' | 'developmentBuild' | 'unsupported';
 export interface ClearedBrowsingData { history: boolean; cookies: boolean; cache: boolean }
-export type SettingsError = 'SETTINGS_COMMAND_INVALID' | 'SETTINGS_TAB_LIMIT' | 'SITE_SETTINGS_SAVE_FAILED' | 'SETTINGS_SAVE_FAILED' | 'SEARCH_ENGINE_INVALID' | 'LANGUAGE_INVALID' | 'DOWNLOADS_FOLDER_INVALID' | 'DOWNLOADS_FOLDER_PICK_FAILED' | 'ASK_WHERE_TO_SAVE_INVALID' | 'BLOCK_ADS_INVALID' | 'BLOCK_THIRD_PARTY_COOKIES_INVALID' | 'PROFILE_SETTINGS_SAVE_FAILED' | 'CLEAR_IN_PROGRESS' | 'CLEAR_HISTORY_FAILED' | 'CLEAR_SITE_DATA_FAILED' | 'CLEAR_CACHE_FAILED' | 'DEFAULT_BROWSER_UNSUPPORTED' | 'DEFAULT_BROWSER_DEVELOPMENT_BUILD' | 'DEFAULT_BROWSER_REGISTRATION_FAILED' | 'DEFAULT_BROWSER_SETTINGS_FAILED';
+export const IMPORT_BROWSERS = ['edge', 'chrome', 'brave', 'vivaldi', 'chromium', 'opera', 'opera-gx', 'firefox'] as const;
+export type ImportBrowser = typeof IMPORT_BROWSERS[number];
+export interface ImportProfile { id: string; name: string; favorites: boolean; history: boolean; searchEngine: SearchEngine | null }
+export interface ImportSource { browser: ImportBrowser; name: string; profiles: ImportProfile[] }
+export interface ImportResult { favorites: number; history: number; skipped: number; searchEngine: SearchEngine | null }
+export interface ImportProgress { current: number; total: number }
+export type SettingsError = 'SETTINGS_COMMAND_INVALID' | 'SETTINGS_TAB_LIMIT' | 'SITE_SETTINGS_SAVE_FAILED' | 'SETTINGS_SAVE_FAILED' | 'SEARCH_ENGINE_INVALID' | 'LANGUAGE_INVALID' | 'DOWNLOADS_FOLDER_INVALID' | 'DOWNLOADS_FOLDER_PICK_FAILED' | 'ASK_WHERE_TO_SAVE_INVALID' | 'BLOCK_ADS_INVALID' | 'BLOCK_THIRD_PARTY_COOKIES_INVALID' | 'PROFILE_SETTINGS_SAVE_FAILED' | 'CLEAR_IN_PROGRESS' | 'CLEAR_HISTORY_FAILED' | 'CLEAR_SITE_DATA_FAILED' | 'CLEAR_CACHE_FAILED' | 'DEFAULT_BROWSER_UNSUPPORTED' | 'DEFAULT_BROWSER_DEVELOPMENT_BUILD' | 'DEFAULT_BROWSER_REGISTRATION_FAILED' | 'DEFAULT_BROWSER_SETTINGS_FAILED' | 'IMPORT_COMMAND_INVALID' | 'IMPORT_IN_PROGRESS' | 'IMPORT_SOURCE_NOT_FOUND' | 'IMPORT_NO_CHOICE' | 'IMPORT_FILE_LOCKED' | 'IMPORT_FILE_TOO_LARGE' | 'IMPORT_FILE_INVALID' | 'IMPORT_HISTORY_FAILED' | 'IMPORT_STORAGE_FAILED';
 export type Theme = 'system' | 'amber' | 'daylight';
 export type Contrast = 'standard' | 'high';
 export const HUB_APPS = ['desktop', 'themes'] as const;
@@ -52,7 +58,7 @@ export interface PermissionPrompt { id: string; origin: string; permissions: Sit
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 5; history: HistoryEntry[]; favorites: FavoritesTree; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { id: string; groupId: string | null; movable: boolean; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export interface BrowserState { firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
@@ -81,6 +87,9 @@ export type BrowserCommand =
   | { type: 'set-ask-where-to-save' | 'set-block-ads' | 'set-block-third-party-cookies' | 'set-clear-history-on-close' | 'set-clear-cache-on-close'; value: boolean }
   | { type: 'choose-downloads-folder' | 'reset-downloads-folder' | 'register-default-browser' }
   | { type: 'clear-browsing-data'; history: boolean; cookies: boolean; cache: boolean }
+  | { type: 'list-import-sources' }
+  | { type: 'import-browser-data'; browser: ImportBrowser; profile: string; favorites: boolean; history: boolean; searchEngine: boolean }
+  | { type: 'finish-first-run' }
   | { type: 'reset-site'; host: string }
   | { type: 'retry-desktop-storage' }
   | { type: 'create-project'; name: string }
@@ -161,6 +170,8 @@ export interface HorizonAPI {
   getCaptureImage(project: string | null, item: string): Promise<Uint8Array | null>;
   getFavicon(id: string, hash: string): Promise<Uint8Array | null>;
   command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
+  command(command: Extract<BrowserCommand, { type: 'list-import-sources' }>): Promise<ImportSource[]>;
+  command(command: Extract<BrowserCommand, { type: 'import-browser-data' }>): Promise<ImportResult>;
   command(command: Extract<BrowserCommand, { type: 'save-capture-file' }>): Promise<boolean>;
   command(command: Extract<BrowserCommand, { type: 'take-capture' | 'capture-full-page' | 'capture-screen' | 'edit-capture' | 'copy-capture' }>): Promise<CaptureShot>;
   command(command: BrowserCommand): Promise<void>;

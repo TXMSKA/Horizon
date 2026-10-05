@@ -36,6 +36,7 @@ import { desktopSuggestions } from './shared/desktop-address';
 import { DesktopEdits } from './shared/desktop-edits';
 import { DESKTOP_TAB_DRAG, parseDesktopDrag } from './shared/desktop-drag';
 import { Settings, settingsError } from './Settings';
+import { FirstRunImport } from './FirstRunImport';
 
 type Panel = LibraryPanel | null;
 const sites = {
@@ -83,7 +84,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const undoTimeout = useRef<number | undefined>(undefined);
 
   const [menuOpen, setMenuOpen] = useState(false);
-  const [aboutOpen, setAboutOpen] = useState(false), [clearDialogRequested, setClearDialogRequested] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false), [clearDialogRequested, setClearDialogRequested] = useState(false), [firstRunOpen, setFirstRunOpen] = useState(false);
   const [hubPage, setHubPage] = useState<'home' | keyof typeof hubApps | null>(null);
   const [lyraOpen, setLyraOpen] = useState(false);
   const hubButtonRef = useRef<HTMLButtonElement>(null), lyraButtonRef = useRef<HTMLButtonElement>(null), lyraRef = useRef<HTMLDivElement>(null);
@@ -154,9 +155,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.privateWindow ? null : state?.permissionPrompt;
-  const permissionOpen = Boolean(!groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
+  const permissionOpen = Boolean(!groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
-  const popover = Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
+  const popover = Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
@@ -765,6 +766,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     {menuOpen && <BrowserMenu privateWindow={state?.privateWindow ?? false} language={language} active={active} canReopen={state?.canReopenTab ?? false} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); if (action === 'new-window' || action === 'new-private-window') menuButtonRef.current?.focus(); shortcut(action); }} onPanel={openPanel} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
     {panel === 'bookmarks' && state && <FavoritesPanel key={state.activeProfileId} state={state} language={language} opener={menuButtonRef} undo={undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} onDelete={destructive} run={run} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
     {panel && panel !== 'bookmarks' && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
+    {state?.firstRun && <FirstRunImport state={state} language={language} returnFocus={addressRef} onOpen={setFirstRunOpen} />}
     {aboutOpen && state && <AboutHorizon version={state.version} language={language} opener={menuButtonRef} onClose={() => setAboutOpen(false)} />}
     {contextMenu && <Menu key={contextMenu.id} id="page-context-menu" label={t('pageMenu')} keyboard={contextMenu.keyboard} point={contextMenu} onDismiss={reason => closeContextMenu(reason === 'escape')}>
       {contextMenu.groups.flatMap((group, index) => [

@@ -4,8 +4,9 @@ import { Check, ChevronDown, ChevronLeft, Folder, LoaderCircle, Palette, Setting
 import { copy, text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS, SEARCH_ENGINES, SITE_PERMISSIONS } from './shared/api';
-import type { BrowserCommand, BrowserState, ClearedBrowsingData, Language, SettingsSection, SitePermission, SiteSettingsEntry } from './shared/api';
+import type { BrowserCommand, BrowserState, ClearedBrowsingData, ImportResult, ImportSource, Language, SettingsSection, SitePermission, SiteSettingsEntry } from './shared/api';
 import { HorizonMark } from './HorizonMark';
+import { ImportDialog, importProgressLabel, importResultText } from './Import';
 import { Menu } from './Menu';
 import { PopupAnchor } from './PopupAnchor';
 import { ProfilesSettings } from './Profiles';
@@ -25,7 +26,7 @@ export function settingsError(reason: unknown, language: Language): string {
   return text(code ?? 'browserError', language);
 }
 
-type Apply = (command: BrowserCommand, message?: string) => Promise<boolean>;
+type Apply = (command: BrowserCommand, message?: string | ((outcome: unknown) => string)) => Promise<boolean>;
 
 export function groupSiteSettings(sites: SiteSettingsEntry[]): SiteSettingsEntry[][] {
   const hosts = new Map<string, SiteSettingsEntry[]>();
@@ -46,16 +47,16 @@ function SettingRow({ title, hint, language, children }: {
       if (target.isConnected && (document.activeElement === document.body || document.activeElement === target)) target.focus();
     }
   }, [pending]);
-  const [retry, setRetry] = useState<{ command: BrowserCommand; message?: string } | null>(null);
+  const [retry, setRetry] = useState<{ command: BrowserCommand; message?: string | ((outcome: unknown) => string) } | null>(null);
   const apply: Apply = async (command, message) => {
     if (running.current) return false;
     const focused = document.activeElement;
     restore.current = focused instanceof HTMLElement && row.current?.contains(focused) ? focused : null;
     running.current = true; setPending(true); setError(''); setResult(''); setRetry(null);
     try {
-      await window.horizon.command(command);
+      const outcome: unknown = await window.horizon.command(command);
       const resultLanguage = command.type === 'set-language' ? command.value === 'system' ? navigator.language.toLowerCase().split('-')[0] === 'es' ? 'es' : 'en' : command.value : language;
-      setResult(command.type === 'set-language' ? text('settingsSaved', resultLanguage) : message ?? text('settingsSaved', language)); return true;
+      setResult(command.type === 'set-language' ? text('settingsSaved', resultLanguage) : typeof message === 'function' ? message(outcome) : message ?? text('settingsSaved', language)); return true;
     }
     catch (reason) { setError(settingsError(reason, language)); setRetry({ command, message }); return false; }
     finally { running.current = false; setPending(false); }
@@ -107,6 +108,22 @@ function SettingsToggle({ title, hint, value, command, language }: {
   }} />}</SettingRow>;
 }
 
+function ImportSettings({ state, language }: { state: BrowserState; language: Language }) {
+  const t = (key: CopyKey) => text(key, language);
+  const [sources, setSources] = useState<ImportSource[] | null>(null), [open, setOpen] = useState(false);
+  const opener = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    let current = true;
+    window.horizon.command({ type: 'list-import-sources' }).then(found => { if (current) setSources(found); }, () => { if (current) setSources([]); });
+    return () => { current = false; };
+  }, []);
+  return <SettingRow title="importFrom" hint={t(sources === null ? 'importLooking' : sources.length ? 'importHint' : 'importNoBrowser')} language={language}>{(id, apply, pending) => <>
+    {sources !== null && sources.length > 0 && <button className="settings-button" ref={opener} type="button" disabled={pending || state.importProgress !== null} aria-describedby={`${id}-hint`} onClick={() => setOpen(true)}>{(pending || state.importProgress !== null) && <LoaderCircle className="spinner" aria-hidden="true" />}{pending || state.importProgress !== null ? importProgressLabel(state.importProgress, language) : t('importButton')}</button>}
+    {open && sources && <ImportDialog sources={sources} language={language} profileName={state.profiles.find(profile => profile.id === state.activeProfileId)?.name ?? ''} firstRun={false} status={{ kind: 'idle' }} progress={null} opener={opener} onClose={() => setOpen(false)}
+      onImport={choice => { setOpen(false); void apply({ type: 'import-browser-data', ...choice }, outcome => importResultText(outcome as ImportResult, language)).then(() => opener.current?.focus()); }} />}
+  </>}</SettingRow>;
+}
+
 function GeneralSettings({ state, language }: { state: BrowserState; language: Language }) {
   const t = (key: CopyKey) => text(key, language);
   const systemLanguage = state.languageSetting === 'system' ? state.language : navigator.language.toLowerCase().split('-')[0] === 'es' ? 'es' : 'en';
@@ -123,6 +140,7 @@ function GeneralSettings({ state, language }: { state: BrowserState; language: L
     </>}</SettingRow>
     <SettingsToggle title="askWhereToSave" value={state.askWhereToSave} command="set-ask-where-to-save" language={language} />
     <SettingRow title="language" hint={t('languageHint')} language={language}>{(id, apply, pending) => <SettingsDropdown id={id} label="language" value={state.languageSetting} choices={languageChoices} disabled={pending} language={language} onChange={value => { void apply({ type: 'set-language', value }, t('settingSaved').replace('{setting}', t('language')).replace('{value}', languageChoices.find(choice => choice.value === value)!.label)); }} />}</SettingRow>
+    {!state.privateWindow && <ImportSettings state={state} language={language} />}
   </div>;
 }
 
