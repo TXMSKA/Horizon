@@ -148,11 +148,12 @@ test('tab menu declares one disabled row with an inline reason and returns focus
   for (const [count, movable, reason] of [[1, true, 'tabMoveOnlyTab'], [2, false, 'tabMovePending'], [2, true, null]]) {
     let focused = 0, closed = 0;
     const menuTab = { id: 'page', title: 'Page', url: 'https://example.com/', movable }, opener = { current: { focus() { focused++; } } };
-    const globals = { state: { tabs: Array.from({ length: count }, () => menuTab) }, menuTab, tabMenuOpener: opener, t: key => key, webTabTitle: tab => tab.title, ToolbarPopover: 'anchor', Menu: 'menu', AppWindow: 'icon', setTabMenu(value) { assert.equal(value, null); closed++; }, run() {} };
+    const globals = { state: { tabs: Array.from({ length: count }, () => menuTab) }, menuTab, tabMenuOpener: opener, t: key => key, webTabTitle: tab => tab.title, ToolbarPopover: 'anchor', Menu: 'menu', AppWindow: 'icon', TabGroupMenuItems: 'group items', groupPalette: {}, language: 'en', focusTab() {}, setTabMenu(value) { assert.equal(value, null); closed++; }, run() {} };
     const helpers = compile({ closeTabMenu: values.closeTabMenu, tabMoveReason: values.tabMoveReason }, globals);
     const tree = compile({ menu: values.menu }, { ...globals, ...helpers }).menu.props.children;
     assert.equal(helpers.tabMoveReason, reason); assert.equal(tree.props.describedBy, reason ? 'tab-move-reason' : undefined);
-    const [row, note] = tree.props.children; assert.equal(row.props.role, 'menuitem'); assert.equal(row.props.disabled, Boolean(reason));
+    const [row, note, groupItems] = tree.props.children; assert.equal(row.props.role, 'menuitem'); assert.equal(row.props.disabled, Boolean(reason));
+    assert.equal(groupItems.type, 'group items'); assert.equal(groupItems.props.tab, menuTab); assert.deepEqual(groupItems.props.groups, []); assert.equal(groupItems.props.close, helpers.closeTabMenu);
     if (reason) { assert.equal(note.props.id, 'tab-move-reason'); assert.equal(note.props.children, reason); }
     tree.props.onDismiss('escape'); assert.equal(focused, 1); assert.equal(closed, 1);
   }

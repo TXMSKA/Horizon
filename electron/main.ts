@@ -110,6 +110,8 @@ if (instance) {
           experimentalFeatures: false,
           webviewTag: false,
           devTools: !app.isPackaged,
+          // Chromium shares one zoom level across the windows of an origin, so each window's fit to its own size would rescale the others.
+          zoomMode: 'isolated',
         },
       });
       const systemTheme = () => { if (settings.theme === 'system') window.setBackgroundColor(background()); };

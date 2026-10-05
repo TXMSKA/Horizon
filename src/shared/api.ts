@@ -28,6 +28,9 @@ export const PROFILE_COLORS = ['amber', 'blue', 'green', 'red', 'yellow', 'grey'
 export type ProfileColor = typeof PROFILE_COLORS[number];
 export interface Profile { id: string; name: string; color: ProfileColor; partition: string; createdAt: number }
 export interface ProfileState { id: string; name: string; color: ProfileColor; tabCount: number }
+export const GROUP_COLORS = ['success', 'info', 'primary', 'error', 'warning', 'soft', 'title', 'dim'] as const;
+export type GroupColor = typeof GROUP_COLORS[number] | `#${string}`;
+export interface TabGroup { id: string; name: string; color: GroupColor; icon: string | null; folded: boolean }
 
 export interface HistoryEntry { url: string; title: string; lastVisit: number; visitCount: number }
 export interface Bookmark { url: string; title: string; createdAt: number }
@@ -48,8 +51,8 @@ export interface SiteSettingsEntry { host: string; origin: string; blocking: boo
 export interface PermissionPrompt { id: string; origin: string; permissions: SitePermission[] }
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 5; history: HistoryEntry[]; favorites: FavoritesTree; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
-export interface TabState { id: string; movable: boolean; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export interface TabState { id: string; groupId: string | null; movable: boolean; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
+export interface BrowserState { groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
@@ -120,6 +123,10 @@ export type BrowserCommand =
   | { type: 'dismiss-context-menu'; id: string }
   | { type: 'open-downloads-folder' }
   | { type: 'activate-tab' | 'close-tab'; id: string }
+  | { type: 'create-tab-group' | 'remove-tab-from-group' | 'open-tab-group-editor' | 'close-tab-group-editor'; id: string }
+  | { type: 'add-tab-to-group'; id: string; group: string }
+  | { type: 'update-tab-group'; id: string; name?: string; color?: GroupColor; icon?: string | null }
+  | { type: 'set-tab-group-folded'; id: string; folded: boolean }
   | { type: 'move-tab-to-window'; id: string; point?: { x: number; y: number } }
   | { type: 'navigate'; input: string }
   | { type: 'add-favorite'; url: string; title: string; parent: FavoriteParent; position: number }

@@ -6,6 +6,8 @@ import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
 import { folderName, projectName, desktopInputText, desktopTitle } from './desktop';
 import { validCaptureRect } from '../src/shared/capture';
+import { groupIcon } from '../src/shared/group-icon-names';
+import { groupColor, groupId, groupName } from '../src/shared/tab-groups';
 import { favoriteDestination, favoriteId, favoriteLocation, favoriteName, favoriteParent, favoritePosition, favoriteTitle, favoriteURL, moveFavorite } from './favorites';
 
 function object(value: unknown): Record<string, unknown> {
@@ -61,6 +63,14 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     return Object.hasOwn(command, 'type') && required.every(key => Object.hasOwn(command, key));
   };
   switch (type) {
+    case 'create-tab-group': case 'remove-tab-from-group': valid = exact(['id']) && string(command.id, 128); break;
+    case 'open-tab-group-editor': case 'close-tab-group-editor': valid = exact(['id']) && groupId(command.id); break;
+    case 'add-tab-to-group': valid = exact(['id', 'group']) && string(command.id, 128) && groupId(command.group); break;
+    case 'set-tab-group-folded': valid = exact(['id', 'folded']) && groupId(command.id) && typeof command.folded === 'boolean'; break;
+    case 'update-tab-group':
+      valid = exact(['id'], ['name', 'color', 'icon']) && groupId(command.id) && ['name', 'color', 'icon'].some(key => Object.hasOwn(command, key))
+        && (!Object.hasOwn(command, 'name') || groupName(command.name)) && (!Object.hasOwn(command, 'color') || groupColor(command.color))
+        && (!Object.hasOwn(command, 'icon') || groupIcon(command.icon)); break;
     case 'pin-app': case 'unpin-app': keys(command, ['type', 'id']); valid = Object.keys(command).length === 2 && isHubApp(command.id); break;
     case 'retry-desktop-storage': keys(command, ['type']); valid = Object.keys(command).length === 1 && Object.hasOwn(command, 'type'); break;
     case 'create-project': case 'rename-project':
