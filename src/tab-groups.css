@@ -1,0 +1,66 @@
+/* The tablist owns its tabs through aria-owns, so group labels can sit between them without breaking it. */
+.tab-list-owner { position: absolute; width: 0; height: 0; }
+/* The board's run is 36px: 2px above the tabs and a 2px underline directly under them. */
+.tab-group-run { display: flex; flex: none; align-items: center; gap: var(--space-6); padding-top: var(--space-2); border-bottom: var(--border-strong) solid var(--group-color); }
+.tab-group-tabs { display: flex; flex: none; align-items: center; gap: var(--space-6); }
+.tab-group-tabs[hidden] { display: none; }
+.tab-group-label { display: flex; align-items: center; flex: none; max-width: var(--width-group-label); height: var(--target-minimum); padding: 0; border-radius: var(--radius-control); color: var(--group-color); font-size: var(--type-caption); font-weight: var(--weight-heading); line-height: var(--line-caption); }
+.tab-group-label-surface { display: flex; align-items: center; gap: var(--space-6); min-width: 0; height: var(--height-group-label); padding-inline: var(--space-10); border-radius: var(--radius-control); background: var(--surface-selected); }
+.tab-group-label-surface > span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.group-icon-loading { display: block; flex: none; width: var(--icon-control); height: var(--icon-control); }
+.tab-group-label svg, .tab-group-label .group-icon-loading { width: var(--size-13); height: var(--size-13); flex: none; }
+.tab-group-label:not(:disabled):hover, .tab-group-label:not(:disabled):active { background: var(--surface-transparent); }
+.tab-group-label:hover .tab-group-label-surface { outline: var(--border-width) solid var(--group-color); }
+.tab-group-label:active .tab-group-label-surface { outline: var(--border-strong) solid var(--group-color); }
+.tab-group-label:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+.group-editor, .group-color-picker { display: flex; flex-direction: column; width: min(var(--width-group-editor), calc(100vw - var(--space-12))); max-height: var(--popup-available-height); overflow-y: auto; padding: var(--padding-popover-form); gap: var(--space-16); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--text-title); }
+.group-editor-section { display: flex; flex: none; flex-direction: column; gap: var(--space-6); min-width: 0; }
+.group-editor label, .group-field-label { color: var(--text-secondary); font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--line-caption); }
+.group-field { flex: none; min-width: 0; height: var(--height-group-field); padding: 0 var(--space-10); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--surface-sunken); color: var(--text-title); font-size: var(--type-label); line-height: var(--line-label); }
+.group-field[aria-invalid=true] { border-color: var(--text-error); }
+.group-field-error { color: var(--text-error); font-size: var(--type-caption); line-height: var(--line-caption); }
+.group-search-field { display: flex; flex: none; align-items: center; gap: var(--space-8); height: var(--height-group-field); padding-inline: calc(var(--space-10) - var(--border-width)); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--surface-sunken); }
+.group-search-field > svg { color: var(--text-secondary); }
+.group-search-field input { height: 100%; font-size: var(--type-label); line-height: var(--line-label); }
+.group-search-field input::-webkit-search-cancel-button { appearance: none; }
+.group-search-field input:focus-visible { outline: none; }
+.group-search-field:focus-within { outline: var(--focus-width) solid var(--focus); outline-offset: var(--focus-offset); }
+/* Each 26px ring sits in a 32px target; the row's margins give the ring row back its board size and edges. */
+.group-swatches { display: flex; justify-content: space-between; margin-inline: calc((var(--size-swatch-ring) - var(--target-minimum)) / 2); }
+.group-swatch { display: grid; place-items: center; flex: none; width: var(--target-minimum); height: var(--target-minimum); margin-block: calc((var(--size-swatch-ring) - var(--target-minimum)) / 2); padding: 0; border-radius: var(--radius-pill); }
+.group-swatch .swatch-ring > span { display: grid; place-items: center; background: var(--group-color); }
+.group-swatch[aria-checked=true] .swatch-ring { background: var(--surface-pressed); border-color: var(--text-title); }
+.group-swatch.custom:not([aria-checked=true]) .swatch-ring { border-width: var(--border-width); border-style: dashed; border-color: var(--border-control); }
+.group-swatch.custom:not([aria-checked=true]) .swatch-ring > span { background: var(--surface-transparent); color: var(--text-secondary); }
+.group-swatch svg { width: var(--size-14); height: var(--size-14); }
+/* The 30px board choices keep their size and spacing inside 32px targets, in eight fixed columns so a short result row keeps its places. */
+.group-icon-results { display: grid; grid-template-columns: repeat(8, var(--target-minimum)); justify-content: space-between; margin-inline: calc((var(--size-30) - var(--target-minimum)) / 2); }
+.group-icon-choice { display: grid; place-items: center; width: var(--target-minimum); height: var(--target-minimum); margin-block: calc((var(--size-30) - var(--target-minimum)) / 2); padding: 0; border-radius: var(--radius-small); color: var(--text-secondary); }
+.group-icon-choice > span { display: grid; place-items: center; width: var(--size-30); height: var(--size-30); border: var(--border-width) solid var(--surface-transparent); border-radius: var(--radius-small); }
+.group-icon-choice:not(:disabled):hover, .group-icon-choice:not(:disabled):active { background: var(--surface-transparent); }
+.group-icon-choice:hover > span { background: var(--surface-hover); }
+.group-icon-choice:active > span { background: var(--surface-pressed); }
+.group-icon-choice[aria-checked=true] > span { background: var(--surface-pressed); border-color: var(--border-control); color: var(--group-color); }
+.group-icon-choice:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+.group-icon-skeleton { justify-self: center; width: var(--size-30); height: var(--size-30); border-radius: var(--radius-small); background: var(--surface-pressed); }
+.group-icon-summary { display: flex; align-items: center; gap: var(--space-6); }
+.group-icon-count { flex: 1; min-width: 0; color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); overflow-wrap: anywhere; }
+.group-icon-page, .group-inline-action { display: grid; place-items: center; flex: none; height: var(--target-minimum); margin-block: calc((var(--line-caption) - var(--target-minimum)) / 2); border-radius: var(--radius-small); color: var(--text-secondary); }
+.group-icon-page svg { width: var(--icon-control); height: var(--icon-control); }
+.group-inline-action { padding: 0 var(--space-6); color: var(--text-title); font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--line-caption); text-decoration: underline; text-underline-offset: var(--space-2); }
+.group-icon-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-6); }
+.group-icon-empty p { display: flex; align-items: center; gap: var(--space-8); color: var(--text-secondary); font-size: var(--type-label); line-height: var(--line-label); }
+.group-color-picker { width: min(var(--width-group-picker), calc(100vw - var(--space-16))); gap: var(--space-12); }
+.group-color-area { position: relative; flex: none; height: var(--height-group-color-area); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); overflow: hidden; touch-action: none; background: linear-gradient(to top, var(--picker-black), var(--surface-transparent)), linear-gradient(to right, var(--picker-white), var(--surface-transparent)), var(--picker-hue-color); }
+.group-color-marker { position: absolute; top: var(--picker-brightness); left: var(--picker-saturation); width: var(--size-group-marker); height: var(--size-group-marker); border: var(--border-strong) solid var(--picker-white); outline: var(--border-width) solid var(--picker-black); border-radius: var(--radius-pill); pointer-events: none; transform: translate(-50%, -50%); }
+/* The board's hue row is 16px around a 10px strip. The slider is the 24px target around that strip, centred on the row, and the browser's own 2px side margin on a range input would push it past the area's edges. */
+.group-hue { appearance: none; flex: none; height: var(--target-minimum); min-height: 0; margin: calc((var(--height-group-hue) - var(--target-minimum)) / 2) 0; }
+.group-hue::-webkit-slider-runnable-track { height: var(--height-group-hue-track); border-radius: var(--radius-pill); outline: var(--border-width) solid var(--border-control); outline-offset: calc(-1 * var(--border-width)); background: var(--picker-hue-gradient); }
+.group-hue::-webkit-slider-thumb { appearance: none; width: var(--size-group-marker); height: var(--size-group-marker); margin-top: calc((var(--height-group-hue-track) - var(--size-group-marker)) / 2); border: var(--border-strong) solid var(--picker-white); outline: var(--border-width) solid var(--picker-black); border-radius: var(--radius-pill); background: var(--picker-hue-color); }
+.group-picker-hex { display: flex; flex: none; align-items: center; gap: var(--space-8); }
+.group-color-preview { flex: none; width: var(--size-group-preview); height: var(--size-group-preview); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--picker-color); }
+.group-hex-field { display: flex; flex: 1; min-width: 0; }
+.group-picker-hex .profile-action { min-width: 0; height: var(--height-group-field); }
+.browser-menu > .tab-group-menu-row > .tab-group-menu-mark { display: grid; place-items: center; flex: none; width: var(--size-16); height: var(--size-16); color: var(--group-color); }
+.tab-group-menu-dot { width: var(--size-dot); height: var(--size-dot); border-radius: var(--radius-pill); background: var(--group-color); }
+.tab-group-menu-row > span:last-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

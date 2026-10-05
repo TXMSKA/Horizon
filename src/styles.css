@@ -26,7 +26,7 @@ button, input, a, .tabs { -webkit-app-region: no-drag; }
 .profile svg { width: var(--icon-small); height: var(--icon-small); color: var(--text-secondary); }
 .profile-dot { width: var(--size-dot); height: var(--size-dot); border-radius: var(--radius-pill); background: var(--accent); }
 .separator { height: var(--height-divider); border-left: var(--border-width) solid var(--divider); margin: 0; }
-.tabs { display: flex; gap: var(--gap-tight); min-width: 0; overflow-x: auto; scrollbar-width: thin; padding: 0; }
+.tabs { display: flex; align-items: center; gap: var(--gap-tight); min-width: 0; overflow-x: auto; scrollbar-width: thin; padding: 0; }
 .tab { display: flex; align-items: center; width: var(--width-tab); flex-shrink: 0; height: var(--height-tab); color: var(--text-secondary); border-radius: var(--radius-control); font-size: var(--type-caption); line-height: var(--line-caption); font-weight: var(--weight-label); gap: var(--gap-compact); }
 .tab-select { display: flex; align-items: center; gap: var(--gap-compact); flex: 1; min-width: 0; height: 100%; padding: 0 0 0 var(--gap-control); text-align: left; border-radius: var(--radius-control); }
 .tab-select > span:last-child { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

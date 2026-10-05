@@ -1,14 +1,16 @@
 import { existsSync, renameSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { OnStart } from '../src/shared/api';
+import type { OnStart, TabGroup } from '../src/shared/api';
+import { groupIcon } from '../src/shared/group-icon-names';
+import { contiguousTabGroups, groupColor, groupId, groupName, retainedTabGroups } from '../src/shared/tab-groups';
 import { isWebURL, settingsSection } from './browsing';
 import { encryptedStore, readStoreFile, writeStoreFile } from './store';
 import type { StoreCipher, StoreReadStatus } from './store';
 
 export interface SessionEntry { url: string; title: string }
-export interface SessionTab { url: string; title: string; zoom: number; entries: SessionEntry[]; index: number }
+export interface SessionTab { url: string; title: string; zoom: number; entries: SessionEntry[]; index: number; groupId?: string | null }
 export interface ClosedTab extends SessionTab { position: number }
-export interface SessionStore { version: 1; tabs: SessionTab[]; active: number; closed: ClosedTab[] }
+export interface SessionStore { version: 1 | 3; tabs: SessionTab[]; active: number; closed: ClosedTab[]; groups?: TabGroup[] }
 export interface WindowSession { id: string; selected: boolean; session: SessionStore }
 export interface WindowSessions { version: 2; windows: WindowSession[] }
 export const LEGACY_WINDOW_ID = '00000000-0000-4000-8000-000000000001';
@@ -21,16 +23,31 @@ const shape = (value: unknown, keys: string[]): value is Record<string, unknown>
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const string = (value: unknown, limit: number): value is string => typeof value === 'string' && value.length <= limit && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 const index = (value: unknown, length: number): boolean => Number.isSafeInteger(value) && (length ? (value as number) >= 0 && (value as number) < length : value === -1);
-function tabShape(value: unknown, closed = false): boolean {
-  return shape(value, ['url', 'title', 'zoom', 'entries', 'index', ...(closed ? ['position'] : [])])
+// A well-formed icon name is valid on disk; restoring drops one that Lucide no longer lists, so a renamed icon cannot cost a window its tabs.
+const iconName = (value: unknown): boolean => value === null || typeof value === 'string' && value.length <= 64 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(value);
+const validTabGroup = (value: unknown): value is TabGroup => shape(value, ['id', 'name', 'color', 'icon', 'folded']) && groupId(value.id) && groupName(value.name) && groupColor(value.color) && iconName(value.icon) && typeof value.folded === 'boolean';
+function tabShape(value: unknown, closed = false, grouped = false): boolean {
+  return shape(value, ['url', 'title', 'zoom', 'entries', 'index', ...(closed ? ['position'] : []), ...(grouped ? ['groupId'] : [])])
     && string(value.url, 8192) && string(value.title, 4096) && typeof value.zoom === 'number' && Number.isFinite(value.zoom) && value.zoom >= 0.25 && value.zoom <= 3
     && Array.isArray(value.entries) && value.entries.length <= HISTORY_LIMIT && Array.from(value.entries).every(entry => shape(entry, ['url', 'title']) && string(entry.url, 8192) && string(entry.title, 4096))
-    && index(value.index, value.entries.length) && (!closed || Number.isSafeInteger(value.position) && (value.position as number) >= 0 && (value.position as number) < SESSION_TAB_LIMIT);
+    && index(value.index, value.entries.length) && (!closed || Number.isSafeInteger(value.position) && (value.position as number) >= 0 && (value.position as number) < SESSION_TAB_LIMIT)
+    && (!grouped || value.groupId === null || !closed && groupId(value.groupId));
 }
 export function validateSession(value: unknown): value is SessionStore {
-  return shape(value, ['version', 'tabs', 'active', 'closed']) && value.version === 1
-    && Array.isArray(value.tabs) && value.tabs.length <= SESSION_TAB_LIMIT && Array.from(value.tabs).every(tab => tabShape(tab)) && index(value.active, value.tabs.length)
-    && Array.isArray(value.closed) && value.closed.length <= CLOSED_TAB_LIMIT && Array.from(value.closed).every(tab => tabShape(tab, true));
+  if (!value || typeof value !== 'object') return false;
+  const grouped = 'version' in value && value.version === 3;
+  if (!shape(value, ['version', 'tabs', 'active', 'closed', ...(grouped ? ['groups'] : [])]) || value.version !== 1 && !grouped
+    || !Array.isArray(value.tabs) || value.tabs.length > SESSION_TAB_LIMIT || !Array.from(value.tabs).every(tab => tabShape(tab, false, grouped)) || !index(value.active, value.tabs.length)
+    || !Array.isArray(value.closed) || value.closed.length > CLOSED_TAB_LIMIT || !Array.from(value.closed).every(tab => tabShape(tab, true, grouped))) return false;
+  if (!grouped) return true;
+  const tabs = value.tabs;
+  return Array.isArray(value.groups) && value.groups.length <= SESSION_TAB_LIMIT && Array.from(value.groups).every(validTabGroup)
+    && contiguousTabGroups(tabs, value.groups) && !value.groups.some(group => group.folded && tabs[value.active as number]?.groupId === group.id);
+}
+export function migrateSession(store: SessionStore): SessionStore {
+  if (store.version === 3) return structuredClone(store);
+  return { version: 3, tabs: store.tabs.map(tab => ({ ...structuredClone(tab), groupId: null })), active: store.active,
+    closed: store.closed.map(tab => ({ ...structuredClone(tab), groupId: null })), groups: [] };
 }
 export function validateWindowSessions(value: unknown): value is WindowSessions {
   if (!shape(value, ['version', 'windows']) || value.version !== 2 || !Array.isArray(value.windows) || value.windows.length > 200) return false;
@@ -54,8 +71,8 @@ export function readWindowSessions(path: string, cipher: StoreCipher, ownAddress
     const migrated = validateSession(value);
     const store = migrated ? { version: 2 as const, windows: [{ id: LEGACY_WINDOW_ID, selected: false, session: value }] } : value;
     if (!validateWindowSessions(store)) throw new Error('Invalid window sessions');
-    const restored: WindowSessions = { version: 2, windows: store.windows.map(window => ({ ...window, session: restoreSession(window.session, ownAddress) })) };
-    if (migrated || !encryptedStore(path)) {
+    const restored: WindowSessions = { version: 2, windows: store.windows.map(window => ({ ...window, session: restoreSession(migrateSession(window.session), ownAddress) })) };
+    if (migrated || store.windows.some(window => window.session.version === 1) || !encryptedStore(path)) {
       try { writeWindowSessions(path, restored, cipher); }
       catch { status.readError = true; status.memoryOnly = true; }
     }
@@ -83,15 +100,24 @@ export function restoreSession(store: SessionStore, ownAddress: (url: string) =>
   const tabs = store.tabs.map(tab => restorableTab(tab, ownAddress));
   const active = tabs[store.active];
   const kept = tabs.filter((tab): tab is SessionTab => tab !== null);
-  return { version: 1, tabs: kept, active: active ? kept.indexOf(active) : kept.length ? Math.min(tabs.slice(0, store.active).filter(Boolean).length, kept.length - 1) : -1,
-    closed: store.closed.map(tab => restorableTab(tab, ownAddress)).filter((tab): tab is ClosedTab => tab !== null) };
+  let selected = active ? kept.indexOf(active) : kept.length ? Math.min(tabs.slice(0, store.active).filter(Boolean).length, kept.length - 1) : -1;
+  const groups = retainedTabGroups(kept, store.groups ?? []).map(group => ({ ...group, icon: groupIcon(group.icon) ? group.icon : null }));
+  // Filtering unsafe addresses can leave only folded tabs, so restore one visible selection.
+  if (store.version === 3 && groups.some(group => group.folded && kept[selected]?.groupId === group.id)) {
+    const visible = kept.findIndex(tab => !groups.some(group => group.id === tab.groupId && group.folded));
+    if (visible >= 0) selected = visible; else groups.find(group => group.id === kept[selected]?.groupId)!.folded = false;
+  }
+  return { version: store.version, tabs: kept, active: selected,
+    closed: store.closed.map(tab => restorableTab(tab, ownAddress)).filter((tab): tab is ClosedTab => tab !== null), ...(store.version === 3 ? { groups } : {}) };
 }
 export function lazySession(store: SessionStore, onStart: OnStart) {
   const tabs = onStart === 'restore' ? store.tabs : [];
   return tabs.map((tab, position) => ({ tab, active: position === store.active, load: position === store.active && isWebURL(tab.url) }));
 }
 export function rememberClosed(store: SessionStore, tab: SessionTab, position: number): void {
-  store.closed.unshift({ ...structuredClone(tab), position: Math.max(0, Math.min(SESSION_TAB_LIMIT - 1, Math.trunc(position))) });
+  const saved = structuredClone(tab);
+  if (store.version === 3) saved.groupId = null; else delete saved.groupId;
+  store.closed.unshift({ ...saved, position: Math.max(0, Math.min(SESSION_TAB_LIMIT - 1, Math.trunc(position))) });
   store.closed.splice(CLOSED_TAB_LIMIT);
 }
 export function takeClosed(store: SessionStore, tabCount: number, ownAddress: (url: string) => boolean): ClosedTab | null {

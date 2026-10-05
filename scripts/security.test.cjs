@@ -318,10 +318,10 @@ test('chrome Find shortcuts advance in either direction, open Find when closed a
   const visit = node => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'shortcut' && ts.isCallExpression(node.initializer) && node.initializer.expression.getText(source) === 'useCallback') callback = node.initializer.arguments[0]; ts.forEachChild(node, visit); };
   visit(source); assert.ok(callback);
   const compiled = ts.transpileModule('export const shortcut = ' + callback.getText(source), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
-  const args = ['exports', 'state', 'active', 'activeUrl', 'findOpen', 'findText', 'run', 'openPanel', 'setSuggestionsOpen', 'setFindOpen', 'requestAnimationFrame', 'findRef', 'openSettings', 'menuByKeyboard', 'setMenuOpen', 'focusAddress', 'setAddress', 'setDirty', 'addressRef', 'tabDrag', 'closeTabMenu', 'finishTabDrag'];
+  const args = ['exports', 'state', 'active', 'activeUrl', 'findOpen', 'findText', 'run', 'openPanel', 'setSuggestionsOpen', 'setFindOpen', 'requestAnimationFrame', 'findRef', 'openSettings', 'menuByKeyboard', 'setMenuOpen', 'focusAddress', 'setAddress', 'setDirty', 'addressRef', 'tabDrag', 'closeTabMenu', 'finishTabDrag', 'visibleTabs'];
   for (const open of [false, true]) {
     const exported = {}, commands = [], calls = [];
-    compileFunction(compiled, args)(exported, { tabs: [], canReopenTab: false }, {}, 'https://example.com/', open, 'needle', async command => commands.push(command), () => {}, () => {}, value => calls.push(['find', value]), callback => callback(), { current: { focus() {}, select() {} } }, (...values) => calls.push(['settings', ...values]), { current: false }, value => calls.push(['menu', value]), () => {}, value => calls.push(['address', value]), () => {}, { current: { setSelectionRange() {} } }, { current: null }, () => {}, () => {});
+    compileFunction(compiled, args)(exported, { tabs: [], groups: [], canReopenTab: false }, {}, 'https://example.com/', open, 'needle', async command => commands.push(command), () => {}, () => {}, value => calls.push(['find', value]), callback => callback(), { current: { focus() {}, select() {} } }, (...values) => calls.push(['settings', ...values]), { current: false }, value => calls.push(['menu', value]), () => {}, value => calls.push(['address', value]), () => {}, { current: { setSelectionRange() {} } }, { current: null }, () => {}, () => {}, require('../dist/src/shared/tab-groups.js').visibleTabs);
     exported.shortcut('find-next'); exported.shortcut('find-previous');
     if (open) assert.deepEqual(commands, [{ type: 'find', text: 'needle', forward: true, next: true }, { type: 'find', text: 'needle', forward: false, next: true }]);
     else { assert.deepEqual(commands, []); assert.deepEqual(calls, [['find', true], ['find', true]]); }
@@ -5458,15 +5458,15 @@ test('quit awaits flagged unopened profile caches and keeps unflagged profile hi
   assert.equal(browser.app.quits, 1);
 });
 test('window session migration preserves encrypted v1 payloads and validates every window', t => {
-  const { readWindowSessions, writeWindowSessions, validateWindowSessions, LEGACY_WINDOW_ID } = require('../dist/electron/session-store.js');
+  const { readWindowSessions, writeWindowSessions, validateWindowSessions, migrateSession, LEGACY_WINDOW_ID } = require('../dist/electron/session-store.js');
   const directory = temporaryDirectory(t, 'window-sessions'), path = join(directory, 'session.json'), cipher = authenticatedCipher(), status = { readError: false, memoryOnly: false };
   const legacy = { version: 1, tabs: [sessionTab()], active: 0, closed: [{ ...sessionTab('https://closed.example/'), position: 0 }] };
   writeSession(path, legacy, cipher);
   const migrated = readWindowSessions(path, cipher, () => false, status);
-  assert.deepEqual(migrated, { version: 2, windows: [{ id: LEGACY_WINDOW_ID, selected: false, session: legacy }] });
+  assert.deepEqual(migrated, { version: 2, windows: [{ id: LEGACY_WINDOW_ID, selected: false, session: migrateSession(legacy) }] });
   assert.equal(require('../dist/electron/store.js').readStoreFile(path, cipher).version, 2);
   assert.equal(readFileSync(path).includes(Buffer.from('example.com')), false);
-  migrated.windows.push({ id: randomUUID(), selected: true, session: { version: 1, tabs: [sessionTab('https://second.example/')], active: 0, closed: [] } });
+  migrated.windows.push({ id: randomUUID(), selected: true, session: migrateSession({ version: 1, tabs: [sessionTab('https://second.example/')], active: 0, closed: [] }) });
   writeWindowSessions(path, migrated, cipher); assert.deepEqual(readWindowSessions(path, cipher, () => false, status), migrated);
   for (const change of [value => { value.version = 1; }, value => { value.extra = true; }, value => { value.windows = new Array(201); }, value => { value.windows[1].id = value.windows[0].id; }, value => { value.windows[0].id = '../escape'; }, value => { value.windows[0].privateWindow = true; }, value => { value.windows[0].selected = 1; }, value => { value.windows[0].session.active = 99; }]) {
     const invalid = structuredClone(migrated); change(invalid); assert.equal(validateWindowSessions(invalid), false); assert.throws(() => writeWindowSessions(path, invalid, cipher));
@@ -5474,7 +5474,7 @@ test('window session migration preserves encrypted v1 payloads and validates eve
   const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/session-store.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require'])(exported, name => name === './store' ? { ...localRequire(name), writeStoreFile() { throw new Error('Synthetic write failure'); } } : localRequire(name));
   writeSession(path, legacy, cipher); const bytes = readFileSync(path), failed = { readError: false, memoryOnly: false };
-  assert.deepEqual(exported.readWindowSessions(path, cipher, () => false, failed).windows[0].session, legacy);
+  assert.deepEqual(exported.readWindowSessions(path, cipher, () => false, failed).windows[0].session, migrateSession(legacy));
   assert.deepEqual(readFileSync(path), bytes); assert.equal(failed.memoryOnly, true); assert.equal(readdirSync(directory).length, 1);
 });
 
@@ -5986,6 +5986,13 @@ test('receiving windows keep the source size, use drop display DIPs or menu offs
   options.loadError = true;
   await assert.rejects(source.browserOptions.moveWindow(profile, false, source, () => assert.fail('Failed chrome cannot adopt')), /chrome load failure/); assert.equal(main.windows.at(-1).destroyed, true);
 });
+test('every chrome window isolates its zoom so a window fitting its own size cannot rescale another', async t => {
+  const main = settingsMain(t, {}); await new Promise(setImmediate);
+  const first = main.windows[0], profile = first.browserOptions.profileId;
+  first.browserOptions.openWindow(profile, false, first); first.browserOptions.openWindow(profile, true, first); await first.browserOptions.moveWindow(profile, false, first, () => {});
+  assert.equal(main.windows.length, 4);
+  for (const window of main.windows) assert.equal(window.options.webPreferences.zoomMode, 'isolated');
+});
 
 test('context selection searches use every chosen engine prefix', t => {
   const browser = notebookBrowser(t), { command, state } = browser; browser.navigate();
@@ -6386,3 +6393,6 @@ test('failed Copy uses bilingual copy feedback and Retry keeps the screenshot av
     assert.deepEqual(commands, [{ type: 'copy-capture', id: shot.id }, { type: 'copy-capture', id: shot.id }]); assert.deepEqual(shots, [shot]);
   }
 });
+
+require('./tab-groups.test.cjs')({ notebookBrowser, authenticatedCipher, fireTimers, interfaceModule, interfaceChildren });
+require('./group-search-colors.test.cjs');

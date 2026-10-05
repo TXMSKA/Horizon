@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AppWindow, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Download, Ellipsis, LayoutGrid,
@@ -9,7 +9,7 @@ import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { SEARCH_ENGINES } from './shared/api';
-import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureShot, ContextMenuItemId, DesktopPanelPage, Language, ProjectSummary, PageContextMenu, SettingsSection, WindowAction } from './shared/api';
+import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureShot, ContextMenuItemId, DesktopPanelPage, Language, ProjectSummary, PageContextMenu, SettingsSection, TabGroup, WindowAction } from './shared/api';
 import { browserShortcut, completeAddress, shortcutTabIndex } from './shared/shortcuts';
 import { webTabTitle } from './shared/tab-title';
 import { applyTheme } from './theme';
@@ -24,6 +24,8 @@ import type { LibraryPanel } from './BrowserPanel';
 import { AboutHorizon } from './AboutHorizon';
 import { BrowserMenu } from './BrowserMenu';
 import { HorizonMark } from './HorizonMark';
+import { GroupEditor, GroupRun, TabGroupMenuItems, useGroupPalette } from './TabGroups';
+import { tabRuns, visibleTabs } from './shared/tab-groups';
 
 import { blockedCount, blockedTotal, PermissionDialog, ShieldPopover } from './SiteControls';
 import { CapturePreview } from './Capture';
@@ -115,6 +117,10 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const contextMenuRef = useRef<PageContextMenu | null>(null);
   const [tabMenu, setTabMenu] = useState<string | null>(null);
   const tabMenuOpener = useRef<HTMLButtonElement>(null);
+  const groupOpener = useRef<HTMLButtonElement>(null);
+  const groupPalette = useGroupPalette();
+  const groupEditor = state?.groups.find(group => group.id === state.groupEditorId);
+  const visible = state ? visibleTabs(state.tabs, state.groups) : [];
   const tabStripRef = useRef<HTMLDivElement>(null);
   const tabDragClick = useRef<string | null>(null);
   const tabDragPreview = useRef<HTMLElement | null>(null);
@@ -148,9 +154,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.privateWindow ? null : state?.permissionPrompt;
-  const permissionOpen = Boolean(!favoritesOpen && !desktopModalOpen && !aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
+  const permissionOpen = Boolean(!groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
-  const popover = favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
+  const popover = Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
@@ -170,7 +176,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     const leaving = command.type === 'switch-profile' || command.type === 'delete-profile';
     if (leaving) { desktopLeaves.current++; setDesktopLeaving(true); }
     try { await edits.flush(); await window.horizon.command(command); setError(''); return true; }
-    catch (reason) { setError(command.type === 'move-tab-to-window' ? text('actionError', language) : command.type.includes('favorite') || command.type === 'bookmark' ? favoritesError(reason, language) : command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
+    catch (reason) { setError(command.type === 'set-tab-group-folded' && reason instanceof Error && reason.message.includes('Tab limit reached') ? text('groupFoldLimit', language) : command.type.includes('group') ? text('browserError', language) : command.type === 'move-tab-to-window' ? text('actionError', language) : command.type.includes('favorite') || command.type === 'bookmark' ? favoritesError(reason, language) : command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
     finally { if (leaving && --desktopLeaves.current === 0) setDesktopLeaving(false); }
   }, [language, edits]);
   const closeCapture = useCallback(() => {
@@ -234,6 +240,19 @@ export function App({ language: initialLanguage }: { language: Language }) {
     closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
     tabMenuOpener.current = opener; setTabMenu(id);
   };
+  // A tab sent into a collapsed group is hidden, so focus goes to the group's label instead.
+  const focusTab = useCallback((id: string) => { requestAnimationFrame(() => { const tab = document.getElementById(`tab-${id}`); (tab?.closest('[inert]') ? tab.closest('.tab-group-run')?.querySelector<HTMLElement>('.tab-group-label') : tab)?.focus(); }); }, []);
+  const closeGroupEditor = useCallback((focus = false) => {
+    const id = state?.groupEditorId;
+    if (id) void run({ type: 'close-tab-group-editor', id }).then(success => { if (success && focus) groupOpener.current?.focus(); });
+  }, [state?.groupEditorId, run]);
+  const showGroupEditor = (group: TabGroup, opener: HTMLButtonElement) => {
+    closeContextMenu(); closeTabMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
+    groupOpener.current = opener; void run({ type: 'open-tab-group-editor', id: group.id });
+  };
+  useEffect(() => {
+    if (state?.groupEditorId && (favoritesOpen || desktopModalOpen || aboutOpen || hubPage || lyraOpen || menuOpen || profileOpen || desktopMode || suggestionsOpen || contextMenu || tabMenu || shieldOpen || panel)) closeGroupEditor();
+  }, [state?.groupEditorId, favoritesOpen, desktopModalOpen, aboutOpen, hubPage, lyraOpen, menuOpen, profileOpen, desktopMode, suggestionsOpen, contextMenu, tabMenu, shieldOpen, panel, closeGroupEditor]);
   const overTabDrag = useCallback((point: { clientX: number; clientY: number; screenX: number; screenY: number }) => {
     const drag = tabDrag.current;
     if (!drag?.started) return;
@@ -514,7 +533,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (tabDrag.current) finishTabDrag(true);
     if (action !== 'stop') closeTabMenu();
     if (state?.privateWindow && action === 'bookmark') return;
-    const tabs = state?.tabs ?? [];
+    const tabs = state ? visibleTabs(state.tabs, state.groups) : [];
     const index = tabs.findIndex(tab => tab.id === state?.activeId);
     if (action === 'capture') void openCapture();
     else if (action === 'focus-address') focusAddress();
@@ -544,6 +563,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       if (aboutOpen) setAboutOpen(false);
       else if (desktopMode) closeCapture();
       else if (captureHint) setCaptureHint(false);
+      else if (groupEditor) closeGroupEditor(true);
       else if (tabMenu) closeTabMenu(true);
       else if (contextMenu) closeContextMenu(true);
       else if (shieldOpen) closeShield();
@@ -558,7 +578,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'reload-no-cache' || action === 'bookmark') {
       openPanel(null); setSuggestionsOpen(false); void run({ type: action });
     }
-  }, [aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, tabMenu, closeTabMenu, finishTabDrag, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
+  }, [aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, tabMenu, closeTabMenu, groupEditor, closeGroupEditor, finishTabDrag, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
   useEffect(() => {
     const unsubscribe = window.horizon.onShortcut(shortcut);
     const keydown = (event: KeyboardEvent) => {
@@ -607,8 +627,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
     <a className="skip-link" href="#content" onClick={event => { event.preventDefault(); if (activeUrl && !active?.desktop && !active?.settings && !hidden && !active?.error) void run({ type: 'focus-page' }); else document.getElementById('content')?.focus(); }}>{t('skip')}</a>
     <header className="chrome" ref={headerRef} hidden={active?.fullscreen}>
       <div className="tab-strip" ref={tabStripRef}>
-        <nav className="tabs" role="tablist" aria-label={t('tabs')}>
-          {state?.tabs.map((tab, index) => <div className={`tab${tab.id === state.activeId ? ' active' : ''}`} key={tab.id} onContextMenu={event => { event.preventDefault(); const opener = event.currentTarget.querySelector<HTMLButtonElement>('.tab-select'); if (opener) showTabMenu(tab.id, opener); }} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'close-tab', id: tab.id }); } }}>
+        <div className="tabs">
+          <div className="tab-list-owner" role="tablist" aria-label={t('tabs')} aria-owns={visible.map(tab => `tab-${tab.id}`).join(' ')} />
+          {state && tabRuns(state.tabs, state.groups).map(({ group, tabs }) => { const items = tabs.map(tab => { const index = visible.indexOf(tab); return <div className={`tab${tab.id === state.activeId ? ' active' : ''}`} key={tab.id} onContextMenu={event => { event.preventDefault(); const opener = event.currentTarget.querySelector<HTMLButtonElement>('.tab-select'); if (opener) showTabMenu(tab.id, opener); }} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'close-tab', id: tab.id }); } }}>
             <button id={`tab-${tab.id}`} className="tab-select" role="tab" type="button" aria-selected={tab.id === state.activeId} aria-controls="content" aria-haspopup="menu" aria-expanded={tabMenu === tab.id} tabIndex={tab.id === state.activeId ? 0 : -1}
               onDragStart={event => {
                 // Favicon images can start a native drag that competes with pointer capture.
@@ -660,20 +681,20 @@ export function App({ language: initialLanguage }: { language: Language }) {
               onKeyDown={event => {
                 if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) { event.preventDefault(); showTabMenu(tab.id, event.currentTarget); return; }
                 let next = index;
-                if (event.key === 'ArrowRight') next = (index + 1) % state.tabs.length;
-                else if (event.key === 'ArrowLeft') next = (index + state.tabs.length - 1) % state.tabs.length;
+                if (event.key === 'ArrowRight') next = (index + 1) % visible.length;
+                else if (event.key === 'ArrowLeft') next = (index + visible.length - 1) % visible.length;
                 else if (event.key === 'Home') next = 0;
-                else if (event.key === 'End') next = state.tabs.length - 1;
+                else if (event.key === 'End') next = visible.length - 1;
                 else return;
-                event.preventDefault(); const selected = state.tabs[next]; if (!selected) return; closeFind(); setDirty(false); setSuggestionsOpen(false);
+                event.preventDefault(); const selected = visible[next]; if (!selected) return; closeFind(); setDirty(false); setSuggestionsOpen(false);
                 void run({ type: 'activate-tab', id: selected.id }); document.getElementById(`tab-${selected.id}`)?.focus();
               }}>
               {tab.loading ? <LoaderCircle className="spinner accent" aria-label={t('loading')} /> : !tab.url || tab.desktop || tab.settings ? <HorizonMark /> : tab.favicon && favicons[tab.id]?.hash === tab.favicon ? <img className="tab-favicon" src={favicons[tab.id]?.url} alt="" aria-hidden="true" onError={() => setFavicons(previous => { if (previous[tab.id]?.hash !== tab.favicon) return previous; const next = { ...previous }; delete next[tab.id]; return next; })} /> : <span className="tab-initial" aria-hidden="true">{(tab.title || tab.url).slice(0, 1).toUpperCase()}</span>}
               <span>{tab.settings ? t('settings') : tab.desktop ? desktopTabTitle(tab, language) : webTabTitle(tab, t('home'))}</span>
             </button>
             {iconButton(X, 'closeTab', () => { if (tab.id === state.activeId) closeFind(); void run({ type: 'close-tab', id: tab.id }); })}
-          </div>)}
-        </nav>
+          </div>; }); return group ? <GroupRun key={group.id} group={group} palette={groupPalette} language={language} editorId={state.groupEditorId} editorOpener={groupOpener} run={run} onEdit={showGroupEditor}>{items}</GroupRun> : <Fragment key={tabs[0]!.id}>{items}</Fragment>; })}
+        </div>
         <button className="icon-button new-tab" type="button" onClick={() => shortcut('new-tab')} aria-label={t('newTab')} title={t('newTab')}><Plus aria-hidden="true" /></button><div className="drag-space" />
         <div className="window-controls">
           <button type="button" onClick={() => { void windowAction('minimize'); }} aria-label={t('minimize')} title={t('minimize')}><Minus aria-hidden="true" /></button>
@@ -711,7 +732,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
           <button className="icon-button lyra-button" ref={lyraButtonRef} type="button" aria-label={t('lyra')} title={t('lyra')} aria-haspopup="dialog" aria-expanded={lyraOpen} aria-controls="lyra-preview" onClick={() => { closeFind(); dismissUndo(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(previous => !previous); }}><span><Sparkles aria-hidden="true" /></span></button>
         </div>
       </div>
-      {state && <FavoritesBar key={`${state.activeProfileId}:${state.activeId}`} state={state} language={language} run={run} onDelete={destructive} onOverlay={setFavoritesOpen} dismiss={Boolean(panel || menuOpen || profileOpen || hubPage || lyraOpen || desktopMode || suggestionsOpen || contextMenu || tabMenu || shieldOpen || aboutOpen || desktopModalOpen)} onActivate={() => { closeFind(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }} undo={panel === 'bookmarks' ? null : undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} />}
+      {state && <FavoritesBar key={`${state.activeProfileId}:${state.activeId}`} state={state} language={language} run={run} onDelete={destructive} onOverlay={setFavoritesOpen} dismiss={Boolean(groupEditor || panel || menuOpen || profileOpen || hubPage || lyraOpen || desktopMode || suggestionsOpen || contextMenu || tabMenu || shieldOpen || aboutOpen || desktopModalOpen)} onActivate={() => { closeFind(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }} undo={panel === 'bookmarks' ? null : undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} />}
       {findOpen && <div className="find-bar" role="search" aria-label={t('find')}>
         <Search aria-hidden="true" /><input ref={findRef} spellCheck={false} autoComplete="off" aria-label={t('find')} placeholder={t('find')} value={findText} maxLength={1024} onChange={event => { const value = event.target.value; setFindText(value); if (value) void run({ type: 'find', text: value, forward: true, next: false }); else void run({ type: 'stop-find' }); }}
           onKeyDown={event => { if (event.key === 'Enter' && findText) { event.preventDefault(); void run({ type: 'find', text: findText, forward: !event.shiftKey, next: true }); } }} />
@@ -724,7 +745,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
     {menuTab && <ToolbarPopover opener={tabMenuOpener}><Menu id="tab-menu" className="browser-tools-menu" label={t('tabActions').replace('{name}', menuTab.settings ? t('settings') : menuTab.desktop ? desktopTabTitle(menuTab, language) : webTabTitle(menuTab, t('home')))} describedBy={tabMoveReason ? 'tab-move-reason' : undefined} keyboard opener={tabMenuOpener} onDismiss={reason => closeTabMenu(reason !== 'outside')}>
       <button type="button" role="menuitem" tabIndex={-1} disabled={Boolean(tabMoveReason)} aria-describedby={tabMoveReason ? 'tab-move-reason' : undefined} onClick={() => { closeTabMenu(true); void run({ type: 'move-tab-to-window', id: menuTab.id }); }}><AppWindow aria-hidden="true" /><span>{t('moveTabToWindow')}</span></button>
       {tabMoveReason && <p className="settings-note" id="tab-move-reason">{t(tabMoveReason)}</p>}
+      <TabGroupMenuItems tab={menuTab} groups={state?.groups ?? []} palette={groupPalette} language={language} close={closeTabMenu} focusTab={focusTab} run={run} />
     </Menu></ToolbarPopover>}
+    {groupEditor && <GroupEditor key={`${state?.activeProfileId}:${groupEditor.id}`} group={groupEditor} language={language} palette={groupPalette} opener={groupOpener} run={run} onDismiss={closeGroupEditor} />}
     {showCaptureHint && <ToolbarPopover opener={desktopButtonRef}><span className="capture-shortcut-tooltip" id="capture-shortcut" role="tooltip">{t('captureShortcut')}</span></ToolbarPopover>}
     {desktopMode === 'capture' && state && <CapturePreview state={state} language={language} shot={captureShot} header={headerRef} opener={desktopButtonRef} onClose={closeCapture} onSave={saveDesktopCapture} onVisible={captureVisible} onShot={setCaptureShot} />}
     {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} privateWindow={state.privateWindow} counts={active.blocked} ready={state.blockingReady} blockAds={state.blockAds} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}

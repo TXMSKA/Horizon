@@ -6,9 +6,10 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
-import { IPC, SEARCH_ENGINES } from '../src/shared/api';
+import { GROUP_COLORS, IPC, SEARCH_ENGINES } from '../src/shared/api';
 import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } from '../src/shared/shortcuts';
+import { groupBoundaryIndex, moveGroupedTab, nearestVisibleTab, retainedTabGroups } from '../src/shared/tab-groups';
 import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName, settingsAddress, settingsSection } from './browsing';
 import { clearStoredHistoryOnClose, readStore, recordsBrowsing, reserveDownloadPath, writeStore } from './store';
 import { validateSender } from './security';
@@ -30,7 +31,7 @@ import { captureWholePage, deadline, pngSize } from './captures';
 import { validCaptureRect } from '../src/shared/capture';
 import { addFavorite, createFavoriteFolder, deletedFavorite, favoriteDestination, favoriteLinks, favoriteLocation, favoriteName, favoriteTitle, moveFavorite, restoreFavorite } from './favorites';
 import type { DeletedFavorite } from './favorites';
-import { emptySession, lazySession, LEGACY_WINDOW_ID, readWindowSessions, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeWindowSessions } from './session-store';
+import { emptySession, lazySession, LEGACY_WINDOW_ID, migrateSession, readWindowSessions, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeWindowSessions } from './session-store';
 import type { SessionTab, WindowSessions } from './session-store';
 
 interface TabHost { alive(tab: Tab): boolean; update(): void; publish(): void; fail(tab: Tab, description: string): void; close(tab: Tab): void; count(): number }
@@ -186,7 +187,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       invalidateMenu();
       for (const runtime of runtimes.values()) runtime.suspend();
     }
-    if (!next.tabs.length) next.newTab();
+    if (!next.active()) next.newTab();
     for (const runtime of runtimes.values()) runtime.persistSession();
     layout(); publish();
   };
@@ -267,7 +268,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         return (async () => {
           try {
             const next = runtimeFor(registry.profiles.find(other => other.id === selectedProfile)!);
-            if (!next.tabs.length) next.newTab();
+            if (!next.active()) next.newTab();
             const attempt = async (cleanup: () => unknown) => { try { await cleanup(); } catch (error: unknown) { storageFailure(error); } };
             const runtime = runtimes.get(profile.id);
             await attempt(() => runtime?.dispose(true));
@@ -281,7 +282,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
             runtimes.delete(profile.id);
             invalidateMenu();
             const next = runtimeFor(registry.profiles.find(other => other.id === selectedProfile)!);
-            if (!next.tabs.length) next.newTab();
+            if (!next.active()) next.newTab();
             deleting = false; layout(); publish();
           }
         })();
@@ -309,11 +310,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const ownAddress = (url: string) => url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
     const sessionPath = resolve(dirname(storePath), 'session.json');
     const sessionStatus = profileData.sessionStatus;
-    const savedSession = privateWindow || options.fresh ? emptySession() : profileData.sessions.windows.find(saved => saved.id === windowId)?.session ?? emptySession();
+    const savedSession = migrateSession(privateWindow || options.fresh ? emptySession() : profileData.sessions.windows.find(saved => saved.id === windowId)?.session ?? emptySession());
     let sessionWrite: ReturnType<typeof setTimeout> | undefined;
     let sessionError = false;
     const desktopPanel: DesktopPanelState = { open: false, page: { kind: 'home' } };
     const tabs: Tab[] = [];
+    let tabGroups = privateWindow || options.fresh || settings.onStart !== 'restore' ? [] : structuredClone(savedSession.groups ?? []);
+    let groupEditorId: string | null = null;
+    let nextGroupColor = tabGroups.length % GROUP_COLORS.length;
     let activeId = '';
     let storageError = false;
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
@@ -422,7 +426,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     sessionOwner.completed = details => { requests.delete(details.id); };
     sessionOwner.failed = details => { requests.delete(details.id); };
 
-    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
+    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
@@ -431,12 +435,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       return privateWindow && site ? { ...site, blocking: true, permissions: { camera: 'block' as const, microphone: 'block' as const, location: 'block' as const, notifications: 'block' as const } } : site;
     }
     const snapshotTab = (tab: Tab): SessionTab => {
-      if (tab.restore || tab.restoring) return structuredClone((tab.restore ?? tab.restoring)!);
+      if (tab.restore || tab.restoring) return { ...structuredClone((tab.restore ?? tab.restoring)!), groupId: tab.state.groupId };
       const history = !tab.state.settings && !tab.state.desktop ? page(tab.view)?.navigationHistory : undefined;
       const entries = history?.getAllEntries() ?? [], selected = history?.getActiveIndex() ?? -1;
       const start = Math.max(0, selected - 1000), kept = entries.slice(start, start + 2000);
       // Chromium pageState can embed form values and file addresses; only addresses and titles cross the restore boundary.
-      return { url: tab.state.url, title: tab.state.title.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, 4096), zoom: tab.state.zoom,
+      return { url: tab.state.url, title: tab.state.title.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, 4096), zoom: tab.state.zoom, groupId: tab.state.groupId,
         entries: kept.map(entry => ({ url: entry.url, title: entry.title.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, 4096) })), index: kept.length ? Math.max(0, selected - start) : -1 };
     };
     const flushSession = () => {
@@ -444,7 +448,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!recordsBrowsing(privateWindow) || sessionStatus.memoryOnly || disposed) return;
       try {
         const open = tabs.filter(tab => !tab.retryDownload);
-        const next = restoreSession({ ...savedSession, tabs: open.map(snapshotTab), active: open.findIndex(tab => tab.state.id === activeId) }, ownAddress);
+        const next = restoreSession({ ...savedSession, groups: retainedTabGroups(open.map(tab => tab.state), tabGroups), tabs: open.map(snapshotTab), active: open.findIndex(tab => tab.state.id === activeId) }, ownAddress);
         const saved = { id: windowId, selected: isCurrent(), session: next };
         const index = profileData.sessions.windows.findIndex(saved => saved.id === windowId);
         if (index < 0) profileData.sessions.windows.push(saved); else profileData.sessions.windows[index] = saved;
@@ -520,6 +524,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const resetCookies = () => { for (const tab of tabs) { tab.refusedCookies.clear(); tab.state.blocked.cookies = 0; } };
     const resetCounts = () => { resetCookies(); for (const tab of tabs) tab.state.blocked = { ads: 0, trackers: 0, cookies: 0 }; };
     const active = () => tabs.find(tab => tab.state.id === activeId);
+    const pruneGroups = () => {
+      tabGroups = retainedTabGroups(tabs.map(tab => tab.state), tabGroups);
+      if (!tabGroups.some(group => group.id === groupEditorId)) groupEditorId = null;
+    };
+    const assignGroup = (tab: Tab, group: string | null) => {
+      const ordered = tabs.map(tab => tab.state), byState = new Map(tabs.map(tab => [tab.state, tab]));
+      moveGroupedTab(ordered, tab.state, group); tabs.splice(0, tabs.length, ...ordered.map(state => byState.get(state)!)); pruneGroups();
+    };
     // A WebContentsView drops its webContents once the page is destroyed, so every access goes through here.
     const page = (view?: WebContentsView) => {
       const contents = view?.webContents as WebContents | undefined;
@@ -585,6 +597,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (isCurrent() && previous !== tab) invalidateMenu();
       if (previous && previous !== tab) { page(previous.view)?.setIgnoreMenuShortcuts(true); leaveFullscreen(previous); }
       activeId = tab.state.id;
+      const group = tabGroups.find(group => group.id === tab.state.groupId);
+      if (group) group.folded = false;
     };
     const zoom = (tab: Tab, delta: -1 | 0 | 1) => {
       const contents = page(tab.view);
@@ -651,9 +665,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (tab.host.alive(tab) && tab.navigation === navigation) tab.host.fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
       });
     };
-    const makeTab = (url = ''): Tab => ({ host, pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), movable: true, settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } });
+    const makeTab = (url = ''): Tab => ({ host, pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), groupId: null, movable: true, settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } });
     const restoredTab = (saved: SessionTab) => {
       const tab = makeTab(saved.url);
+      tab.state.groupId = saved.groupId ?? null;
       tab.state.title = saved.title; tab.state.zoom = saved.zoom;
       tab.state.settings = settingsSection(saved.url);
       tab.state.desktop = ownAddress(saved.url) ? saved.url === 'horizon://desktop/captures' ? 'captures' : desktop.list().find(project => desktopAddress(project.name) === saved.url)!.id : null;
@@ -699,7 +714,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!target) {
         if (tabs.length >= 200) throw new Error('SETTINGS_TAB_LIMIT');
         const index = tabs.findIndex(tab => tab.state.id === activeId);
-        target = newTab(); tabs.splice(tabs.indexOf(target), 1); tabs.splice(index + 1, 0, target);
+        target = newTab(); tabs.splice(tabs.indexOf(target), 1); tabs.splice(groupBoundaryIndex(tabs.map(tab => tab.state), index + 1), 0, target);
       }
       target.state.settings = section; target.state.url = settingsAddress(section); target.state.title = 'Settings';
       target.restore = undefined; target.restoring = undefined;
@@ -713,14 +728,18 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       permissions.drop(tab.state.id);
       leaveFullscreen(tab); clearFavicon(tab);
       tabs.splice(index, 1);
+      pruneGroups();
       if (activeId === tab.state.id) invalidateCaptures();
-      if (activeId === tab.state.id) activeId = tabs[Math.min(index, tabs.length - 1)]?.state.id ?? '';
+      if (activeId === tab.state.id) {
+        const nearest = nearestVisibleTab(tabs.map(tab => tab.state), tabGroups, Math.min(index, tabs.length - 1));
+        activeId = tabs[nearest]?.state.id ?? '';
+      }
       if (tab.view) {
         // A page that closed itself may already have torn its view down.
         try { if (!window.isDestroyed()) window.contentView.removeChildView(tab.view); } catch { /* Nothing left to detach. */ }
         page(tab.view)?.close();
       }
-      if (!tabs.length && isCurrent()) newTab();
+      if (!activeId && isCurrent()) newTab();
       update();
     };
     const replaceViews = () => {
@@ -1065,7 +1084,44 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'reopen-tab': {
           const saved = takeClosed(savedSession, tabs.length, ownAddress);
           if (!saved) return;
-          const target = restoredTab(saved); tabs.splice(saved.position, 0, target); activate(target); break;
+          const target = restoredTab(saved); tabs.splice(groupBoundaryIndex(tabs.map(tab => tab.state), saved.position), 0, target); activate(target); break;
+        }
+        case 'create-tab-group': {
+          const target = tabs.find(tab => tab.state.id === command.id);
+          if (!target || target.retryDownload) throw new Error('Unknown tab');
+          assignGroup(target, null);
+          const group = { id: randomUUID(), name: '', color: GROUP_COLORS[nextGroupColor]!, icon: null, folded: false };
+          nextGroupColor = (nextGroupColor + 1) % GROUP_COLORS.length;
+          tabGroups.push(group); target.state.groupId = group.id; groupEditorId = group.id; window.webContents.focus(); break;
+        }
+        case 'add-tab-to-group': case 'remove-tab-from-group': {
+          const target = tabs.find(tab => tab.state.id === command.id);
+          if (!target || target.retryDownload) throw new Error('Unknown tab');
+          const group = command.type === 'add-tab-to-group' ? tabGroups.find(group => group.id === command.group) : undefined;
+          if (command.type === 'add-tab-to-group' && !group) throw new Error('Unknown tab group');
+          assignGroup(target, group?.id ?? null);
+          if (group && activeId === target.state.id) group.folded = false;
+          break;
+        }
+        // Closing an editor whose group is already gone has nothing left to close.
+        case 'close-tab-group-editor': if (groupEditorId === command.id) groupEditorId = null; break;
+        case 'update-tab-group': case 'set-tab-group-folded': case 'open-tab-group-editor': {
+          const group = tabGroups.find(group => group.id === command.id);
+          if (!group) throw new Error('Unknown tab group');
+          if (command.type === 'update-tab-group') {
+            if (command.name !== undefined) group.name = command.name;
+            if (command.color !== undefined) group.color = command.color;
+            if (command.icon !== undefined) group.icon = command.icon;
+          } else if (command.type === 'open-tab-group-editor') { groupEditorId = group.id; window.webContents.focus(); }
+          else if (command.type === 'set-tab-group-folded') {
+            if (command.folded && tab.state.groupId === group.id) {
+              const nearest = nearestVisibleTab(tabs.map(tab => tab.state), tabGroups, tabs.indexOf(tab), group.id);
+              if (nearest < 0 && tabs.length >= 200) throw new Error('Tab limit reached');
+              if (nearest < 0) newTab(); else activate(tabs[nearest]!);
+            }
+            group.folded = command.folded;
+          }
+          break;
         }
         case 'home': {
           if (!tab.state.url) break;
@@ -1376,6 +1432,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       reconcileDesktop(); refresh(tab); update();
     };
     const suspend = () => {
+      groupEditorId = null;
       screenCapture = undefined;
       invalidateCaptures(); desktop.forget();
       forget();
@@ -1433,21 +1490,23 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const bindTab = (tab: Tab) => { tab.host = host; if (tab.view && page(tab.view)) contentsSetup(tab, tab.view); };
     const transferTab = (tab: Tab, target: TabDestination): void => {
       assertMove(tab); target.assertAccept(tab);
-      const index = tabs.indexOf(tab), previous = activeId, destinationActive = target.active()?.state.id ?? '';
+      const index = tabs.indexOf(tab), previous = activeId, previousGroup = tab.state.groupId, destinationActive = target.active()?.state.id ?? '';
       leaveFullscreen(tab);
       try {
         detachView(tab); target.attachView(tab);
         tabs.splice(index, 1); target.tabs.push(tab);
-        if (activeId === tab.state.id) activeId = tabs[Math.min(index, tabs.length - 1)]!.state.id;
+        tab.state.groupId = null;
+        if (activeId === tab.state.id) activeId = tabs[nearestVisibleTab(tabs.map(tab => tab.state), tabGroups, Math.min(index, tabs.length - 1))]?.state.id ?? '';
         target.bindTab(tab); target.activate(tab);
       } catch (error) {
         const destinationIndex = target.tabs.indexOf(tab);
         if (destinationIndex >= 0) target.tabs.splice(destinationIndex, 1);
         if (!tabs.includes(tab)) tabs.splice(index, 0, tab);
-        activeId = previous; target.select(destinationActive);
+        tab.state.groupId = previousGroup; activeId = previous; target.select(destinationActive);
         target.detachView(tab); attachView(tab); bindTab(tab);
         layout(); target.layout(); throw error;
       }
+      pruneGroups(); if (!activeId) newTab();
       for (const [id, request] of requests) if (request.tab === tab) { target.requests.set(id, request); requests.delete(id); }
       for (const [id, binding] of downloadBindings) if (binding.tab === tab) {
         const item = items.get(id);
@@ -1621,7 +1680,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!registry.profiles.some(profile => profile.id === selectedProfile)) {
         if (privateWindow) { window.close(); return; }
         selectedProfile = registry.activeId;
-        const next = runtimeFor(registry.profiles.find(profile => profile.id === selectedProfile)!); if (!next.tabs.length) next.newTab();
+        const next = runtimeFor(registry.profiles.find(profile => profile.id === selectedProfile)!); if (!next.active()) next.newTab();
       }
       layout(); publish();
     }, runtime: id => runtimeFor(registry.profiles.find(profile => profile.id === id)!) };

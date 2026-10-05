@@ -1,5 +1,9 @@
 import { readFileSync } from 'node:fs';
 
+// The suggested group colours are the roles named in the shared API; reading its source keeps this check free of a build.
+const GROUP_COLORS = [...(readFileSync('src/shared/api.ts', 'utf8').match(/GROUP_COLORS = \[([^\]]+)\]/)?.[1] ?? '').matchAll(/'(\w+)'/g)].map(match => match[1]);
+if (!GROUP_COLORS.length) throw new Error('Missing group colours.');
+
 const css = readFileSync('src/tokens.css', 'utf8');
 const high = css.match(/:root\[data-contrast="high"\]\s*\{([^}]+)\}/)?.[1];
 if (!high) throw new Error('Missing high-contrast semantic pair.');
@@ -52,6 +56,15 @@ for (const [theme, variables, light] of [['amber', standard, false], ['daylight'
   }
   check('on-accent', 'accent', 4.5);
   for (const colour of roles.filter(key => key.startsWith('profile-'))) check('on-accent', colour, 4.5);
+  // The suggested group colours are palette roles drawn as they are: the underline on the tab strip, the name on the label's wash, the dot and the chosen icon on the editor's surfaces.
+  const palette = name => variables[`palette-${theme}-${name}`];
+  for (const role of GROUP_COLORS) {
+    const colour = palette(role), strip = ratio(colour, palette('chrome')), label = ratio(colour, palette('wash'));
+    const editor = Math.min(ratio(colour, palette('surface')), ratio(colour, palette('surface-3')));
+    checks += 3;
+    if (strip < 3 || label < 4.5 || editor < 3) { failed = true; console.error(`${theme}: group ${role} ${colour} strip ${strip.toFixed(2)}:1, label ${label.toFixed(2)}:1, editor ${editor.toFixed(2)}:1`); }
+    console.log(`${theme}: group ${role} ${colour} strip ${strip.toFixed(2)}:1 (3:1), label ${label.toFixed(2)}:1 (4.5:1), editor ${editor.toFixed(2)}:1 (3:1)`);
+  }
 }
 if (failed) process.exit(1);
 console.log(`${checks} contrast pairs passed across four palettes.`);
