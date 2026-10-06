@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, nativeTheme, protocol, safeStorage, screen, session } from 'electron';
 import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { IPC } from '../src/shared/api';
 import { hardenContents, secureSession, START_URL, validateSender } from './security';
 import { serveHorizon } from './protocol';
@@ -10,6 +11,7 @@ import { readWindowSessions, writeWindowSessions } from './session-store';
 import { createSettings, resolveLanguage } from './settings';
 import { launchAddress } from './launch';
 import { darkPagesActive, setDarkPagesSwitch } from './dark-pages';
+import { createUpdates, localFeedURL } from './updates';
 
 // The approved design frame: the window and the interface scale are both sized against it.
 const DESIGN_WIDTH = 1440;
@@ -68,6 +70,13 @@ if (instance) {
     const language = resolveLanguage(settings.language, app.getLocale());
     const registry = cleanupPartitions(app.getPath('sessionData'), registryPath, readRegistry(registryPath, language), app.getPath('userData'));
     secureSession(session.defaultSession);
+    const packageType = () => { try { return readFileSync(resolve(process.resourcesPath, 'package-type'), 'utf8').trim(); } catch { return null; } };
+    const updates = createUpdates({
+      platform: process.platform, packaged: app.isPackaged, appImage: Boolean(process.env.APPIMAGE), packageType: process.platform === 'linux' && app.isPackaged ? packageType() : null,
+      feed: app.isPackaged ? localFeedURL(process.env.HORIZON_UPDATE_URL) : undefined,
+      // The updater is loaded only when a check runs, so development builds never touch it.
+      load: async () => (createRequire(__filename)('electron-updater') as typeof import('electron-updater')).autoUpdater,
+    });
     const tokens = readFileSync(resolve(__dirname, '../tokens.css'), 'utf8');
     if (darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors)) setDarkPagesSwitch(app.commandLine, true);
     const background = () => {
@@ -118,7 +127,7 @@ if (instance) {
       nativeTheme.on('updated', systemTheme);
       window.once('closed', () => nativeTheme.removeListener('updated', systemTheme));
       window.removeMenu();
-      const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry, undefined, { id, profileId, privateWindow, fresh, empty: Boolean(adoption),
+      const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry, undefined, { id, profileId, privateWindow, fresh, empty: Boolean(adoption), updates,
         openWindow: (profileId, privateWindow, origin) => { void createWindow(profileId, privateWindow, origin).catch(() => console.error('Window creation failed')); },
         moveWindow: async (profileId, privateWindow, origin, adopt, point) => { await createWindow(profileId, privateWindow, origin, undefined, true, { adopt, point }); } });
       // A destroyed window can no longer hand out its webContents, so the entry's key is kept from now.
@@ -189,6 +198,7 @@ if (instance) {
     }
     if (saved.length) for (const { id, profileId } of saved) await createWindow(profileId, false, undefined, id, false);
     else await createWindow(registry.activeId, false, undefined, undefined, false);
+    updates.start();
   }).catch((error: unknown) => {
     console.error(error);
     app.exit(1);

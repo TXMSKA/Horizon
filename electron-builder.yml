@@ -1,0 +1,45 @@
+appId: com.txmska.horizon
+productName: Horizon
+copyright: TXMSKA
+asar: true
+directories:
+  output: release
+# The renderer is bundled into dist, so the interface libraries stay out of the package.
+files:
+  - dist/**
+  - package.json
+  - "!node_modules/{react,react-dom,scheduler,lucide-react}/**"
+icon: assets/icon/horizon-icon-1024.png
+# Fuses are flipped in this hook because the built-in electronFuses option cannot set wasmTrapHandlers or per-platform values.
+afterPack: scripts/after-pack.cjs
+win:
+  target:
+    - target: nsis
+      arch: x64
+  # Builds are unsigned: resource editing (icon, version info) stays on, code signing is skipped.
+  signAndEditExecutable: true
+  signExecutable: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Horizon
+  deleteAppDataOnUninstall: false
+linux:
+  target:
+    - target: AppImage
+      arch: x64
+    - target: deb
+      arch: x64
+  category: Network
+  maintainer: TXMSKA
+  synopsis: Horizon browser
+  executableName: horizon
+publish:
+  provider: github
+  owner: TXMSKA
+  repo: horizon-releases
+  releaseType: draft

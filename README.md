@@ -82,8 +82,17 @@ Session, storage, protocol and preload boundaries are documented in the
 [Electron checklist](docs/security/electron-checklist.md). Dependency and
 installer notes are in [dependencies](docs/security/dependencies.md).
 
-Task 012 applies `npm run fuses -- <packaged-binary>` after packaging and
-before signing. Windows packaging must embed ASAR integrity metadata first;
-Linux skips that unsupported fuse. The development binary stays unmodified.
-Windows Smart App Control blocks it because it is unsigned, so development
-on Windows needs Smart App Control off until signed builds are available.
+Installer builds flip the Electron fuses during packaging in
+`scripts/after-pack.cjs`; `npm run fuses -- <packaged-binary>` applies the same
+values to an unsigned packaged binary by hand. Windows packaging embeds ASAR
+integrity metadata first; Linux skips that unsupported fuse. The development
+binary stays unmodified. Windows Smart App Control blocks it because it is
+unsigned, so development on Windows needs Smart App Control off until signed
+builds are available.
+
+## Installers
+
+`npm run dist:win` builds the Windows installer and `npm run dist:linux` the
+AppImage and deb package, in `release/`. Builds are unsigned and experimental.
+Installed builds update themselves from published releases. The upgrade and
+release routine is in [Electron upgrades and releases](docs/electron-upgrade.md).

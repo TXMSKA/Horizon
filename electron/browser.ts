@@ -19,6 +19,7 @@ import type { ThemeSettings } from './settings';
 import { resolvedDownloadsFolder, resolveLanguage } from './settings';
 import { text } from '../src/copy';
 import { createDefaultBrowser } from './default-browser';
+import type { Updates } from './updates';
 import { isLocalHTMLURL } from './launch';
 import { PageMenuSession } from './context-menu';
 import { cleanupPartitions, isProfileId, makeProfile, migrateStore, PROFILE_LIMIT, profileName, profileStorePath, readRegistry, removeProfileDirectory, writeRegistry } from './profiles';
@@ -120,7 +121,7 @@ export function restoredWindows(userData: string, registry: ProfileRegistry) {
   }
   return [...windows].map(([id, profileId]) => ({ id, profileId }));
 }
-export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; empty?: boolean; moveWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow, adopt: (destinationId: string) => void, point?: { x: number; y: number }) => Promise<void>; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void }
+export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; empty?: boolean; updates?: Pick<Updates, 'state' | 'subscribe' | 'restart'>; moveWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow, adopt: (destinationId: string) => void, point?: { x: number; y: number }) => Promise<void>; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void }
 
 // Development builds can point the importers at synthetic browser folders; shipped builds always read the user's own.
 const importEnvironment = () => ({ local: app.isPackaged ? process.env.LOCALAPPDATA : process.env.HORIZON_IMPORT_LOCALAPPDATA ?? process.env.LOCALAPPDATA, roaming: app.isPackaged ? process.env.APPDATA : process.env.HORIZON_IMPORT_APPDATA ?? process.env.APPDATA });
@@ -157,7 +158,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   };
   const current = () => runtimes.get(selectedProfile)!;
   const state = (): BrowserState => ({
-    ...current().state(), firstRun: !settings.onboarded && !privateWindow, version: app.getVersion(), activeProfileId: selectedProfile, privateWindow,
+    ...current().state(), firstRun: !settings.onboarded && !privateWindow, version: app.getVersion(), update: options.updates?.state ?? { status: 'unavailable' }, activeProfileId: selectedProfile, privateWindow,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
     quickAccess: settings.quickAccess, showCapture: settings.showCapture,
@@ -176,6 +177,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const defaultBrowser = defaultBrowserOverride ?? createDefaultBrowser({ platform: process.platform, isPackaged: app.isPackaged, execPath: process.execPath, openExternal: url => shell.openExternal(url), changed: publish });
   const refreshDefaultBrowser = () => { void defaultBrowser.refresh().then(publish); };
   window.on('focus', refreshDefaultBrowser);
+  const unsubscribeUpdates = options.updates?.subscribe(publish);
   const layout = () => { for (const runtime of runtimes.values()) runtime.layout(); };
   const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); shared.registry = next; registry = next; for (const owner of shared.owners.values()) owner.registryChanged(); };
   const runtimeFor = (profile: Profile) => {
@@ -224,6 +226,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         options.openWindow(selectedProfile, command.type === 'new-private-window', window); return;
       case 'pin-app': case 'unpin-app': settings.setAppPinned(command.id, command.type === 'pin-app'); publish(); return;
       case 'register-default-browser': return defaultBrowser.register().then(publish);
+      case 'restart-to-update': if (!options.updates) throw new Error('Updates are unavailable'); options.updates.restart(); return;
       case 'set-search-engine': settings.setSearchEngine(command.value); publish(); return;
       case 'set-on-start': settings.setOnStart(command.value); publish(); return;
       case 'set-language': settings.setLanguage(command.value); publish(); return;
@@ -1677,6 +1680,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!shared.owners.size) { for (const data of shared.profiles.values()) data.desktop.dispose(); groups.delete(userData); }
     app.removeListener('before-quit', beforeQuit);
     window.removeListener('focus', refreshDefaultBrowser);
+    unsubscribeUpdates?.();
     const handlers = chromeHandlers.get(chromeContents); chromeHandlers.delete(chromeContents);
     for (const channel of handlers?.keys() ?? []) if (![...chromeHandlers.values()].some(map => map.has(channel))) ipcMain.removeHandler(channel);
   });
