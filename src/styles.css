@@ -177,6 +177,10 @@ kbd { border-radius: var(--radius-badge); color: var(--text-secondary); font-fam
   .icon-button, .shortcuts a, .control-switch { min-width: var(--target-touch); min-height: var(--target-touch); }
   .site-popover button.site-permission-row, .site-permission-actions .profile-action, .site-permission-menu > button { min-height: var(--target-touch); }
 }
+
+.extension-action { position: relative; }
+.extension-action .extension-icon { width: var(--size-28); height: var(--size-28); }
+.extension-action-badge { position: absolute; bottom: 0; right: 0; max-width: 100%; padding-inline: var(--space-2); border-radius: var(--radius-badge); background: var(--accent); color: var(--on-accent); font-size: var(--type-caption); line-height: var(--line-caption); overflow: hidden; white-space: nowrap; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) {
   .spinner, .loading-line.loading::after { animation: none; }
   .loading-line.loading::after { width: 100%; }

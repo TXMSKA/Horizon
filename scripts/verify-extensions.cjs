@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { appendFileSync, mkdtempSync, mkdirSync, writeFileSync } = require('node:fs');
 const { resolve, dirname } = require('node:path');
 const { spawn } = require('node:child_process');
+const { createServer } = require('node:http');
 const { app, BrowserWindow, session, protocol, webContents, ipcMain } = require('electron');
 
 const runtime = resolve(__dirname, '../.runtime');
@@ -88,6 +89,31 @@ if (!phase) {
     const command = value => window.webContents.executeJavaScript(`window.horizon.command(${JSON.stringify(value)})`);
     const target = session.fromPartition(registry.profiles[0].partition), manager = existingExtensions(target);
     await manager.ready;
+    const local = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+      response.end('<!doctype html><html><head><title>Extension runtime test</title><style>body{background:white;color:black}</style></head><body><h1>Extension runtime test</h1><a href="/next">Next</a></body></html>');
+    });
+    await new Promise(done => local.listen(0, '127.0.0.1', done));
+    const localURL = `http://127.0.0.1:${local.address().port}/`;
+    const workerRunning = id => Object.values(target.serviceWorkers.getAllRunning()).some(info => info.scope === `chrome-extension://${id}/`);
+    const startWorker = async (name, id) => {
+      // Mirrors Horizon's own retry: a just-registered worker's first start can abort.
+      let worker;
+      for (let attempt = 0; !worker; attempt++) {
+        try { worker = await target.serviceWorkers.startWorkerForScope(`chrome-extension://${id}/`); }
+        catch (error) { if (attempt >= 5) throw error; await delay(500 * (attempt + 1)); }
+      }
+      await until(() => workerRunning(id), `${name} service worker did not start`);
+      assert.equal(manager.list().find(extension => extension.id === id)?.failed, false);
+      report(`${name}: service worker started`);
+    };
+    const checkDarkPage = async () => {
+      await command({ type: 'navigate', input: localURL });
+      let page;
+      await until(() => { page = window.contentView.children.find(view => view.webContents?.getURL() === localURL)?.webContents; return page && !page.isLoading(); }, 'Local test page did not load');
+      await until(() => page.executeJavaScript(`Boolean(document.querySelector('style.darkreader')) && getComputedStyle(document.body).backgroundColor !== 'rgb(255, 255, 255)'`), 'Dark Reader did not change the local test page');
+      report('Dark Reader: its content script inserted a darkreader stylesheet and changed the local page background');
+    };
 
     if (!restart) {
       for (const [name, id] of samples) {
@@ -116,17 +142,10 @@ if (!phase) {
         await command({ type: 'answer-extension-install', id: warning.requestId, allow: true });
         const extension = await installation;
         assert.equal(extension.id, id); assert.ok(target.extensions.getExtension(id));
-        const manifest = extension.manifest;
-        // Installed anyway on purpose: its worker needs APIs Electron lacks, so it is expected not to run.
-        if (warning.unsupported.length) report(`${name}: installed anyway ${extension.version}; not expected to run`);
-        else if (manifest.background?.service_worker) {
-          const worker = await target.serviceWorkers.startWorkerForScope(`chrome-extension://${id}/`);
-          assert.ok(worker); assert.ok(Object.values(target.serviceWorkers.getAllRunning()).some(info => info.scope.includes(id)));
-          report(`${name}: loaded ${extension.version}; background worker running`);
-        } else {
-          await until(() => webContents.getAllWebContents().some(contents => contents.getURL().startsWith(`chrome-extension://${id}/`) && contents.getType() === 'backgroundPage'), name + ' background did not start');
-          report(`${name}: loaded ${extension.version}; background page running`);
-        }
+        // uBlock Origin Lite is the unsupported sample: its worker needs declarativeNetRequest, which Electron lacks, so it is installed anyway and not expected to run.
+        if (id === samples[0][1]) report('uBlock Origin Lite: installed anyway; not expected to run without declarativeNetRequest');
+        else await startWorker(name, id);
+        if (id === samples[1][1]) await checkDarkPage();
       }
       await window.webContents.executeJavaScript('document.querySelector("[aria-controls=extensions-popover]").click()');
       await until(() => window.webContents.executeJavaScript('Boolean(document.querySelector(".extensions-popover"))'), 'Extensions popover did not open');
@@ -158,15 +177,42 @@ if (!phase) {
       assert.equal(target.extensions.getExtension(samples[1][1]), null);
       await command({ type: 'set-extension-enabled', id: samples[1][1], enabled: true });
       assert.ok(target.extensions.getExtension(samples[1][1]));
+      await startWorker(...samples[1]); await checkDarkPage();
       await command({ type: 'set-extension-enabled', id: samples[1][1], enabled: false });
-      await command({ type: 'set-extension-pinned', id: samples[0][1], pinned: true });
-      report('Dark Reader: off, on, then off; uBlock Origin Lite: pinned');
+      await command({ type: 'set-extension-pinned', id: samples[2][1], pinned: true });
+      await until(() => window.webContents.executeJavaScript('Boolean(document.querySelector(".extension-action:not(:disabled)"))'), 'Pinned library action did not render');
+      await window.webContents.executeJavaScript('document.querySelector(".extension-action").click()');
+      let popup;
+      const actionPopup = () => webContents.getAllWebContents().find(contents => contents.getURL().startsWith(`chrome-extension://${samples[2][1]}/`) && contents.getType() !== 'backgroundPage');
+      await until(() => { popup = actionPopup(); return popup && !popup.isLoading(); }, 'Library action popup did not open');
+      const beforeTabs = (await state()).tabs.length;
+      const created = await popup.executeJavaScript(`chrome.tabs.create({url:${JSON.stringify(localURL)},active:false})`);
+      assert.equal((await state()).tabs.length, beforeTabs + 1);
+      const queried = await popup.executeJavaScript('chrome.tabs.query({currentWindow:true})');
+      assert.ok(queried.some(tab => tab.id === created.id && tab.url === localURL));
+      assert.equal(queried.length, (await state()).tabs.length);
+      await popup.executeJavaScript(`chrome.action.setBadgeText({text:'7',tabId:${created.id}})`);
+      await popup.executeJavaScript(`chrome.tabs.update(${created.id},{active:true})`);
+      await until(async () => (await state()).extensions.find(extension => extension.id === samples[2][1])?.action?.badge === '7', 'Tab action badge did not reach Horizon');
+      // Selecting a page can dismiss the native popup. Reopen it before using its extension context again.
+      manager.closePopup();
+      await window.webContents.executeJavaScript('document.querySelector(".extension-action").click()');
+      await until(() => { popup = actionPopup(); return popup && !popup.isLoading(); }, 'Library action popup did not reopen');
+      await popup.executeJavaScript(`chrome.tabs.remove(${created.id})`);
+      assert.equal((await state()).tabs.length, beforeTabs);
+      manager.closePopup();
+      report('Pinned action: library popup, real tab create/query/select/remove and tab-specific badge passed');
+      report('Dark Reader: off, on, then off; Vimium: pinned');
       const unsupported = (await state()).extensions.find(extension => extension.id === samples[0][1]);
       assert.ok(unsupported.unsupported.includes('declarativeNetRequest'));
-      report('Unsupported decision: uBlock Origin Lite requires declarativeNetRequest; explicit Install anyway accepted');
+      assert.equal(unsupported.unsupported.includes('action'), false);
+      assert.equal(unsupported.unsupported.includes('commands'), false);
+      assert.equal(unsupported.unsupported.includes('alarms'), false);
+      report('Unsupported-warning sample: uBlock Origin Lite still requires declarativeNetRequest; action, commands and alarms no longer warn');
       browser.flush();
       report('Restarting Electron with the same temporary user data');
       clearTimeout(timer);
+      local.close();
       app.exit(0);
     } else {
       const restored = (await state()).extensions;
@@ -176,11 +222,13 @@ if (!phase) {
         assert.equal(entry.enabled, id !== samples[1][1]);
         assert.equal(Boolean(target.extensions.getExtension(id)), entry.enabled);
       }
-      assert.equal(restored.find(extension => extension.id === samples[0][1]).pinned, true);
+      assert.equal(restored.find(extension => extension.id === samples[2][1]).pinned, true);
       assert.equal(session.fromPartition(registry.profiles[1].partition).extensions.getAllExtensions().length, 0);
-      report('Restart: 3 installed; uBlock Origin Lite and Vimium on; Dark Reader off; pin preserved; second profile empty');
+      await startWorker(...samples[2]);
+      assert.ok(manager.list().find(extension => extension.id === samples[2][1]).action);
+      report('Restart: 3 installed; uBlock Origin Lite and Vimium on; Dark Reader off; Vimium pin preserved and running; second profile empty');
       report('Extension runtime verification passed.');
-      clearTimeout(timer); browser.flush(); app.exit(0);
+      clearTimeout(timer); local.close(); browser.flush(); app.exit(0);
     }
   }).catch(error => {
     report(`FAIL: ${error instanceof Error ? error.message : 'Verification failed'}`);

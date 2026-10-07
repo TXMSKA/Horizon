@@ -122,7 +122,7 @@ export function restoredWindows(userData: string, registry: ProfileRegistry) {
   }
   return [...windows].map(([id, profileId]) => ({ id, profileId }));
 }
-export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; empty?: boolean; moveWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow, adopt: (destinationId: string) => void, point?: { x: number; y: number }) => Promise<void>; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void }
+export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; empty?: boolean; extensionURLs?: string[]; moveWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow, adopt: (destinationId: string) => void, point?: { x: number; y: number }) => Promise<void>; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void; extensionWindow?: (profileId: string, details: chrome.windows.CreateData, origin: BrowserWindow) => Promise<BrowserWindow> }
 
 // Development builds can point the importers at synthetic browser folders; shipped builds always read the user's own.
 const importEnvironment = () => ({ local: app.isPackaged ? process.env.LOCALAPPDATA : process.env.HORIZON_IMPORT_LOCALAPPDATA ?? process.env.LOCALAPPDATA, roaming: app.isPackaged ? process.env.APPDATA : process.env.HORIZON_IMPORT_APPDATA ?? process.env.APPDATA });
@@ -233,7 +233,17 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       case 'set-extension-pinned': return existingExtensions(current().webSession)!.setPinned(command.id, command.pinned);
       case 'remove-extension': return existingExtensions(current().webSession)!.remove(command.id);
       case 'check-extension-updates': return existingExtensions(current().webSession)!.checkUpdates();
-      case 'open-extension': return existingExtensions(current().webSession)!.openPopup(command.id, window);
+      case 'open-extension': {
+        const runtime = current(), tab = runtime.active();
+        if (!tab) throw new Error('EXTENSIONS_UNAVAILABLE');
+        runtime.ensureView(tab);
+        const contents = runtime.page(tab.view)!;
+        const zoom = window.webContents.getZoomFactor(), bounds = window.getContentBounds();
+        const anchor = command.anchor ?? { x: Math.max(0, Math.floor(bounds.width / zoom) - 64), y: 64, width: 32, height: 32 };
+        if (anchor.x + anchor.width > bounds.width / zoom || anchor.y + anchor.height > bounds.height / zoom) throw new Error('Invalid extension anchor');
+        const scaled = { x: Math.round(anchor.x * zoom), y: Math.round(anchor.y * zoom), width: Math.round(anchor.width * zoom), height: Math.round(anchor.height * zoom) };
+        return existingExtensions(runtime.webSession)!.openPopup(command.id, window, contents, scaled);
+      }
       case 'move-tab-to-window': {
         const source = current(), tab = source.tabs.find(tab => tab.state.id === command.id);
         if (!tab) throw new Error('Unknown tab');
@@ -464,7 +474,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
 
     const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
-      extensions: extensions?.list() ?? [], extensionsUpdating: extensions?.status().updating ?? false, extensionsError: extensions?.status().storageError ?? false,
+      extensions: extensions?.list(page(active()?.view)) ?? [], extensionsUpdating: extensions?.status().updating ?? false, extensionsError: extensions?.status().storageError ?? false,
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
     function privateSite(url: string) {
@@ -609,6 +619,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (window.isDestroyed()) return;
       const selected = active();
       if (isCurrent() && selected) resumeTab(selected);
+      if (extensions && selected?.view) extensions.selectTab?.(selected.view.webContents);
       const { width, height } = window.getContentBounds();
       const top = Math.min(height, Math.ceil(area.top * window.webContents.getZoomFactor()));
       for (const tab of tabs) {
@@ -617,10 +628,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const y = fullscreen ? 0 : top;
         const panelWidth = !fullscreen && desktopPanel.open ? Math.ceil(400 * window.webContents.getZoomFactor()) : 0;
         tab.view.setBounds({ x: 0, y, width: Math.max(0, width - panelWidth), height: Math.max(0, height - y) });
-        tab.view.setVisible(isCurrent() && tab.state.id === activeId && Boolean(tab.state.url) && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
+        tab.view.setVisible(isCurrent() && tab.state.id === activeId && Boolean(tab.state.url) && !tab.state.desktop && !tab.state.settings && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
       }
     };
-    const update = () => { persistSession(); layout(); publish(); };
+    const update = () => { for (const tab of tabs) page(tab.view)?.emit('tab-updated'); persistSession(); layout(); publish(); };
     const host: TabHost = { alive: tab => !disposed && !closing && tabs.includes(tab), update, publish, fail: (tab, description) => fail(tab, description), close: tab => closeTab(tab), count: () => tabs.length };
     const downloadBindings = new Map<string, DownloadBinding>();
     const downloadOwner: DownloadOwner = { disposed: () => disposed, store, items, reserved, bindings: downloadBindings, trusted: trustedDownloads, persist, publish };
@@ -703,7 +714,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       refresh(tab); update();
     };
     const load = (tab: Tab, url: string, launch = false) => {
-      if (!isAllowedURL(url) && !(launch && isLocalHTMLURL(url))) throw new Error('Invalid navigation URL');
+      if (!isAllowedURL(url) && !(extensions && isExtensionURL(webSession, url)) && !(launch && isLocalHTMLURL(url))) throw new Error('Invalid navigation URL');
       tab.restore = undefined; tab.restoring = undefined;
       tab.state.desktop = null; tab.state.desktopItem = null; tab.state.settings = null;
       if (active() === tab) invalidateCaptures();
@@ -766,6 +777,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (foreground || !activeId) activate(tab);
       if (contents) { ensureView(tab, contents); tab.state.loading = contents.isLoading(); }
       else if (url) load(tab, url, launch);
+      else if (extensions?.hasEnabled?.()) ensureView(tab);
       update();
       return tab;
     };
@@ -796,6 +808,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         activeId = tabs[nearest]?.state.id ?? '';
       }
       if (tab.view) {
+        extensions?.untrackTab?.(tab.view.webContents);
         // A page that closed itself may already have torn its view down.
         try { if (!window.isDestroyed()) window.contentView.removeChildView(tab.view); } catch { /* Nothing left to detach. */ }
         page(tab.view)?.close();
@@ -852,6 +865,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       tab.unbind?.(); tab.host = host;
       const contents = view.webContents;
       if (extensions) {
+        extensions.trackTab?.(contents, window);
         const detach = extensions.attach({ contents, warning: warning => askExtension(profile.id, warning) });
         contents.once('destroyed', detach);
       }
@@ -877,7 +891,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         invalidateMenu();
         const menu = pageMenu.open(tab.state.id, params, {
           back: contents.navigationHistory.canGoBack(), forward: contents.navigationHistory.canGoForward(), reload: Boolean(tab.state.url),
-        }, view.getBounds(), window.webContents.getZoomFactor(), privateWindow);
+        }, view.getBounds(), window.webContents.getZoomFactor(), privateWindow, extensions?.contextMenuItems?.(contents, params).map(item => ({ item, window })));
         if (!menu) return;
         window.webContents.focus();
         window.webContents.send(IPC.contextMenu, menu);
@@ -928,6 +942,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       });
       on('did-navigate', (_event, url) => {
         if (tab.view !== view) return;
+        if (url === 'about:blank' && (tab.restore || tab.state.desktop || tab.state.settings)) return;
         navigationState.pending = undefined;
         permissions.drop(tab.state.id); tab.navigating = false;
         tab.topURL = url;
@@ -958,7 +973,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         });
       });
       on('page-title-updated', (_event, title) => {
-        if (tab.view !== view) return;
+        if (tab.view !== view || tab.restore || tab.state.desktop || tab.state.settings) return;
         tab.state.title = title.slice(0, 1024);
         const entry = store.history.find(entry => entry.url === tab.state.url);
         if (recordsBrowsing(privateWindow) && entry && !clearingData && !closing && !disposed) { entry.title = tab.state.title; persist(); }
@@ -987,6 +1002,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         contents.setIgnoreMenuShortcuts(Boolean(input.isComposing) || tab.view !== view || !isCurrent() || tab.state.id !== activeId);
         if (tab.view !== view || !isCurrent() || tab.state.id !== activeId) return;
         if (input.type !== 'keyDown' || input.isComposing) return;
+        if (extensions?.commandInput?.(input, contents)) { event.preventDefault(); return; }
         const shortcut = browserShortcut(input);
         if (!shortcut || !browserReservedShortcut(shortcut, tab.state.fullscreen)) return;
         event.preventDefault();
@@ -1078,7 +1094,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const name = id === 'captures' ? 'Captures' : desktop.get(id).name;
       if (item) desktop.item(id === 'captures' ? null : id, item);
       const tab = active();
-      const target = tabs.find(tab => tab.state.desktop === id) ?? (tab && !tab.view && !tab.state.url && !tab.state.desktop && !tab.state.settings ? tab : newTab());
+      const target = tabs.find(tab => tab.state.desktop === id) ?? (tab && (!tab.view || !tab.committed && !tab.restore) && !tab.state.url && !tab.state.desktop && !tab.state.settings ? tab : newTab());
       target.state.desktop = id; target.state.desktopItem = item ?? null;
       target.restore = undefined; target.restoring = undefined;
       target.state.url = id === 'captures' ? 'horizon://desktop/captures' : desktopAddress(name); target.state.title = name;
@@ -1324,6 +1340,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'dismiss-context-menu': pageMenu.dismiss(command.id); window.webContents.send(IPC.contextMenu, null); break;
         case 'context-menu': {
           if (!contents) throw new Error('Page is unavailable');
+          if (command.item.startsWith('extension:')) {
+            pageMenu.invokeExtension(command.id, command.item, tab.state.id);
+            window.webContents.send(IPC.contextMenu, null); break;
+          }
           const params = pageMenu.take(command.id, command.item, tab.state.id);
           window.webContents.send(IPC.contextMenu, null);
           if (command.item.startsWith('spell:')) {
@@ -1535,11 +1555,36 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       attempt(() => webSession.removeListener('will-download', downloadHandler));
       detachSession();
       detachExtensions?.();
+      detachExtensionWindow?.();
       if (privateWindow) desktop.dispose(true);
       requests.clear();
     };
+    const detachExtensionWindow = extensions?.attachWindow?.({ window, current: () => isCurrent() && !disposed && !closing,
+      // Give dormant and chrome tabs stable ids only when extension code can query them. Their pages stay unloaded.
+      materializeTabs: () => { for (const tab of tabs) ensureView(tab); layout(); },
+      updateTab: (contents, url) => { const tab = tabs.find(tab => page(tab.view) === contents); if (!tab) throw new Error('Unknown extension tab'); load(tab, url); },
+      createTab: details => {
+        if (details.url && !isAllowedURL(details.url) && !isExtensionURL(webSession, details.url)) throw new Error('Invalid extension tab URL');
+        const foreground = details.active !== false;
+        if (foreground && !isCurrent()) switchProfile(profile.id);
+        const tab = newTab(details.url, foreground); ensureView(tab);
+        if (details.index !== undefined) {
+          tabs.splice(tabs.indexOf(tab), 1); tabs.splice(Math.max(0, Math.min(tabs.length, details.index)), 0, tab); update();
+        }
+        return tab.view!.webContents;
+      },
+      selectTab: contents => { const tab = tabs.find(tab => page(tab.view) === contents); if (!tab) return; if (!isCurrent()) switchProfile(profile.id); activate(tab); update(); },
+      removeTab: contents => { const tab = tabs.find(tab => page(tab.view) === contents); if (tab) closeTab(tab); },
+      assignTabDetails: (details, contents) => {
+        const tab = tabs.find(tab => page(tab.view) === contents); if (!tab) return;
+        details.index = tabs.indexOf(tab); details.active = tab.state.id === activeId; details.discarded = Boolean(tab.restore);
+        details.title = tab.state.title; details.url = tab.state.url || 'about:blank';
+      },
+      createWindow: async details => { if (!options.extensionWindow) throw new Error('Window creation is unavailable'); return options.extensionWindow(profile.id, details, window); },
+    });
     for (const { tab: saved, active: selected } of lazySession(savedSession, privateWindow || options.fresh ? 'new-page' : settings.onStart)) {
       const tab = restoredTab(saved); tabs.push(tab); if (selected) activeId = tab.state.id;
+      if (extensions?.hasEnabled?.()) ensureView(tab);
     }
     const assertMove = (tab: Tab) => {
       if (disposed || closing || window.isDestroyed() || shared.quitting) throw new Error('Profile is closed');
@@ -1585,7 +1630,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       invalidateMenu(tab.state.id); invalidateCaptures();
       update(); target.update(); flushSession(); target.flushSession();
     };
-    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, importBrowserData, clearOnClose, stopForClear, assertMove, assertAccept, attachView, detachView, bindTab, activate, select: (id: string) => { activeId = id; }, transferTab, requests, permissions, downloadBindings, downloadOwner, update, flushSession };
+    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, importBrowserData, clearOnClose, stopForClear, assertMove, assertAccept, attachView, detachView, bindTab, activate, select: (id: string) => { activeId = id; }, transferTab, requests, permissions, downloadBindings, downloadOwner, update, flushSession, ensureView };
 
 
   }
@@ -1763,7 +1808,9 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (runtime.page(runtime.active()?.view)?.isFocused()) runtime.dispatchShortcut(shortcut);
     },
   }))));
-  initial.persist(); if (!initial.tabs.length && !options.empty) initial.newTab(); else layout();
+  initial.persist();
+  if (options.extensionURLs?.length) for (const url of options.extensionURLs) initial.newTab(url, false);
+  if (!initial.tabs.length && !options.empty) initial.newTab(); else layout();
   if (!privateWindow) {
     const extensions = existingExtensions(initial.webSession)!;
     void extensions.ready.then(() => extensions.startUpdates()).catch(() => { publish(); });

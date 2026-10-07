@@ -2,6 +2,7 @@
   "name": "horizon",
   "version": "0.1.0",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "description": "Horizon standalone browser",
   "main": "dist/electron/main.js",
   "engines": {
@@ -24,6 +25,7 @@
   },
   "dependencies": {
     "@ghostery/adblocker": "2.18.2",
+    "electron-chrome-extensions": "4.9.0",
     "electron-chrome-web-store": "0.13.0",
     "lucide-react": "1.48.0",
     "react": "19.3.0",

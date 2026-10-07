@@ -59,8 +59,8 @@ export interface BlockedCounts { ads: number; trackers: number; cookies: number 
 export interface BrowserStore { version: 5; history: HistoryEntry[]; favorites: FavoritesTree; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { id: string; groupId: string | null; movable: boolean; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
 export interface BrowserState { extensions: ExtensionState[]; extensionWarning: ExtensionWarning | null; extensionsUpdating: boolean; extensionsError: boolean; firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
-export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
-export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
+export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}` | `extension:${string}`;
+export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean; label?: string; checked?: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
 export type BrowserShortcut = 'new-window' | 'new-private-window' | 'reopen-tab' | 'focus-search' | 'home' | 'clear-browsing-data' | 'reload-no-cache' | 'find-next' | 'find-previous' | 'print' | 'menu' | 'capture' | 'focus-address' | 'new-tab' | 'close-tab' | 'next-tab' | 'previous-tab' | 'back' | 'forward' | 'reload' | 'stop' | 'history' | 'downloads' | 'favorites' | 'fullscreen' | 'bookmark' | 'find' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | `tab-${number}`;
 export type DesktopItemKind = 'note' | 'text' | 'area' | 'page' | 'link';
@@ -80,7 +80,8 @@ export type DesktopError = 'DESKTOP_COMMAND_INVALID' | 'DESKTOP_LOCKED' | 'FOLDE
 export type BrowserCommand =
   | { type: 'set-extension-enabled'; id: string; enabled: boolean }
   | { type: 'set-extension-pinned'; id: string; pinned: boolean }
-  | { type: 'remove-extension' | 'open-extension'; id: string }
+  | { type: 'remove-extension'; id: string }
+  | { type: 'open-extension'; id: string; anchor?: CaptureRect }
   | { type: 'check-extension-updates' }
   | { type: 'answer-extension-install'; id: string; allow: boolean }
   | { type: 'set-on-start'; value: OnStart }
@@ -161,7 +162,7 @@ export type BrowserCommand =
   | { type: 'delete-bookmark'; url: string }
   | { type: 'cancel-download' | 'show-download' | 'remove-download' | 'retry-download'; id: string };
 export interface ContentArea { top: number; hidden: boolean }
-export interface ExtensionState { id: string; name: string; description: string; version: string; enabled: boolean; pinned: boolean; icon: number[] | null; unsupported: string[]; permissions: string[]; failed: boolean }
+export interface ExtensionState { id: string; name: string; description: string; version: string; enabled: boolean; pinned: boolean; icon: number[] | null; action?: { title: string; badge: string; icon: number[] | null }; unsupported: string[]; permissions: string[]; failed: boolean }
 export interface ExtensionWarning { requestId: string; id: string; name: string; unsupported: string[]; permissions: string[] }
 
 export interface HorizonAPI {

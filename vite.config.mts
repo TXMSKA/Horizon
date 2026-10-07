@@ -1,6 +1,7 @@
 import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { defineConfig } from 'vite';
+import { packageChromeExtensions } from './scripts/package-chrome-extensions.mjs';
 
 export default defineConfig({
   base: '/',
@@ -13,6 +14,7 @@ export default defineConfig({
       // The window and taskbar show the app icon with its tile; dist stays self-contained for packaging.
       copyFileSync('assets/icon/horizon-icon-256.png', 'dist/icon.png');
       const require = createRequire(import.meta.url);
+      packageChromeExtensions();
       const store = readFileSync(require.resolve('electron-chrome-web-store/preload'), 'utf8');
       if (!store.includes('var DEBUG = true;')) throw new Error('Review the store preload before changing its version');
       // Keep the vendor bridge out of other origins, subframes and logs that could contain login data.

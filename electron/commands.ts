@@ -70,7 +70,8 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
   switch (type) {
     case 'set-extension-enabled': valid = exact(['id', 'enabled']) && extensionId(command.id) && typeof command.enabled === 'boolean'; break;
     case 'set-extension-pinned': valid = exact(['id', 'pinned']) && extensionId(command.id) && typeof command.pinned === 'boolean'; break;
-    case 'remove-extension': case 'open-extension': valid = exact(['id']) && extensionId(command.id); break;
+    case 'remove-extension': valid = exact(['id']) && extensionId(command.id); break;
+    case 'open-extension': valid = exact(['id'], ['anchor']) && extensionId(command.id) && (command.anchor === undefined || validCaptureRect(command.anchor, { width: 32768, height: 32768 })); break;
     case 'check-extension-updates': valid = exact([]); break;
     case 'answer-extension-install': valid = exact(['id', 'allow']) && isProfileId(command.id) && typeof command.allow === 'boolean'; break;
     case 'create-tab-group': case 'remove-tab-from-group': valid = exact(['id']) && string(command.id, 128); break;

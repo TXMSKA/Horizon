@@ -1,4 +1,5 @@
-import { BrowserWindow, ipcMain, nativeImage, session } from 'electron';
+import { ipcMain, nativeImage, session } from 'electron';
+import type { BrowserWindow, BaseWindow } from 'electron';
 import type { IpcMainInvokeEvent, Session, WebContents } from 'electron';
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
@@ -8,6 +9,21 @@ import type { ExtensionState, ExtensionWarning, Profile } from '../src/shared/ap
 import { extensionAsset, extensionDirectory, extensionId, extensionStatePath, isWebStoreURL, manifestAccess, unsupportedPermissions } from './extension-policy';
 import { readStoreFile, writeStoreFile } from './store';
 import { removeProfileDirectory } from './profiles';
+import { createExtensionRuntime, registerAlarms, runtimeDetails } from './extension-runtime';
+import type { ActionDetails } from './extension-runtime';
+import { browserShortcut } from '../src/shared/shortcuts';
+
+interface ExtensionWindow {
+  window: BrowserWindow;
+  current(): boolean;
+  materializeTabs(): void;
+  createTab(details: chrome.tabs.CreateProperties): WebContents;
+  updateTab(contents: WebContents, url: string): void;
+  selectTab(contents: WebContents): void;
+  removeTab(contents: WebContents): void;
+  assignTabDetails(details: chrome.tabs.Tab, contents: WebContents): void;
+  createWindow(details: chrome.windows.CreateData): Promise<BrowserWindow>;
+}
 
 interface InstalledExtension { id: string; versionDirectory: string; enabled: boolean; pinned: boolean }
 const { downloadExtension, installChromeWebStore, installExtension } = store;
@@ -65,7 +81,83 @@ function createExtensions(directory: string, target: Session, changed: () => voi
   const statePath = extensionStatePath(directory), owners = new Set<ExtensionOwner>();
   let entries: InstalledExtension[] = [], storageError = false, updating = false, stopped = false, checkedAtStart = false;
   const errors = new Set<string>();
-  const pendingInstalls = new Set<string>(), popups = new Map<string, BrowserWindow>();
+  const pendingInstalls = new Set<string>(), windows = new Set<ExtensionWindow>();
+  const windowFor = (window?: BaseWindow) => [...windows].find(owner => !owner.window.isDestroyed() && (window ? owner.window === window : owner.current()));
+  let notifying = false;
+  const activeTabs = new Map<BaseWindow, WebContents>();
+  const chrome = createExtensionRuntime({ license: 'GPL-3.0', session: target,
+    createTab: async details => {
+      const owner = details.windowId === undefined ? windowFor() : [...windows].find(owner => owner.window.id === details.windowId && !owner.window.isDestroyed());
+      if (!owner) throw new Error('EXTENSIONS_UNAVAILABLE');
+      return [owner.createTab(details), owner.window];
+    },
+    selectTab: (contents, window) => { activeTabs.set(window, contents); if (!notifying) windowFor(window)?.selectTab(contents); },
+    updateTab: (contents, url) => {
+      const owner = windowFor(runtimeDetails(chrome).ctx.store.tabToWindow.get(contents));
+      if (!owner) throw new Error('EXTENSIONS_UNAVAILABLE'); owner.updateTab(contents, url);
+    },
+    removeTab: (contents, window) => { if (!notifying) windowFor(window)?.removeTab(contents); },
+    assignTabDetails: (details, contents) => windowFor(runtimeDetails(chrome).ctx.store.tabToWindow.get(contents))?.assignTabDetails(details, contents),
+    createWindow: async details => { if (details.incognito) throw new Error('EXTENSIONS_UNAVAILABLE'); const owner = windowFor(); if (!owner) throw new Error('EXTENSIONS_UNAVAILABLE'); return owner.createWindow(details); },
+    removeWindow: window => { if (window.isDestroyed()) return; const owner = windowFor(window); if (!owner) throw new Error('EXTENSIONS_UNAVAILABLE'); owner.window.close(); },
+    // Electron cannot enforce newly requested host grants. Keep the install decision authoritative.
+    requestPermissions: async () => false,
+  });
+  const clearAlarms = registerAlarms(chrome, target);
+  chrome.on('browser-action-updated', changed);
+  const actions = runtimeDetails(chrome).api.browserAction;
+  const closePopup = (id?: string) => { if (!id || actions.popup?.extensionId === id) { actions.popup?.destroy(); actions.popup = undefined; } };
+  const trackTab = (contents: WebContents, window: BrowserWindow) => {
+    const tracked = runtimeDetails(chrome).ctx.store;
+    notifying = true;
+    try {
+      // A drag transfers the same WebContents. Reparent it without asking Horizon to close it.
+      if (tracked.tabs.has(contents)) { tracked.tabToWindow.set(contents, window); tracked.addWindow(window); contents.emit('tab-updated'); }
+      else chrome.addTab(contents, window);
+    } finally { notifying = false; }
+  };
+  const selectTab = (contents: WebContents) => {
+    const window = runtimeDetails(chrome).ctx.store.tabToWindow.get(contents);
+    if (!window || activeTabs.get(window) === contents) return;
+    activeTabs.set(window, contents); notifying = true; try { chrome.selectTab(contents); } finally { notifying = false; }
+  };
+  const untrackTab = (contents: WebContents) => { notifying = true; try { chrome.removeTab(contents); } finally { notifying = false; } };
+  const attachWindow = (owner: ExtensionWindow) => { windows.add(owner); return () => { windows.delete(owner); activeTabs.delete(owner.window); closePopup(); }; };
+  const actionFor = (id: string, contents?: WebContents) => {
+    const action = actions.actionMap.get(id); if (!action) return undefined;
+    const info: ActionDetails = { ...action, ...(contents ? action.tabs[contents.id] : {}) };
+    let icon: number[] | null = null;
+    try {
+      const extension = target.extensions.getExtension(id)!;
+      const path = typeof info.icon?.path === 'string' ? info.icon.path : Object.values(info.icon?.path ?? {})[0];
+      let image;
+      if (path) {
+        const asset = extensionAsset(extension.path, path.replace(/^\//, '')), file = lstatSync(asset);
+        if (file.isFile() && !file.isSymbolicLink() && file.size <= 1024 * 1024) image = nativeImage.createFromPath(asset);
+      } else {
+        const data = typeof info.icon?.imageData === 'string' ? info.icon.imageData : Object.values(info.icon?.imageData ?? {})[0];
+        if (data?.startsWith('data:image/png;base64,') && data.length <= 1024 * 1024) image = nativeImage.createFromDataURL(data);
+      }
+      if (image && !image.isEmpty()) icon = [...image.resize({ width: 28, height: 28 }).toPNG()];
+    } catch { /* Invalid dynamic icons retain the installed icon. */ }
+    return { title: String(info.title ?? '').slice(0, 1024), badge: String(info.text ?? '').slice(0, 32), icon };
+  };
+  const commandInput = (input: Electron.Input, contents: WebContents) => {
+    if (input.type !== 'keyDown' || input.isAutoRepeat || browserShortcut(input)) return false;
+    for (const extension of target.extensions.getAllExtensions()) {
+      const commands = extension.manifest.commands as Record<string, { suggested_key?: Record<string, string> }> | undefined;
+      for (const [name, details] of Object.entries(commands ?? {})) {
+        const shortcut = details.suggested_key?.[process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux'] ?? details.suggested_key?.default;
+        if (!shortcut) continue;
+        const parts = shortcut.toLowerCase().split('+'), key = parts.pop();
+        if (key !== input.key.toLowerCase() || parts.includes('ctrl') !== input.control || parts.includes('alt') !== input.alt || parts.includes('shift') !== input.shift || parts.includes('command') !== input.meta) continue;
+        if (name === '_execute_action' || name === '_execute_browser_action') actions.activateClick({ extensionId: extension.id, tabId: contents.id, alignment: 'bottom left', anchorRect: { x: 0, y: 0, width: 32, height: 32 } });
+        else runtimeDetails(chrome).ctx.router.sendEvent(extension.id, 'commands.onCommand', name);
+        return true;
+      }
+    }
+    return false;
+  };
   let work: Promise<unknown> = Promise.resolve();
   const queue = <T>(action: () => Promise<T>): Promise<T> => {
     const next = work.then(() => { if (stopped) throw new Error('EXTENSIONS_UNAVAILABLE'); return action(); });
@@ -103,7 +195,7 @@ function createExtensions(directory: string, target: Session, changed: () => voi
       return (messages[message]?.message ?? value).slice(0, 4096);
     } catch { return value; }
   };
-  const list = (): ExtensionState[] => entries.map(entry => {
+  const list = (contents?: WebContents): ExtensionState[] => entries.map(entry => {
     try {
       const path = pathFor(entry), manifest = manifestFor(entry);
       const icons = manifest.icons as Record<string, string> | undefined;
@@ -118,13 +210,17 @@ function createExtensions(directory: string, target: Session, changed: () => voi
         } catch { /* A missing optional icon retains the neutral badge. */ }
       }
       return { ...entry, name: target.extensions.getExtension(entry.id)?.name ?? localized(manifest, path, 'name'), description: localized(manifest, path, 'description'), version: String(manifest.version), icon,
-        unsupported: unsupportedPermissions(manifest), permissions: manifestAccess(manifest), failed: errors.has(entry.id) };
+        action: entry.enabled ? actionFor(entry.id, contents) : undefined, unsupported: unsupportedPermissions(manifest), permissions: manifestAccess(manifest), failed: errors.has(entry.id) };
     } catch { return { ...entry, name: entry.id, description: '', version: '', icon: null, unsupported: [], permissions: [], failed: true }; }
   });
   const storeList = () => list().map(entry => ({ id: entry.id, name: entry.name, description: entry.description, version: entry.version, enabled: entry.enabled, mayDisable: true, type: 'extension', installType: 'normal', permissions: entry.permissions.filter(permission => !permission.includes('://') && permission !== '<all_urls>'), hostPermissions: entry.permissions.filter(permission => permission.includes('://') || permission === '<all_urls>') }));
   const startWorker = async (extension: Electron.Extension) => {
     if (extension.manifest.manifest_version === 3 && extension.manifest.background?.service_worker) {
-      await target.serviceWorkers.startWorkerForScope(`chrome-extension://${extension.id}/`).catch(() => { errors.add(extension.id); });
+      // The first start of a newly loaded worker can abort while Chromium is still registering it; a short retry succeeds.
+      for (let attempt = 0; ; attempt++) {
+        try { await target.serviceWorkers.startWorkerForScope(`chrome-extension://${extension.id}/`); return; }
+        catch { if (attempt >= 5) { errors.add(extension.id); return; } await new Promise(done => setTimeout(done, 500 * (attempt + 1))); }
+      }
     }
   };
   const load = async (entry: InstalledExtension) => {
@@ -166,6 +262,7 @@ function createExtensions(directory: string, target: Session, changed: () => voi
     let entry = entries.find(entry => entry.id === extension.id);
     if (!entry) { entry = { id: extension.id, versionDirectory: basename(extension.path), enabled: true, pinned: false }; entries.push(entry); }
     try { save(); } catch { errors.add(extension.id); target.extensions.removeExtension(extension.id); }
+    for (const owner of windows) owner.materializeTabs();
     changed(); void startWorker(extension).then(changed);
   };
   target.extensions.on('extension-loaded', installed);
@@ -182,7 +279,7 @@ function createExtensions(directory: string, target: Session, changed: () => voi
     const entry = entries.find(entry => entry.id === id); if (!entry) throw new Error('EXTENSION_NOT_FOUND');
     const previous = entry.enabled;
     entry.enabled = enabled;
-    try { save(); if (enabled) await load(entry); else { popups.get(id)?.close(); target.extensions.removeExtension(id); } }
+    try { save(); if (enabled) await load(entry); else { closePopup(id); target.extensions.removeExtension(id); } }
     catch (error) { entry.enabled = previous; try { save(); } catch { /* A failed disk remains visibly unavailable. */ } throw error; }
     changed();
   });
@@ -195,7 +292,7 @@ function createExtensions(directory: string, target: Session, changed: () => voi
     if (!entries.some(entry => entry.id === id)) throw new Error('EXTENSION_NOT_FOUND');
     const previous = entries; entries = entries.filter(entry => entry.id !== id);
     try { save(); } catch (error) { entries = previous; throw error; }
-    popups.get(id)?.close(); target.extensions.removeExtension(id); removeProfileDirectory(directory, id); changed();
+    closePopup(id); target.extensions.removeExtension(id); removeProfileDirectory(directory, id); changed();
   });
   const checkUpdates = (background?: () => boolean) => queue(async () => {
     await ready;
@@ -219,7 +316,7 @@ function createExtensions(directory: string, target: Session, changed: () => voi
           const destination = resolve(directory, entry.id, version);
           if (!existsSync(destination)) renameSync(path, destination);
           const old = entry.versionDirectory; entry.versionDirectory = version;
-          try { save(); if (entry.enabled) { popups.get(entry.id)?.close(); target.extensions.removeExtension(entry.id); await load(entry); } }
+          try { save(); if (entry.enabled) { closePopup(entry.id); target.extensions.removeExtension(entry.id); await load(entry); } }
           catch { entry.versionDirectory = old; save(); if (entry.enabled) await load(entry); throw new Error('EXTENSION_UPDATE_FAILED'); }
         } catch { throw new Error('EXTENSION_UPDATE_FAILED'); }
         finally { rmSync(staging, { recursive: true, force: true }); }
@@ -229,7 +326,8 @@ function createExtensions(directory: string, target: Session, changed: () => voi
   const startUpdates = (background?: () => boolean) => { if (checkedAtStart) return Promise.resolve(); checkedAtStart = true; return checkUpdates(background); };
   const stop = async () => {
     stopped = true; owners.clear(); target.unregisterPreloadScript('horizon-web-store'); target.extensions.removeListener('extension-loaded', installed);
-    for (const window of popups.values()) window.close();
+    closePopup(); clearAlarms(); windows.clear();
+    target.unregisterPreloadScript('crx-mv2-preload'); target.unregisterPreloadScript('crx-mv3-preload');
     await work; await ready;
     for (const entry of entries) target.extensions.removeExtension(entry.id);
   };
@@ -239,22 +337,12 @@ function createExtensions(directory: string, target: Session, changed: () => voi
     if (!await prepare(id, owner)) return null;
     return installExtension(id, { session: target, extensionsPath: directory });
   });
-  const openPopup = async (id: string, parent: BrowserWindow) => {
+  const openPopup = async (id: string, parent: BrowserWindow, contents: WebContents, anchorRect: Electron.Rectangle) => {
     await ready;
     const entry = entries.find(entry => entry.id === id);
     if (!entry?.enabled || stopped) throw new Error('EXTENSION_NOT_FOUND');
-    popups.get(id)?.close();
-    const manifest = manifestFor(entry), action = (manifest.action ?? manifest.browser_action ?? manifest.page_action) as { default_popup?: string } | undefined;
-    const popup = action?.default_popup;
-    if (!popup) throw new Error('EXTENSION_NO_POPUP');
-    extensionAsset(pathFor(entry), popup);
-    const bounds = parent.getContentBounds();
-    const window = new BrowserWindow({ width: 360, height: 500, x: bounds.x + bounds.width - 380, y: bounds.y + 110, parent, show: false, frame: false, skipTaskbar: true, backgroundColor: parent.getBackgroundColor(),
-      webPreferences: { session: target, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
-    popups.set(id, window); window.once('closed', () => { if (popups.get(id) === window) popups.delete(id); });
-    window.removeMenu(); window.once('blur', () => window.close());
-    await window.loadURL(`chrome-extension://${id}/${popup}`);
-    if (!window.isDestroyed()) { window.show(); window.focus(); }
+    if (!windows.size || !runtimeDetails(chrome).ctx.store.tabs.has(contents) || runtimeDetails(chrome).ctx.store.tabToWindow.get(contents) !== parent || contents.session !== target) throw new Error('EXTENSIONS_UNAVAILABLE');
+    actions.activateClick({ extensionId: id, tabId: contents.id, anchorRect, alignment: 'bottom left' });
   };
-  return { ready, list, storeList, attach, ownsStore, beforeInstall, finishInstall: (id: string) => pendingInstalls.delete(id), install, setEnabled, setPinned, remove, checkUpdates, startUpdates, stop, openPopup, status: () => ({ updating, storageError }) };
+  return { ready, list, storeList, hasEnabled: () => target.extensions.getAllExtensions().length > 0, attach, attachWindow, trackTab, untrackTab, selectTab, commandInput, contextMenuItems: chrome.getContextMenuItems.bind(chrome), closePopup, ownsStore, beforeInstall, finishInstall: (id: string) => pendingInstalls.delete(id), install, setEnabled, setPinned, remove, checkUpdates, startUpdates, stop, openPopup, status: () => ({ updating, storageError }) };
 }

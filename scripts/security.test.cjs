@@ -56,6 +56,73 @@ test('store preload executes the vendor bridge only in the exact HTTPS main-fram
   assert.match(browser, /return path5.join\(__dirname, "store-preload.js"\);/);
 });
 
+test('extension preload excludes remote frames and web service workers without exposing vendor logs', () => {
+  const { runInNewContext } = require('node:vm');
+  const preload = readFileSync('dist/electron/extension-preload.js', 'utf8'), bundle = readFileSync('dist/electron/chrome-extensions.cjs', 'utf8');
+  const id = 'a'.repeat(32);
+  for (const type of ['renderer', 'service-worker']) for (const url of [`chrome-extension://${id}/worker.js`, 'https://example.com/', 'https://chromewebstore.google.com/', 'chrome-extension://invalid/', `chrome-extension://user:secret@${id}/`, `chrome-extension://${id}:444/`, 'about:blank']) {
+    let exposed = 0, logged = 0;
+    const contextBridge = { exposeInMainWorld: () => exposed++, executeInMainWorld: ({ func }) => func.toString().includes('globalThis.location.href') ? url : undefined };
+    const ipcRenderer = { on() {}, send() {}, invoke: async () => {} };
+    runInNewContext(preload, { process: { type, contextIsolated: true }, location: new URL(url), URL, require: () => ({ contextBridge, ipcRenderer }), console: { log: () => logged++, error: () => logged++ } });
+    assert.equal(exposed, url === `chrome-extension://${id}/worker.js` ? 1 : 0); assert.equal(logged, 0);
+  }
+  assert.match(bundle, /authorizeExtension\(event, extensionId\)/);
+  assert.match(bundle, /Remote extension routing is unavailable/);
+  assert.match(bundle, /Native messaging is unavailable/);
+  assert.doesNotMatch(bundle, /var d\d* = \(0, import_debug/);
+  assert.match(bundle, /extension-preload.js/);
+});
+
+test('extension API callers must match a loaded id in their frame or worker session', () => {
+  const { authorizeExtension } = require('../dist/electron/extension-runtime.js');
+  const id = 'a'.repeat(32), other = 'b'.repeat(32), target = { extensions: { getExtension: value => value === id ? { id } : null } };
+  const frame = { type: 'frame', sender: { session: target }, senderFrame: { url: `chrome-extension://${id}/popup.html` } };
+  assert.equal(authorizeExtension(frame, id), true);
+  assert.equal(authorizeExtension(frame, other), false);
+  assert.equal(authorizeExtension({ ...frame, senderFrame: { url: 'https://example.com/' } }, id), false);
+  assert.equal(authorizeExtension({ ...frame, sender: { session: { extensions: { getExtension: () => null } } } }, id), false);
+  const worker = { type: 'service-worker', session: target, serviceWorker: { scope: `chrome-extension://${id}/` } };
+  assert.equal(authorizeExtension(worker, id), true); assert.equal(authorizeExtension(worker, other), false);
+});
+
+test('alarms isolate extension names, deliver events, bound counts and cancel on unload', t => {
+  const { registerAlarms } = require('../dist/electron/extension-runtime.js'), { EventEmitter } = require('node:events');
+  const handlers = new Map(), events = [], permissions = [];
+  const runtime = { ctx: { router: { handle: (name, callback, options) => { handlers.set(name, callback); permissions.push(options.permission); }, sendEvent: (...args) => events.push(args) } } };
+  const target = { extensions: new EventEmitter() }, stop = registerAlarms(runtime, target);
+  const first = { extension: { id: 'a'.repeat(32) } }, second = { extension: { id: 'b'.repeat(32) } };
+  const call = (method, owner, ...args) => handlers.get(`alarms.${method}`)(owner, ...args);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  call('create', first, 'wake', { when: Date.now() });
+  call('create', second, 'wake', { periodInMinutes: 1 });
+  t.mock.timers.tick(1);
+  assert.equal(events.length, 1); assert.equal(events[0][0], first.extension.id); assert.equal(events[0][1], 'alarms.onAlarm');
+  assert.equal(call('getAll', first).length, 0); assert.equal(call('getAll', second).length, 1);
+  assert.throws(() => call('create', first, 'bad', { when: Infinity }));
+  assert.throws(() => call('create', first, 'bad', { periodInMinutes: -1 }));
+  for (let index = 0; index < 500; index++) call('create', first, String(index), { delayInMinutes: 1 });
+  assert.throws(() => call('create', first, 'overflow', {}));
+  target.extensions.emit('extension-unloaded', {}, first.extension);
+  assert.equal(call('getAll', first).length, 0); assert.equal(call('getAll', second).length, 1);
+  assert.equal(call('clear', second, 'wake'), true); assert.equal(call('clear', second, 'wake'), false);
+  assert.ok(permissions.every(permission => permission === 'alarms')); stop();
+});
+
+test('extension context menu callbacks remain bound to one menu, tab and enabled row', () => {
+  const menu = new PageMenuSession(); let clicked = 0;
+  const params = { x: 1, y: 2, linkURL: '', srcURL: '', mediaType: 'none', selectionText: '', isEditable: false, dictionarySuggestions: [], editFlags: {}, menuSourceType: 'mouse' };
+  const item = { visible: true, enabled: true, type: 'normal', label: 'Extension action', click: () => clicked++ };
+  const opened = menu.open('tab', params, { back: false, forward: false, reload: true }, { x: 0, y: 0 }, 1, false, [{ item, window: {} }]);
+  const row = opened.groups.flat().find(row => row.id.startsWith('extension:'));
+  assert.equal(row.label, item.label);
+  assert.throws(() => menu.invokeExtension(opened.id, row.id, 'other'));
+  assert.equal(clicked, 0); menu.invokeExtension(opened.id, row.id, 'tab'); assert.equal(clicked, 1);
+  assert.throws(() => menu.invokeExtension(opened.id, row.id, 'tab'));
+  const privateMenu = menu.open('tab', params, { back: false, forward: false, reload: true }, { x: 0, y: 0 }, 1, true, [{ item, window: {} }]);
+  assert.ok(privateMenu.groups.flat().every(row => !row.id.startsWith('extension:')));
+});
+
 test('private windows refuse extension commands and extension folders remain inside their owning profiles', () => {
   const { extensionDirectory, extensionAsset, unsupportedPermissions } = require('../dist/electron/extension-policy.js');
   const { assertPrivateCommand } = require('../dist/electron/private-commands.js');
@@ -71,7 +138,9 @@ test('private windows refuse extension commands and extension folders remain ins
   }
   assert.throws(() => validateCommand({ type: 'set-extension-enabled', id: '../outside', enabled: true }));
   assert.throws(() => validateCommand({ type: 'set-extension-pinned', id: 'a'.repeat(32), pinned: true, profile: first.id }));
-  assert.deepEqual(unsupportedPermissions({ permissions: ['storage', 'https://example.com/*', 'declarativeNetRequest', 'history'], action: {} }), ['action', 'declarativeNetRequest', 'history']);
+  assert.deepEqual(unsupportedPermissions({ permissions: ['storage', 'https://example.com/*', 'declarativeNetRequest', 'history'], action: {} }), ['declarativeNetRequest', 'history']);
+  assert.deepEqual(unsupportedPermissions({ permissions: ['alarms', 'cookies', 'contextMenus', 'notifications', 'webNavigation'], action: {}, commands: {} }), []);
+  assert.deepEqual(unsupportedPermissions({ permissions: ['offscreen', 'nativeMessaging', 'webRequest'], side_panel: {}, omnibox: {}, page_action: {}, storage: { managed_schema: 'policy.json' } }), ['nativeMessaging', 'offscreen', 'omnibox', 'pageAction', 'sidePanel', 'storage.managed', 'webRequest']);
 });
 
 test('extension downloads require the requested publisher signature and reject altered CRX code', () => {
@@ -172,13 +241,40 @@ test('extension sessions reject spoofed IPC and keep installed, disabled and pin
     },
   };
   const filename = resolve('dist/electron/extensions.js'), localRequire = require('node:module').createRequire(filename), exported = {};
-  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? electron : name === './extension-download' ? { store: vendor } : localRequire(name), dirname(filename));
+  const runtimes = [];
+  const runtimeModule = {
+    createExtensionRuntime: options => {
+      assert.equal(options.license, 'GPL-3.0');
+      const runtime = new EventEmitter();
+      runtime.api = { browserAction: { actionMap: new Map() } }; runtime.ctx = { store: { tabs: new Set(), tabToWindow: new WeakMap() } };
+      runtime.getContextMenuItems = () => []; runtimes.push({ runtime, options }); return runtime;
+    },
+    registerAlarms: () => () => {}, runtimeDetails: runtime => runtime,
+  };
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? electron : name === './extension-download' ? { store: vendor } : name === './extension-runtime' ? runtimeModule : localRequire(name), dirname(filename));
   const originalHandle = electron.ipcMain.handle, one = target(), two = target();
   partitions.set(first.partition, one); partitions.set(second.partition, two);
   assert.throws(() => exported.profileExtensions(root, first, two, () => {}));
   assert.throws(() => exported.profileExtensions(root, first, { ...one, isPersistent: () => false }, () => {}));
   const manager = exported.profileExtensions(root, first, one, () => {}), other = exported.profileExtensions(root, second, two, () => {});
+  assert.deepEqual(runtimes.map(({ options }) => options.session), [one, two]);
   await Promise.all([manager.ready, other.ready]); assert.equal(electron.ipcMain.handle, originalHandle);
+  const ownWindow = { id: 301, isDestroyed: () => false, close: () => calls.push('close') }, calls = [];
+  const tabContents = { session: one }, options = runtimes[0].options;
+  const detachWindow = manager.attachWindow({ window: ownWindow, current: () => true, materializeTabs() {},
+    createTab: details => { calls.push(details.url); return tabContents; }, updateTab: (contents, url) => { assert.equal(contents, tabContents); calls.push(url); },
+    selectTab: contents => { assert.equal(contents, tabContents); calls.push('select'); }, removeTab: contents => { assert.equal(contents, tabContents); calls.push('remove'); },
+    assignTabDetails: details => { details.index = 2; }, createWindow: async () => ownWindow,
+  });
+  assert.deepEqual(await options.createTab({ windowId: ownWindow.id, url: 'https://example.com/' }), [tabContents, ownWindow]);
+  await assert.rejects(options.createTab({ windowId: 302 }), /EXTENSIONS_UNAVAILABLE/);
+  await assert.rejects(options.createWindow({ incognito: true }), /EXTENSIONS_UNAVAILABLE/);
+  assert.equal(await options.createWindow({}), ownWindow);
+  runtimes[0].runtime.ctx.store.tabToWindow.set(tabContents, ownWindow);
+  options.updateTab(tabContents, 'https://example.com/next'); options.selectTab(tabContents, ownWindow); options.removeTab(tabContents, ownWindow); options.removeWindow(ownWindow);
+  const tabDetails = {}; options.assignTabDetails(tabDetails, tabContents); assert.equal(tabDetails.index, 2);
+  assert.deepEqual(calls, ['https://example.com/', 'https://example.com/next', 'select', 'remove', 'close']);
+  detachWindow();
   const frame = { url: 'https://chromewebstore.google.com/detail/test', isDestroyed: () => false };
   const contents = { session: one, mainFrame: frame, isDestroyed: () => false };
   let allow = false;

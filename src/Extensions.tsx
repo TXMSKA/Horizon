@@ -18,6 +18,13 @@ export function ExtensionIcon({ extension }: { extension: ExtensionState }) {
   }, [extension.icon]);
   return <span className="extension-icon" aria-hidden="true">{url ? <img src={url} alt="" /> : <Puzzle />}</span>;
 }
+export function ExtensionAction({ extension, language, run, onActivate }: { extension: ExtensionState; language: Language; run: (command: BrowserCommand) => Promise<boolean>; onActivate(): void }) {
+  const label = extension.action?.title || extension.name, badge = extension.action?.badge;
+  return <button className="icon-button extension-action" type="button" disabled={!extension.enabled || !extension.action} title={label} aria-label={badge ? text('extensionActionBadge', language).replace('{name}', label).replace('{badge}', badge) : label} onClick={event => {
+    const rect = event.currentTarget.getBoundingClientRect(); onActivate();
+    void run({ type: 'open-extension', id: extension.id, anchor: { x: Math.max(0, Math.floor(rect.x)), y: Math.max(0, Math.floor(rect.y)), width: Math.ceil(rect.width), height: Math.ceil(rect.height) } });
+  }}><ExtensionIcon extension={{ ...extension, icon: extension.action?.icon ?? extension.icon }} />{badge && <span className="extension-action-badge" aria-hidden="true">{badge}</span>}</button>;
+}
 function ExtensionRow({ extension, language, run }: { extension: ExtensionState; language: Language; run: (command: BrowserCommand) => Promise<boolean> }) {
   const id = useId(), pending = useRef(false);
   const t = (key: CopyKey) => text(key, language);

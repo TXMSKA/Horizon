@@ -37,14 +37,14 @@ import { DesktopEdits } from './shared/desktop-edits';
 import { DESKTOP_TAB_DRAG, parseDesktopDrag } from './shared/desktop-drag';
 import { Settings, settingsError } from './Settings';
 import { FirstRunImport } from './FirstRunImport';
-import { ExtensionIcon, ExtensionInstallDialog, ExtensionsPopover } from './Extensions';
+import { ExtensionAction, ExtensionInstallDialog, ExtensionsPopover } from './Extensions';
 
 type Panel = LibraryPanel | null;
 const sites = {
   wikipedia: 'https://www.wikipedia.org/', youtube: 'https://www.youtube.com/',
   maps: 'https://www.google.com/maps', news: 'https://www.bbc.com/news', mail: 'https://mail.google.com/',
 } as const;
-const pageMenuRows: Record<Exclude<ContextMenuItemId, `spell:${string}`>, { label: CopyKey; icon: LucideIcon }> = {
+const pageMenuRows: Record<Exclude<ContextMenuItemId, `spell:${string}` | `extension:${string}`>, { label: CopyKey; icon: LucideIcon }> = {
   'open-link': { label: 'openLink', icon: ExternalLink }, 'copy-link': { label: 'copyLink', icon: Copy },
   'open-image': { label: 'openImage', icon: Image }, 'save-image': { label: 'saveImage', icon: Download },
   'copy-image': { label: 'copyImage', icon: Copy }, 'copy-image-address': { label: 'copyImageAddress', icon: Copy },
@@ -731,7 +731,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
         </form>
         <div className="tools">{state?.showCapture !== false && <button className="icon-button" ref={desktopButtonRef} type="button" aria-label={t('captureShortcut')} aria-describedby={showCaptureHint ? 'capture-shortcut' : undefined} aria-haspopup="dialog" aria-expanded={Boolean(desktopMode)} onMouseEnter={() => setCaptureHint(true)} onMouseLeave={() => setCaptureHint(false)} onFocus={event => { if (!restoringCaptureFocus.current && event.currentTarget.matches(':focus-visible')) setCaptureHint(true); }} onBlur={() => setCaptureHint(false)} onClick={() => { setCaptureHint(false); void openCapture(); }}><Scan aria-hidden="true" /></button>}
           {state?.quickAccess.filter(app => !state.privateWindow || app !== 'desktop').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={event => { if (app === 'desktop') void openDesktopPanel({ kind: 'home' }, event.currentTarget); else openHub(app); }}><Icon aria-hidden="true" /></button>; })}
-          {!state?.privateWindow && state?.extensions.filter(extension => extension.pinned).map(extension => <button className="icon-button" type="button" key={extension.id} disabled={!extension.enabled} aria-label={extension.name} title={extension.name} onClick={() => { setExtensionsOpen(false); void run({ type: 'open-extension', id: extension.id }); }}><ExtensionIcon extension={extension} /></button>)}
+          {!state?.privateWindow && state?.extensions.filter(extension => extension.pinned).map(extension => <ExtensionAction key={`${state.activeProfileId}:${extension.id}`} extension={extension} language={language} run={run} onActivate={() => setExtensionsOpen(false)} />)}
           {!state?.privateWindow && <button className="icon-button" ref={extensionsButtonRef} type="button" aria-label={t('extensions')} title={t('extensions')} aria-haspopup="dialog" aria-controls="extensions-popover" aria-expanded={extensionsOpen} onClick={() => {
             setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); closeFind(); closeContextMenu(); setExtensionsOpen(previous => !previous);
           }}><Puzzle aria-hidden="true" /></button>}
@@ -782,10 +782,11 @@ export function App({ language: initialLanguage }: { language: Language }) {
       {contextMenu.groups.flatMap((group, index) => [
         ...(index ? [<hr role="separator" key={`divider-${index}`} />] : []),
         ...group.map(item => {
-          const row = item.id.startsWith('spell:') ? null : pageMenuRows[item.id as keyof typeof pageMenuRows];
-          const Icon = row?.icon ?? SpellCheck;
-          const label = row ? t(row.label).replace('{query}', contextMenu.selection ?? '') : item.id.slice(6);
-          return <button type="button" role="menuitem" tabIndex={-1} key={item.id} disabled={!item.enabled} onClick={() => {
+          const extension = item.id.startsWith('extension:');
+          const row = item.id.startsWith('spell:') || extension ? null : pageMenuRows[item.id as keyof typeof pageMenuRows];
+          const Icon = row?.icon ?? (extension ? Puzzle : SpellCheck);
+          const label = item.label ?? (row ? t(row.label).replace('{query}', contextMenu.selection ?? '') : item.id.slice(6));
+          return <button type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked} tabIndex={-1} key={item.id} disabled={!item.enabled} onClick={() => {
             const menuId = contextMenu.id;
             contextMenuRef.current = null; setContextMenu(null);
             if (item.id === 'add-to-desktop') {

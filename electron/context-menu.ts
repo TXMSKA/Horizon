@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ContextMenuParams } from 'electron';
+import type { BrowserWindow, ContextMenuParams, MenuItem } from 'electron';
 import type { ContextMenuItem, ContextMenuItemId, PageContextMenu } from '../src/shared/api';
 import { isWebURL } from './browsing';
 
@@ -8,7 +8,7 @@ interface Navigation { back: boolean; forward: boolean; reload: boolean }
 const itemIds = new Set(['add-to-desktop', 'open-link', 'copy-link', 'open-image', 'save-image', 'copy-image', 'copy-image-address', 'copy', 'search-selection', 'undo', 'redo', 'cut', 'paste', 'select-all', 'back', 'forward', 'reload']);
 
 export function isContextMenuItemId(value: unknown): value is ContextMenuItemId {
-  return typeof value === 'string' && (itemIds.has(value) || value.startsWith('spell:') && value.length > 6 && value.length <= 262 && !/[\u0000-\u001f\u007f]/.test(value));
+  return typeof value === 'string' && (itemIds.has(value) || /^extension:[a-f0-9-]{36}$/.test(value) || value.startsWith('spell:') && value.length > 6 && value.length <= 262 && !/[\u0000-\u001f\u007f]/.test(value));
 }
 
 export function contextMenuGroups(params: PageMenuParams, navigation: Navigation, privateWindow = false): ContextMenuItem[][] {
@@ -31,21 +31,39 @@ export function contextMenuGroups(params: PageMenuParams, navigation: Navigation
 
 // Only this record can authorize an action; display data never becomes a URL or an edit argument.
 export class PageMenuSession {
-  private pending?: { id: string; tabId: string; params: PageMenuParams; groups: ContextMenuItem[][] };
+  private pending?: { id: string; tabId: string; params: PageMenuParams; groups: ContextMenuItem[][]; extensions: Map<ContextMenuItemId, () => void> };
   get tabId(): string | undefined { return this.pending?.tabId; }
 
-  open(tabId: string, params: PageMenuParams, navigation: Navigation, offset: { x: number; y: number }, chromeZoom: number, privateWindow = false): PageContextMenu | null {
+  open(tabId: string, params: PageMenuParams, navigation: Navigation, offset: { x: number; y: number }, chromeZoom: number, privateWindow = false, items: { item: MenuItem; window: BrowserWindow }[] = []): PageContextMenu | null {
     this.invalidate();
     const groups = contextMenuGroups(params, navigation, privateWindow);
+    const extensions = new Map<ContextMenuItemId, () => void>(), rows: ContextMenuItem[] = [];
+    const add = (item: MenuItem, window: BrowserWindow, prefix = '', enabled = true, depth = 0) => {
+      if (!item.visible || item.type === 'separator' || rows.length >= 100 || depth > 8) return;
+      const label = `${prefix}${item.label}`.slice(0, 1024), allowed = enabled && item.enabled;
+      // Keep submenu ancestry in the label while using Horizon's existing keyboard menu surface.
+      if (item.submenu) { for (const child of item.submenu.items) add(child, window, `${label} > `, allowed, depth + 1); return; }
+      const id: ContextMenuItemId = `extension:${randomUUID()}`;
+      rows.push({ id, label, enabled: allowed, ...(['checkbox', 'radio'].includes(item.type) ? { checked: item.checked } : {}) });
+      extensions.set(id, () => { if (item.type === 'checkbox') item.checked = !item.checked; item.click(item, window, {}); });
+    };
+    if (!privateWindow) for (const { item, window } of items) add(item, window);
+    if (rows.length) groups.push(rows);
     if (!groups.length) return null;
     const id = randomUUID();
     const stored = { ...params, editFlags: { ...params.editFlags }, dictionarySuggestions: [...params.dictionarySuggestions] };
-    this.pending = { id, tabId, params: stored, groups };
+    this.pending = { id, tabId, params: stored, groups, extensions };
     return {
       id, x: (offset.x + params.x) / chromeZoom, y: (offset.y + params.y) / chromeZoom,
       keyboard: params.menuSourceType === 'keyboard', groups: groups.map(group => group.map(item => ({ ...item }))),
       ...(!params.isEditable && params.selectionText.trim() ? { selection: Array.from(params.selectionText).slice(0, 40).join('') } : {}),
     };
+  }
+
+  invokeExtension(id: string, item: ContextMenuItemId, tabId: string): void {
+    const action = this.pending?.extensions.get(item);
+    if (!action) throw new Error('Invalid extension menu action');
+    this.take(id, item, tabId); action();
   }
 
   take(id: string, item: ContextMenuItemId, tabId: string): PageMenuParams {

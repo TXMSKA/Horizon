@@ -12,6 +12,7 @@ export const copy = {
   confirmRemoveExtension: { en: 'Remove {name}? Its code is removed from this profile.', es: '¿Quitar {name}? Su código se elimina de este perfil.' },
   extensionWarning: { en: 'This extension may not work well', es: 'Esta extensión podría no funcionar bien' },
   extensionInstallTitle: { en: 'Install {name}?', es: '¿Instalar {name}?' },
+  extensionActionBadge: { en: '{name}, badge {badge}', es: '{name}, indicador {badge}' },
   extensionUnsupported: { en: 'It uses features Horizon does not have yet: {features}. Tabs and storage have partial support.', es: 'Usa funciones que Horizon todavía no tiene: {features}. Las pestañas y el almacenamiento tienen soporte parcial.' },
   extensionPrivacy: { en: 'Google receives the extension ID and your IP address when downloading or checking updates. The extension can read or change sites allowed by its permissions and send data to its developer. You are responsible for trusting its data collection.', es: 'Google recibe el ID de la extensión y tu dirección IP al descargar o buscar actualizaciones. La extensión puede leer o cambiar los sitios permitidos y enviar datos a su desarrollador. Sos responsable de confiar en su recolección de datos.' },
   extensionPermissions: { en: 'Requested access', es: 'Acceso solicitado' },

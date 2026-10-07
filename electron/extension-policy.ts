@@ -22,13 +22,12 @@ export function extensionAsset(root: string, path: string): string {
   if (target === root || !target.startsWith(`${resolve(root)}${sep}`)) throw new Error('EXTENSION_PATH_INVALID');
   return target;
 }
-// Electron documents partial tabs and local storage support; permissions alone cannot promise every method works.
-const supportedPermissions = new Set(['activeTab', 'tabs', 'storage', 'scripting', 'webRequest', 'webRequestBlocking', 'management']);
+// The library adds partial APIs. Horizon supplies alarms and commands, but native webRequest is masked by our session policy.
+const supportedPermissions = new Set(['activeTab', 'tabs', 'storage', 'scripting', 'management', 'alarms', 'contextMenus', 'cookies', 'notifications', 'webNavigation', 'unlimitedStorage']);
 export function unsupportedPermissions(manifest: Record<string, unknown>): string[] {
   const permissions = [manifest.permissions, manifest.optional_permissions].flatMap(value => Array.isArray(value) ? value : []);
   const unsupported = permissions.filter((value): value is string => typeof value === 'string' && value !== '<all_urls>' && !value.includes('://') && !supportedPermissions.has(value));
-  if (manifest.action || manifest.browser_action || manifest.page_action) unsupported.push('action');
-  if (manifest.commands) unsupported.push('commands');
+  if (manifest.page_action) unsupported.push('pageAction');
   if (manifest.omnibox) unsupported.push('omnibox');
   if (manifest.side_panel) unsupported.push('sidePanel');
   if (manifest.storage && typeof manifest.storage === 'object' && 'managed_schema' in manifest.storage) unsupported.push('storage.managed');
