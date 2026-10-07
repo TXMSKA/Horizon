@@ -20,7 +20,8 @@
     "fuses": "node scripts/fuses.mjs",
     "setup:gitleaks": "node scripts/setup-gitleaks.mjs",
     "test:security": "node --test scripts/security.test.cjs",
-    "verify:window": "electron scripts/verify-foundation.cjs"
+    "verify:window": "electron scripts/verify-foundation.cjs",
+    "verify:themes": "electron scripts/verify-themes.cjs"
   },
   "dependencies": {
     "@ghostery/adblocker": "2.18.2",

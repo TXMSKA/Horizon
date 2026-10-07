@@ -1,8 +1,8 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { HUB_APPS, QUICK_ACCESS_LIMIT, SEARCH_ENGINES } from '../src/shared/api';
-import type { Contrast, DarkPagesMode, DarkStrength, DarkTone, HubApp, Language, LanguageSetting, OnStart, SearchEngine, Theme } from '../src/shared/api';
+import { HUB_APPS, MARKETPLACE_THEMES, QUICK_ACCESS_LIMIT, SEARCH_ENGINES } from '../src/shared/api';
+import type { BuiltInTheme, MarketplaceTheme, Contrast, DarkPagesMode, DarkStrength, DarkTone, HubApp, Language, LanguageSetting, OnStart, SearchEngine, Theme } from '../src/shared/api';
 
 interface LegacySettings { version: 1; theme: Theme; contrast?: Contrast }
 interface SettingsV2 { version: 2; theme: Theme; contrast: Contrast; darkPages: DarkPagesMode; darkStrength: DarkStrength; darkTone: DarkTone }
@@ -10,8 +10,12 @@ interface SettingsV3 extends Omit<SettingsV2, 'version'> { version: 3; searchEng
 interface SettingsV4 extends Omit<SettingsV3, 'version'> { version: 4; quickAccess: HubApp[] }
 interface SettingsV5 extends Omit<SettingsV4, 'version'> { version: 5; showCapture: boolean }
 interface SettingsV6 extends Omit<SettingsV5, 'version'> { version: 6; onStart: OnStart }
-export interface Settings extends Omit<SettingsV6, 'version'> { version: 7; onboarded: boolean }
+interface MarketplaceSettings { installed: MarketplaceTheme[]; builtIn: BuiltInTheme; contrast: Contrast }
+// Older version 7 files have no catalog state; it is added on the first installation.
+export interface Settings extends Omit<SettingsV6, 'version'> { version: 7; onboarded: boolean; marketplace?: MarketplaceSettings }
 export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
+  readonly installedThemes: MarketplaceTheme[];
+  installTheme(id: MarketplaceTheme): void; removeTheme(id: MarketplaceTheme): void;
   readonly migrationAllowed: boolean;
   readonly downloadsFolderUnavailable: boolean;
   setTheme(value: Theme, migrate: boolean): void; setContrast(value: Contrast): void; setDarkPages(value: DarkPagesMode): void; setDarkStrength(value: DarkStrength): void; setDarkTone(value: DarkTone): void;
@@ -27,7 +31,9 @@ export function isHubApp(value: unknown): value is HubApp { return typeof value 
 export function isQuickAccess(value: unknown): value is HubApp[] {
   return Array.isArray(value) && value.length <= QUICK_ACCESS_LIMIT && [...value].every(isHubApp) && new Set(value).size === value.length;
 }
-export function isTheme(value: unknown): value is Theme { return value === 'system' || value === 'amber' || value === 'daylight'; }
+export function isBuiltInTheme(value: unknown): value is BuiltInTheme { return value === 'system' || value === 'amber' || value === 'daylight'; }
+export function isMarketplaceTheme(value: unknown): value is MarketplaceTheme { return typeof value === 'string' && MARKETPLACE_THEMES.includes(value as MarketplaceTheme); }
+export function isTheme(value: unknown): value is Theme { return isBuiltInTheme(value) || isMarketplaceTheme(value); }
 export function isContrast(value: unknown): value is Contrast { return value === 'standard' || value === 'high'; }
 export function isDarkPagesMode(value: unknown): value is DarkPagesMode { return value === 'off' || value === 'on' || value === 'system'; }
 export function isDarkStrength(value: unknown): value is DarkStrength { return value === 'soft' || value === 'standard' || value === 'deep'; }
@@ -51,10 +57,10 @@ function shape(value: unknown, keys: string[]): value is Record<string, unknown>
   return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 }
 function legacySettings(value: unknown): value is LegacySettings {
-  return (shape(value, ['version', 'theme']) || shape(value, ['version', 'theme', 'contrast']) && isContrast(value.contrast)) && value.version === 1 && isTheme(value.theme);
+  return (shape(value, ['version', 'theme']) || shape(value, ['version', 'theme', 'contrast']) && isContrast(value.contrast)) && value.version === 1 && isBuiltInTheme(value.theme);
 }
 const V2_KEYS = ['version', 'theme', 'contrast', 'darkPages', 'darkStrength', 'darkTone'];
-function themeFields(value: Record<string, unknown>): boolean { return isTheme(value.theme) && isContrast(value.contrast) && isDarkPagesMode(value.darkPages) && isDarkStrength(value.darkStrength) && isDarkTone(value.darkTone); }
+function themeFields(value: Record<string, unknown>): boolean { return isBuiltInTheme(value.theme) && isContrast(value.contrast) && isDarkPagesMode(value.darkPages) && isDarkStrength(value.darkStrength) && isDarkTone(value.darkTone); }
 function v2Settings(value: unknown): value is SettingsV2 { return shape(value, V2_KEYS) && value.version === 2 && themeFields(value); }
 function v3Settings(value: unknown): value is SettingsV3 {
   return shape(value, [...V2_KEYS, 'searchEngine', 'language', 'downloadsFolder', 'askWhereToSave', 'blockAds', 'blockThirdPartyCookies']) && value.version === 3 && themeFields(value)
@@ -78,7 +84,14 @@ function v6Settings(value: unknown): value is SettingsV6 {
 }
 function settingsShape(value: unknown): value is Settings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const fields = value as Record<string, unknown>, previous = { ...fields }; delete previous.onboarded;
+  const fields = value as Record<string, unknown>, previous = { ...fields }; delete previous.onboarded; delete previous.marketplace;
+  if (Object.hasOwn(fields, 'marketplace')) {
+    const catalog = fields.marketplace;
+    if (!shape(catalog, ['installed', 'builtIn', 'contrast']) || !isBuiltInTheme(catalog.builtIn) || !isContrast(catalog.contrast)
+      || !Array.isArray(catalog.installed) || catalog.installed.length > MARKETPLACE_THEMES.length
+      || !catalog.installed.every(isMarketplaceTheme) || new Set(catalog.installed).size !== catalog.installed.length) return false;
+    if (isMarketplaceTheme(fields.theme) && catalog.installed.includes(fields.theme)) previous.theme = catalog.builtIn;
+  }
   return fields.version === 7 && Object.hasOwn(fields, 'onboarded') && typeof fields.onboarded === 'boolean' && v6Settings({ ...previous, version: 6 });
 }
 export function validateSettings(value: unknown): value is Settings { return settingsShape(value) && (value.downloadsFolder === null || isDownloadsFolder(value.downloadsFolder)); }
@@ -96,7 +109,14 @@ export function readSettings(path: string, highContrast = false, status = { down
     let settings: Settings, migrated = false;
     try {
       if (statSync(path).size > 4096) throw new Error('Settings exceed size limit');
-      const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      let value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      // A removed or unknown palette must not discard otherwise valid user settings.
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const fields = value as Record<string, unknown>, catalog = fields.marketplace as Partial<MarketplaceSettings> | undefined;
+        if (!isTheme(fields.theme) || isMarketplaceTheme(fields.theme) && (!Array.isArray(catalog?.installed) || !catalog.installed.includes(fields.theme))) {
+          value = { ...fields, theme: isBuiltInTheme(catalog?.builtIn) ? catalog.builtIn : 'system' }; migrated = true;
+        }
+      }
       // A settings file that predates the first-run step belongs to an install that has already started.
       if (legacySettings(value) || v2Settings(value) || v3Settings(value) || v4Settings(value) || v5Settings(value) || v6Settings(value)) { settings = { ...empty, ...value, version: 7, onboarded: true }; migrated = true; }
       else if (settingsShape(value)) settings = value;
@@ -122,6 +142,21 @@ export function createSettings(path: string, changed: (theme: Theme) => void, hi
     if (typeof value !== 'boolean') throw new Error(error); save({ ...settings, [key]: value });
   };
   return {
+    get installedThemes() { return [...(settings.marketplace?.installed ?? [])]; },
+    installTheme(id) {
+      if (!isMarketplaceTheme(id)) throw new Error('SETTINGS_COMMAND_INVALID');
+      const marketplace = settings.marketplace ?? { installed: [], builtIn: isBuiltInTheme(settings.theme) ? settings.theme : 'system', contrast: settings.contrast };
+      const installed = marketplace.installed.includes(id) ? marketplace.installed : [...marketplace.installed, id];
+      // Installation and application share one write so disk failures cannot leave a partial choice.
+      save({ ...settings, marketplace: { ...marketplace, installed }, theme: id, contrast: 'standard' });
+    },
+    removeTheme(id) {
+      if (!isMarketplaceTheme(id)) throw new Error('SETTINGS_COMMAND_INVALID');
+      const marketplace = settings.marketplace;
+      if (!marketplace?.installed.includes(id)) return;
+      const fallback = settings.theme === id ? { theme: marketplace.builtIn, contrast: marketplace.contrast } : {};
+      save({ ...settings, ...fallback, marketplace: { ...marketplace, installed: marketplace.installed.filter(theme => theme !== id) } });
+    },
     get theme() { return settings.theme; }, get contrast() { return settings.contrast; }, get darkPages() { return settings.darkPages; }, get darkStrength() { return settings.darkStrength; }, get darkTone() { return settings.darkTone; },
     get searchEngine() { return settings.searchEngine; }, get language() { return settings.language; }, get downloadsFolder() { return settings.downloadsFolder; }, get askWhereToSave() { return settings.askWhereToSave; }, get blockAds() { return settings.blockAds; }, get blockThirdPartyCookies() { return settings.blockThirdPartyCookies; }, get migrationAllowed() { return migrationAllowed; },
     get downloadsFolderUnavailable() { return readStatus.downloadsFolderUnavailable || settings.downloadsFolder !== null && !isDownloadsFolder(settings.downloadsFolder); },
@@ -139,8 +174,14 @@ export function createSettings(path: string, changed: (theme: Theme) => void, hi
       if (!isQuickAccess(quickAccess)) throw new Error('QUICK_ACCESS_LIMIT');
       save({ ...settings, quickAccess });
     },
-    setTheme(value, migrate) { if (!isTheme(value)) throw new Error('Invalid theme'); if (!migrate || migrationAllowed) save({ ...settings, theme: value }); },
-    setContrast(value) { if (!isContrast(value)) throw new Error('Invalid contrast'); save({ ...settings, contrast: value }); },
+    setTheme(value, migrate) {
+      if (!isTheme(value) || isMarketplaceTheme(value) && !settings.marketplace?.installed.includes(value)) throw new Error('Invalid theme');
+      if (!migrate || migrationAllowed) save({ ...settings, theme: value, ...(settings.marketplace && isBuiltInTheme(value) ? { marketplace: { ...settings.marketplace, builtIn: value, contrast: settings.contrast } } : {}) });
+    },
+    setContrast(value) {
+      if (!isContrast(value)) throw new Error('Invalid contrast');
+      save({ ...settings, contrast: value, ...(settings.marketplace && isBuiltInTheme(settings.theme) ? { marketplace: { ...settings.marketplace, contrast: value } } : {}) });
+    },
     setDarkPages(value) { if (!isDarkPagesMode(value)) throw new Error('Invalid dark pages mode'); save({ ...settings, darkPages: value }); },
     setDarkStrength(value) { if (!isDarkStrength(value)) throw new Error('Invalid dark strength'); save({ ...settings, darkStrength: value }); },
     setDarkTone(value) { if (!isDarkTone(value)) throw new Error('Invalid dark tone'); save({ ...settings, darkTone: value }); },

@@ -159,7 +159,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const state = (): BrowserState => ({
     ...current().state(), firstRun: !settings.onboarded && !privateWindow, version: app.getVersion(), activeProfileId: selectedProfile, privateWindow,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
-    storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
+    storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast, installedThemes: settings.installedThemes,
     quickAccess: settings.quickAccess, showCapture: settings.showCapture,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
     onStart: settings.onStart, searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
@@ -1281,6 +1281,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           setPermission(store.siteSettings, site.origin, command.permission, command.decision); persist(); permissions.reconcile(); break;
         }
         case 'answer-permission': permissions.answer(tab.state.id, command.id, command.answer); break;
+        case 'install-theme': settings.installTheme(command.id); break;
+        case 'remove-theme': settings.removeTheme(command.id); break;
         case 'theme': case 'migrate-theme': settings.setTheme(command.value, command.type === 'migrate-theme'); break;
         case 'contrast': settings.setContrast(command.value); break;
         case 'new-tab': {

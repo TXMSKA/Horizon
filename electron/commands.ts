@@ -1,7 +1,7 @@
 import { IMPORT_BROWSERS } from '../src/shared/api';
 import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
 import { isWebURL } from './browsing';
-import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart } from './settings';
+import { isMarketplaceTheme, isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
@@ -142,6 +142,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
       valid = Object.keys(command).length === (type === 'create-profile' ? 3 : 4) && Object.hasOwn(command, 'name') && Object.hasOwn(command, 'color')
         && typeof command.name === 'string' && command.name.length <= 256 && isProfileColor(command.color)
         && (type === 'create-profile' || isProfileId(command.id) && (!profileIds || profileIds.has(command.id))); break;
+    case 'install-theme': case 'remove-theme': keys(command, ['type', 'id']); valid = Object.keys(command).length === 2 && isMarketplaceTheme(command.id); break;
     case 'theme': case 'migrate-theme': keys(command, ['type', 'value']); valid = isTheme(command.value); break;
     case 'contrast': keys(command, ['type', 'value']); valid = isContrast(command.value); break;
     case 'dark-pages': keys(command, ['type', 'value']); valid = Object.keys(command).length === 2 && isDarkPagesMode(command.value); break;

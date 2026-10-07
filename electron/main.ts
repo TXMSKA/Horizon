@@ -16,7 +16,9 @@ const DESIGN_WIDTH = 1440;
 const DESIGN_HEIGHT = 900;
 // Development and verification must keep Chromium's writable state inside this repository.
 if (!app.isPackaged) {
-  const runtime = resolve(__dirname, '../../.runtime');
+  // Verifiers use a separate local profile so a developer's settings and sessions stay intact.
+  const directory = process.env.HORIZON_RUNTIME_DIRECTORY;
+  const runtime = resolve(__dirname, '../../.runtime', directory && /^[a-z0-9-]{1,80}$/.test(directory) ? directory : '');
   app.setPath('userData', runtime);
   app.setPath('sessionData', runtime);
   app.setPath('crashDumps', resolve(runtime, 'crashes'));
@@ -72,7 +74,7 @@ if (instance) {
     if (darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors)) setDarkPagesSwitch(app.commandLine, true);
     const background = () => {
       const resolved = settings.theme === 'system' ? nativeTheme.shouldUseDarkColors ? 'amber' : 'daylight' : settings.theme;
-      const palette = settings.contrast === 'high' ? resolved === 'amber' ? 'contrast-dark' : 'contrast-light' : resolved;
+      const palette = settings.contrast === 'high' || nativeTheme.shouldUseHighContrastColors ? resolved !== 'daylight' ? 'contrast-dark' : 'contrast-light' : resolved;
       const page = tokens.match(new RegExp(`--palette-${palette}-page:\\s*(#[a-fA-F0-9]{6})`))?.[1];
       if (!page) throw new Error('Missing theme background');
       return page;
@@ -99,7 +101,7 @@ if (instance) {
         backgroundColor: background(),
         webPreferences: {
           preload: resolve(__dirname, 'preload.js'),
-          additionalArguments: [`--horizon-theme=${settings.theme}`, `--horizon-contrast=${settings.contrast}`, `--horizon-theme-migrate=${settings.migrationAllowed ? 1 : 0}`],
+          additionalArguments: [`--horizon-theme=${settings.theme}`, `--horizon-contrast=${nativeTheme.shouldUseHighContrastColors ? 'high' : settings.contrast}`, `--horizon-theme-migrate=${settings.migrationAllowed ? 1 : 0}`],
           nodeIntegration: false,
           nodeIntegrationInWorker: false,
           nodeIntegrationInSubFrames: false,
@@ -114,7 +116,7 @@ if (instance) {
           zoomMode: 'isolated',
         },
       });
-      const systemTheme = () => { if (settings.theme === 'system') window.setBackgroundColor(background()); };
+      const systemTheme = () => { window.setBackgroundColor(background()); };
       nativeTheme.on('updated', systemTheme);
       window.once('closed', () => nativeTheme.removeListener('updated', systemTheme));
       window.removeMenu();

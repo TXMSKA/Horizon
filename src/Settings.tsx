@@ -149,7 +149,7 @@ function AppearanceSettings({ state, language }: { state: BrowserState; language
   const saved = (title: CopyKey, choice: CopyKey) => t('settingSaved').replace('{setting}', t(title)).replace('{value}', t(choice));
   return <>
     <SettingsGroup title="product" language={language}>
-      <SettingRow title="theme" hint={t('themeHint')} language={language}>{(id, apply, pending) => <SettingsSegmented id={id} value={state.theme} choices={[{ value: 'system', label: 'system' }, { value: 'amber', label: 'amber' }, { value: 'daylight', label: 'daylight' }]} disabled={pending} language={language} onChange={value => { void apply({ type: 'theme', value }, saved('theme', value)); }} />}</SettingRow>
+      <SettingRow title="theme" hint={t('themeHint')} language={language}>{(id, apply, pending) => <SettingsSegmented id={id} value={state.theme} choices={[{ value: 'system', label: 'system' }, { value: 'amber', label: 'amber' }, { value: 'daylight', label: 'daylight' }, ...(state.installedThemes ?? []).map(value => ({ value, label: value }))]} disabled={pending} language={language} onChange={value => { void apply({ type: 'theme', value }, saved('theme', value)); }} />}</SettingRow>
       <SettingsToggle title="highContrast" hint={t('contrastHint')} value={state.contrast === 'high'} command="contrast" language={language} />
       <SettingsToggle title="showCapture" hint={t('showCaptureHint')} value={state.showCapture} command="set-show-capture" language={language} />
     </SettingsGroup>
