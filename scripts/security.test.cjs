@@ -1,4 +1,5 @@
 const { test } = require('node:test');
+require('./vault.test.cjs');
 const assert = require('node:assert/strict');
 const { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, mkdirSync, symlinkSync, rmSync } = require('node:fs');
 const { resolve, join, dirname } = require('node:path');
@@ -4993,7 +4994,7 @@ test('browser menu keeps the drawn order, shortcuts and working zoom controls', 
   const { BrowserMenu } = interfaceModule('src/BrowserMenu.tsx', { 'lucide-react': {}, './copy': copy, './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' } });
   const tree = BrowserMenu({ language: 'en', active: { url: 'https://example.com/', zoom: 1 }, keyboard: true, opener: { current: null }, onDismiss() {}, onShortcut: action => shortcuts.push(action), onPanel: panel => panels.push(panel), onSettings() {}, onAbout() {}, run: async command => { commands.push(command); return true; } });
   const items = notebookNodes(tree, node => node.props.role === 'menuitem');
-  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'New window', 'New private window', 'Reopen closed tab', 'Close tab', 'Home', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Reload past the cache', 'Print page', 'Favorites', 'History', 'Downloads', 'Extensions', 'Settings', 'Clear browsing data', 'About Horizon']);
+  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'New window', 'New private window', 'Reopen closed tab', 'Close tab', 'Home', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Reload past the cache', 'Print page', 'Favorites', 'History', 'Downloads', 'Passwords', 'Extensions', 'Settings', 'Clear browsing data', 'About Horizon']);
   assert.deepEqual(notebookNodes(tree, node => node.type === 'kbd').map(node => node.props.children), ['Ctrl+T', 'Ctrl+N', 'Ctrl+Shift+N', 'Ctrl+Shift+T', 'Ctrl+F4', 'Alt+Home', 'Ctrl+F', 'Ctrl+F5 / Shift+F5', 'Ctrl+P', 'Ctrl+Shift+O', 'Ctrl+H', 'Ctrl+J', 'Ctrl+Shift+Delete']);
   assert.equal(notebookNodes(tree, node => node.type === 'hr').length, 4);
   items[1].props.onClick(); items[2].props.onClick(); items[6].props.onClick(); items[7].props.onClick(); items[8].props.onClick(); items[12].props.onClick();
@@ -5373,7 +5374,8 @@ test('browser panel routes are removed, panels use the menu anchor and all menu 
   const app = readFileSync('src/App.tsx', 'utf8'), menu = readFileSync('src/BrowserMenu.tsx', 'utf8'), panel = readFileSync('src/BrowserPanel.tsx', 'utf8'), { copy } = interfaceModule('src/copy.ts');
   assert.doesNotMatch(app, /className="library-panel"|panel-content|filteredEntries|confirmClearHistory/);
   assert.match(app, /<BrowserPanel[^>]+opener=\{menuButtonRef\}/); assert.match(panel, /<ToolbarPopover opener=\{opener\}/); assert.match(menu, /<ToolbarPopover opener=\{opener\}/);
-  assert.doesNotMatch(menu, /menuitemradio|highContrast|darkPages|passwords/);
+  assert.doesNotMatch(menu, /menuitemradio|highContrast|darkPages/);
+  assert.match(menu, /!privateWindow[^\n]+onPanel\('passwords'\)/);
   assert.match(app, /onClear=\{\(\) => openSettings\('privacy', true\)\}/);
   for (const route of ['horizon://history', 'horizon://bookmarks', 'horizon://downloads']) assert.throws(() => classifyInput(route));
   for (const key of ['newTab', 'newWindow', 'newPrivateWindow', 'privateWindow', 'private', 'saveCaptureFile', 'captureFileSaved', 'CAPTURE_SAVE_FAILED', 'privateBlockingHint', 'privateHistoryTitle', 'privateHistory', 'privateDownloadsTitle', 'privateDownloads', 'zoom', 'zoomIn', 'zoomOut', 'fullscreen', 'find', 'favorites', 'history', 'downloads', 'settings', 'aboutHorizon', 'appVersion', 'today', 'yesterday', 'downloadSize', 'downloadStateSize', 'downloadRetry', 'downloadRemove', 'downloadDone', 'close']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim(), `${key}: ${language}`);

@@ -1,6 +1,17 @@
 import type { LyraCommand, LyraState } from './lyra';
 import type { TranslateCommand, TranslateState, TranslationChoices } from './translate';
 export type Language = 'en' | 'es';
+export type VaultTimeout = 'close' | '5' | '15' | '60';
+export interface VaultLogin { id: string; origin: string; title: string; username: string }
+export interface VaultSuggestion { id: string; origin: string; x: number; y: number; width: number; logins: VaultLogin[] }
+export interface VaultState { available: boolean; created: boolean; unlocked: boolean; unlockMethod: 'hello' | 'master' | null; timeout: VaultTimeout; logins: VaultLogin[]; suggestion: VaultSuggestion | null; error: 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAILABLE' | null; windows: boolean }
+export type VaultCommand =
+  | { type: 'vault-refresh' | 'vault-lock' | 'vault-hello' | 'vault-dismiss' }
+  | { type: 'vault-unlock'; password: string }
+  | { type: 'vault-fill'; suggestion: string; id: string }
+  | { type: 'vault-copy'; id: string; origin: string }
+  | { type: 'vault-add'; title: string; website: string; username: string; password: string }
+  | { type: 'set-vault-timeout'; value: VaultTimeout };
 export type LanguageSetting = 'system' | Language;
 export type OnStart = 'restore' | 'new-page';
 export const SEARCH_ENGINES = {
@@ -64,7 +75,7 @@ export interface PermissionPrompt { id: string; origin: string; permissions: Sit
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 5; history: HistoryEntry[]; favorites: FavoritesTree; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { translation: TranslateState; id: string; groupId: string | null; movable: boolean; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { lyra: LyraState; extensions: ExtensionState[]; extensionWarning: ExtensionWarning | null; extensionsUpdating: boolean; extensionsError: boolean; firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; update: UpdateState; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; installedThemes: MarketplaceTheme[]; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export interface BrowserState { vault: VaultState; lyra: LyraState; extensions: ExtensionState[]; extensionWarning: ExtensionWarning | null; extensionsUpdating: boolean; extensionsError: boolean; firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; update: UpdateState; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; installedThemes: MarketplaceTheme[]; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}` | `extension:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean; label?: string; checked?: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
@@ -83,7 +94,7 @@ export type CaptureSummary = Pick<DesktopItem, 'id' | 'title' | 'source' | 'crea
 export type DesktopPanelPage = { kind: 'home' | 'captures' | 'new-project' } | { kind: 'project'; project: string; folder?: string | null } | { kind: 'item'; project: string | null; id: string };
 export interface DesktopPanelState { open: boolean; page: DesktopPanelPage }
 export type DesktopError = 'DESKTOP_COMMAND_INVALID' | 'DESKTOP_LOCKED' | 'FOLDER_NAME_INVALID' | 'FOLDER_NAME_EMPTY' | 'FOLDER_NAME_LONG' | 'FOLDER_NAME_DUPLICATE' | 'FOLDER_LIMIT' | 'FOLDER_NOT_FOUND' | 'CAPTURE_LIMIT' | 'LINK_INVALID' | 'TEXT_INVALID' | 'DESKTOP_NOT_FOUND' | 'PROJECT_NAME_INVALID' | 'PROJECT_NAME_EMPTY' | 'PROJECT_NAME_LONG' | 'PROJECT_NAME_DUPLICATE' | 'PROJECT_ADDRESS_CONFLICT' | 'PROJECT_LIMIT' | 'PROJECT_ITEM_LIMIT' | 'PROJECT_NOT_FOUND' | 'DESKTOP_ITEM_NOT_FOUND' | 'DESKTOP_ITEM_INVALID' | 'DESKTOP_STORAGE_FAILED' | 'DESKTOP_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'CAPTURE_LOADING' | 'CAPTURE_CRASHED' | 'CAPTURE_DESKTOP' | 'CAPTURE_SETTINGS';
-export type BrowserCommand =
+export type BrowserCommand = VaultCommand
   | { type: 'set-extension-enabled'; id: string; enabled: boolean }
   | { type: 'set-extension-pinned'; id: string; pinned: boolean }
   | { type: 'remove-extension'; id: string }

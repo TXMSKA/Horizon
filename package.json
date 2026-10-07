@@ -38,7 +38,8 @@
     "lyra-client": "file:../Lyra/packages/client",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "tldts-experimental": "7.4.15"
+    "tldts-experimental": "7.4.15",
+    "vault-client": "file:../Vault/packages/client"
   },
   "devDependencies": {
     "@electron/fuses": "2.1.3",

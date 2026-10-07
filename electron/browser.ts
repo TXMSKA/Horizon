@@ -1,3 +1,5 @@
+import { createVault } from './vault';
+import type { VaultCommand } from '../src/shared/api';
 import { app, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
 import type { BrowserWindow, DownloadItem, Session, WebContents } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
@@ -104,7 +106,7 @@ function attachSession(target: Session, owner: SessionOwner) {
   return () => { owners!.delete(owner); if (!owners!.size) { sessionOwners.delete(target); profileSessions.delete(target); } };
 }
 
-type BrowserOwner = { window: BrowserWindow; privateWindow: boolean; activeProfile(): string; publish(): void; flush(): void; stop(): void; releasePrivate(): void; persistSessions(): void; settingsChanged(): void; disposeProfile(id: string): void; registryChanged(): void; runtime(id: string): unknown };
+type BrowserOwner = { window: BrowserWindow; privateWindow: boolean; activeProfile(): string; publish(): void; flush(): void; stop(): void; releasePrivate(): void; persistSessions(): void; settingsChanged(): void; closeVault(): Promise<void>; disposeProfile(id: string): void; registryChanged(): void; runtime(id: string): unknown };
 interface ProfileData { store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number; importProgress: ImportProgress | null }
 export interface BrowserGroup {
   registry: ProfileRegistry; owners: Map<string, BrowserOwner>; profiles: Map<string, ProfileData>;
@@ -181,7 +183,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     extensionWarning: extensionDecision?.warning ?? null,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast, installedThemes: settings.installedThemes,
-    quickAccess: settings.quickAccess, showCapture: settings.showCapture,
+    vault: vault.state(), quickAccess: settings.quickAccess, showCapture: settings.showCapture,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
     onStart: settings.onStart, searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
     ...resolvedDownloadsFolder(settings, downloads), askWhereToSave: settings.askWhereToSave,
@@ -193,6 +195,16 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     window.setTitle(tab?.url && tab.url !== 'about:blank' ? `${tab.title || tab.url} - Horizon` : 'Horizon');
     window.webContents.send(IPC.stateChanged, state());
   };
+  const vault = createVault({ window, directory: userData, privateWindow, cipher: safeStorage, clipboard,
+    timeout: () => settings.vaultTimeout ?? 'close', saveTimeout: value => settings.setVaultTimeout(value), changed: publish,
+    covered: () => area.hidden,
+    revealPage: () => { area = { ...area, hidden: false }; layout(); },
+    page: () => {
+      const runtime = current(), tab = runtime?.active(), contents = runtime?.page(tab?.view);
+      if (!tab?.view || !contents || tab.navigating || tab.state.loading || tab.state.error || tab.state.settings || tab.state.desktop || tab.state.fullscreen) return null;
+      return { contents, generation: tab.pageLoad, id: tab.state.id, bounds: tab.view.getBounds(), zoom: contents.getZoomFactor(), pixels: screen.getDisplayMatching(window.getContentBounds()).scaleFactor };
+    },
+  });
   const blocker = createBlockingEngine(userData, publish);
   const defaultBrowser = defaultBrowserOverride ?? createDefaultBrowser({ platform: process.platform, isPackaged: app.isPackaged, execPath: process.execPath, openExternal: url => shell.openExternal(url), changed: publish });
   const refreshDefaultBrowser = () => { void defaultBrowser.refresh().then(publish); };
@@ -232,6 +244,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   nativeTheme.on('updated', systemDarkPages);
   const run = (command: BrowserCommand) => {
     if (closing || shared.quitting) throw new Error('Browser is closing');
+    if (command.type.startsWith('vault-') || command.type === 'set-vault-timeout') return vault.run(command as VaultCommand);
+    if (['navigate', 'activate-tab', 'close-tab', 'switch-profile', 'home', 'back', 'forward', 'reload', 'new-tab', 'open-settings', 'zoom', 'fullscreen', 'move-tab-to-window'].includes(command.type)) vault.invalidate();
     if (privateWindow) assertPrivateCommand(command);
     if (privateWindow && ['switch-profile', 'create-profile', 'update-profile', 'delete-profile', 'set-blocking', 'set-site-permission', 'answer-permission', 'reset-site', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].includes(command.type)) throw new Error('Private window settings are fixed');
     switch (command.type) {
@@ -995,6 +1009,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       });
       on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
         if (tab.view !== view) return;
+        if (active() === tab) vault.invalidate();
         invalidateMenu(tab.state.id);
         if (isMainFrame) permissions.drop(tab.state.id);
         if (isMainFrame && active() === tab) invalidateCaptures();
@@ -1815,6 +1830,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         try { clearStoredHistoryOnClose(storePath, store, safeStorage, writeStore); } catch { storageFailure(new Error('History clearing failed')); }
         if (store.clearCacheOnClose) try { await session.fromPartition(profile.partition).clearCache(); } catch { storageFailure(new Error('Cache clearing failed')); }
       })).then(async () => {
+        await Promise.allSettled([...shared.owners.values()].map(owner => owner.closeVault()));
         await Promise.allSettled([...shared.privateCleanup]);
         shared.quitCleared = true;
       });
@@ -1829,8 +1845,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!shared.quitRequested) { shared.quitRequested = true; void clearing.then(() => app.quit()); }
     }
   };
+  let vaultClosed = false, vaultClosing: Promise<void> | undefined;
   window.on('close', (event: Electron.Event) => {
     flush();
+    if (!vaultClosed && vault.hasSession()) {
+      event.preventDefault();
+      vaultClosing ??= vault.close().catch(() => undefined).then(() => { vaultClosed = true; window.close(); });
+      return;
+    }
     if (shared.owners.size === 1 && !shared.quitCleared && (needsClearOnClose() || privateWindow || shared.privateCleanup.size)) {
       event.preventDefault();
       if (privateWindow) cleanupPrivate();
@@ -1841,7 +1863,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const chromeContents = window.webContents;
   window.on('closed', () => {
     cancelExtensionDecision();
-    closing = true; invalidateMenu();
+    closing = true; invalidateMenu(); void vault.close().catch(() => undefined);
     blocker.stop();
     nativeTheme.removeListener('updated', systemDarkPages);
     for (const runtime of runtimes.values()) runtime.dispose();
@@ -1878,7 +1900,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     shared.privateCleanup.add(cleanup); void cleanup.finally(() => shared.privateCleanup.delete(cleanup));
   };
   const owner: BrowserOwner = { window, privateWindow, activeProfile: () => selectedProfile, publish, flush, stop: () => { closing = true; blocker.stop(); for (const runtime of runtimes.values()) runtime.stopForClear(); },
-    releasePrivate: cleanupPrivate,
+    releasePrivate: cleanupPrivate, closeVault: () => vault.close(),
     persistSessions: () => { for (const runtime of runtimes.values()) runtime.persistSession(); },
     settingsChanged: () => {
       updateDarkPages();
@@ -1933,5 +1955,5 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     source.transferTab(source.tabs.find(tab => tab.state.id === id)!, target);
   };
   return { layout, flush, windowId, privateWindow, activeProfile: () => selectedProfile, registry: () => shared.registry, settingsChanged: () => { for (const owner of shared.owners.values()) owner.settingsChanged(); }, openLaunch: (url: string) => { if (!privateWindow && (isWebURL(url) || isLocalHTMLURL(url))) current().newTab(url, true, undefined, true); },
-    extensionsChanged: publish, moveTab };
+    extensionsChanged: publish, moveTab, closeVault: () => vault.close() };
 }

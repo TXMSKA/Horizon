@@ -847,3 +847,22 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
   .capture-actions button { min-width: var(--target-touch); }
   .capture-editor-bar { height: auto; min-height: var(--height-capture-editor); flex-wrap: wrap; padding-block: var(--space-8); }
 }
+
+.vault-status { display: flex; gap: var(--space-10); align-items: center; color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); }
+.vault-status > svg { flex: none; width: var(--icon-control); height: var(--icon-control); color: var(--profile-green); }
+.vault-note { color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); }
+/* The hint breaks where the board breaks it, so the last word never sits alone. */
+.vault-status > span { white-space: pre-line; }
+.vault-row { gap: var(--space-10); min-height: var(--size-44); }
+.vault-row > .icon-button { flex: none; }
+.vault-add, .vault-dialog form { display: flex; flex-direction: column; gap: var(--space-16); }
+.vault-form-field { display: flex; flex-direction: column; gap: var(--space-6); font-size: var(--type-label); }
+.vault-form-field input { width: 100%; min-height: var(--size-36); padding: var(--space-8) var(--space-10); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-small); background: var(--surface-field); color: var(--text-title); }
+.vault-suggestion { position: fixed; z-index: var(--layer-overlay); display: flex; flex-direction: column; gap: var(--space-6); width: var(--width-vault-suggestion); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: calc(100vh - var(--toolbar-popup-edge) * 2); overflow-y: auto; padding: var(--space-10); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--text-title); }
+.vault-heading { display: flex; align-items: center; gap: var(--space-10); padding-inline-start: var(--space-10); font-size: var(--type-label); }
+.vault-heading > svg { width: var(--icon-control); height: var(--icon-control); color: var(--accent); }
+.vault-heading > strong { flex: 1; }
+.vault-account { display: flex; align-items: center; text-align: start; gap: var(--space-10); min-height: var(--height-vault-account); padding: var(--space-6) var(--space-10); border-radius: var(--radius-small); background: var(--surface-selected); color: var(--text-title); font-size: var(--type-label); }
+.vault-account:hover { background: var(--surface-hover); }
+.vault-suggestion > .vault-note { padding: var(--space-4) var(--space-10); }
+.vault-suggestion .vault-status > svg { color: var(--text-secondary); }

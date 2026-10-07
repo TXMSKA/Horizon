@@ -506,6 +506,9 @@
   --width-suggestion-hint: 40%;
   --width-menu: 22.5rem;
   --width-browser-panel: 23.75rem;
+  --width-vault-suggestion: 22.25rem;
+  --height-vault-suggestion: 10rem;
+  --height-vault-account: 3rem;
   --height-favorites-bar: 34px;
   --width-favorite-popover: 350px;
   --width-favorite-item: 200px;
