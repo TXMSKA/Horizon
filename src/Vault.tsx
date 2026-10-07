@@ -8,7 +8,7 @@ import { ToolbarPopover } from './ToolbarPopover';
 
 type Action = (command: VaultCommand) => Promise<boolean>;
 
-function VaultUnlock({ language, action, onClose, onUnlocked }: { language: Language; action: Action; onClose(): void; onUnlocked(): Promise<void> }) {
+export function VaultUnlock({ language, action, onClose, onUnlocked }: { language: Language; action: Action; onClose(): void; onUnlocked(): Promise<void> }) {
   const t = (key: CopyKey) => text(key, language), id = useId();
   const dialog = useRef<HTMLDialogElement>(null), input = useRef<HTMLInputElement>(null), busy = useRef(false);
   const [password, setPassword] = useState(''), [pending, setPending] = useState(false), [failed, setFailed] = useState(false);
@@ -25,6 +25,32 @@ function VaultUnlock({ language, action, onClose, onUnlocked }: { language: Lang
       <label className="vault-form-field"><span>{t('vaultMasterPassword')}</span><input type="password" ref={input} value={password} maxLength={128} autoComplete="off" required disabled={pending} onChange={event => setPassword(event.target.value)} /></label>
       {failed && <p className="browser-panel-error" role="alert">{t('VAULT_UNAVAILABLE')}</p>}
       <div className="settings-dialog-actions"><button className="settings-button" type="button" disabled={pending} onClick={onClose}>{t('cancel')}</button><button className="settings-button primary" type="submit" disabled={pending || !password}>{t(pending ? 'loading' : 'vaultUnlock')}</button></div>
+    </form>
+  </dialog>;
+}
+
+// Vault's onboarding step for the import: one approval, with the master password or Windows Hello, which also unlocks Vault.
+export function VaultImportPermission({ language, windows, describe, onGranted, onClose }: { language: Language; windows: boolean; describe(reason: unknown): string; onGranted(): Promise<void>; onClose(): void }) {
+  const t = (key: CopyKey) => text(key, language), id = useId();
+  const dialog = useRef<HTMLDialogElement>(null), input = useRef<HTMLInputElement>(null), busy = useRef(false);
+  const [password, setPassword] = useState(''), [pending, setPending] = useState(false), [failure, setFailure] = useState('');
+  useEffect(() => { dialog.current?.showModal(); input.current?.focus(); }, []);
+  const send = (command: VaultCommand) => {
+    if (busy.current) return;
+    busy.current = true; setPending(true); setFailure('');
+    window.horizon.command(command).then(async () => { await onGranted(); onClose(); }, (reason: unknown) => { setFailure(describe(reason)); input.current?.focus(); }).finally(() => { busy.current = false; setPending(false); });
+  };
+  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-describedby={`${id}-hint`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }}>
+    <form onSubmit={event => {
+      event.preventDefault();
+      const value = password; setPassword('');
+      send({ type: 'vault-import-permission', password: value });
+    }}><div className="settings-dialog-heading"><h2 id={`${id}-title`}>{t('vaultImportPermissionTitle')}</h2><p className="setting-hint" id={`${id}-hint`}>{t('vaultImportPermissionHint')}</p></div>
+      <label className="vault-form-field"><span>{t('vaultMasterPassword')}</span><input type="password" ref={input} value={password} maxLength={128} autoComplete="off" required disabled={pending} onChange={event => setPassword(event.target.value)} /></label>
+      {failure && <p className="browser-panel-error" role="alert">{failure}</p>}
+      <div className="settings-dialog-actions"><button className="settings-button" type="button" disabled={pending} onClick={onClose}>{t('cancel')}</button>
+        {windows && <button className="settings-button" type="button" disabled={pending} onClick={() => send({ type: 'vault-import-permission-hello' })}><Fingerprint aria-hidden="true" />{t('vaultImportPermissionHello')}</button>}
+        <button className="settings-button primary" type="submit" disabled={pending || !password}>{t(pending ? 'loading' : 'vaultImportPermissionAllow')}</button></div>
     </form>
   </dialog>;
 }

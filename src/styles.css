@@ -380,6 +380,12 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .import-label { color: var(--text-secondary); font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--line-caption); }
 .settings-radio > span:first-of-type { border-radius: var(--radius-pill); }
 .settings-checkbox:has(input:disabled) { color: var(--text-secondary); cursor: default; }
+.import-detail, .import-passwords, .import-confirm { margin: 0; }
+.import-detail, .import-passwords { padding-inline-start: calc(var(--size-18) + var(--space-10)); }
+.import-passwords { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
+.import-passwords p, .import-confirm p { margin: 0; }
+.import-passwords-file { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8) var(--space-12); }
+.import-confirm { display: flex; flex-direction: column; gap: var(--space-12); }
 .settings-profiles { display: flex; flex-direction: column; gap: var(--space-24); }
 .settings-folder-unavailable { display: block; color: var(--text-error); }
 .settings-profile-row { display: flex; align-items: center; gap: var(--space-12); padding-block: var(--space-12); }

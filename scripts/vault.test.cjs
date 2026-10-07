@@ -5,7 +5,7 @@ const { resolve, join } = require('node:path');
 const { randomBytes, createCipheriv, createDecipheriv } = require('node:crypto');
 const { loginFields, inspectLogin, fillLogin } = require('../dist/electron/vault-page.js');
 const { vaultTokenStore, readVaultFile, vaultClipboard } = require('../dist/electron/vault-storage.js');
-const { createVault, loginMetadata } = require('../dist/electron/vault.js');
+const { createVault, loginMetadata, loginSummaries } = require('../dist/electron/vault.js');
 const { vaultLogFields } = require('../dist/electron/vault-log.js');
 const { validateCommand } = require('../dist/electron/commands.js');
 const { createSettings } = require('../dist/electron/settings.js');
@@ -62,6 +62,8 @@ function controller(t, privateWindow = false, policy = 'close') {
   const service = {
     async status() { return { created: true, unlocked }; }, async unlock() { unlocked = true; }, async lock() { unlocked = false; }, async close() { closed++; },
     async logins(site) { reads.push(site); return [row(), row('https://synthetic.example.evil', 'evil-id')]; },
+    apps: { async self() { return { id: 'horizon', name: 'Horizon', kind: 'cosmic', status: 'granted', kinds: ['login'], permissions: ['import'] }; } },
+    async listLogins() { return [{ id: 'synthetic-id', version: 1, title: 'Synthetic site', username: 'synthetic-user', website: origin }]; },
     hello: { async unlock(handle) { hwnd = handle; unlocked = true; } }, entries: { async save() {} },
   };
   const folder = directory(t), protection = cipher();
@@ -204,4 +206,27 @@ test('Vault lock interrupts a pending fill and clipboard disposal awaits an OS w
   const writing = new Promise(done => { started = done; });
   const clipboard = vaultClipboard({ async writeText(text) { started(); await new Promise(done => { finishWrite = done; }); value = text; }, async readText() { return value; }, async clear() { value = ''; } });
   const copy = clipboard.copy(secret); await writing; const disposed = clipboard.clear(); finishWrite(); await copy; await disposed; assert.equal(value, '');
+});
+
+test('Vault lists every saved sign-in from one request as display metadata and keeps the sealed index bounded', async t => {
+  const fixture = controller(t);
+  const summary = (id, website, extra = {}) => ({ id, version: 1, title: 'Site ' + id, username: 'user-' + id, website, ...extra });
+  fixture.service.listLogins = async () => [summary('one', 'https://one.example/login'), summary('two', 'https://two.example'), summary('one', 'https://dup.example'), summary('bad', 'javascript:alert(1)'), summary('none', ''), { id: 7, title: 1, username: 2, website: 3 }, summary('long', 'https://long.example', { title: 'x'.repeat(900), username: 'y'.repeat(900) })];
+  await fixture.vault.run({ type: 'vault-unlock', password: 'Synthetic master password' });
+  assert.deepEqual(fixture.reads, []);
+  const logins = fixture.vault.state().logins;
+  assert.deepEqual(logins.map(item => [item.id, item.origin]), [['one', 'https://one.example'], ['two', 'https://two.example'], ['long', 'https://long.example']]);
+  assert.equal(logins[2].title.length, 500); assert.equal(logins[2].username.length, 512);
+  assert.equal(fixture.events.some(state => JSON.stringify(state).includes(secret)), false);
+  const bytes = readFileSync(join(fixture.folder, 'vault-sites.sealed'));
+  assert.equal(bytes.includes(Buffer.from('user-one')), false); assert.equal(bytes.includes(Buffer.from('one.example')), false);
+  assert.deepEqual(readVaultFile(join(fixture.folder, 'vault-sites.sealed'), fixture.protection).map(item => item.id), ['one', 'two', 'long']);
+  fixture.service.listLogins = async () => Array.from({ length: 5000 }, (_, index) => summary('bulk-' + index, 'https://bulk' + index + '.example'));
+  await fixture.vault.run({ type: 'vault-refresh' });
+  assert.equal(fixture.vault.state().logins.length, 4096);
+  fixture.service.listLogins = async () => ({ not: 'a list' });
+  await assert.rejects(fixture.vault.run({ type: 'vault-refresh' }), /VAULT_UNAVAILABLE/);
+  assert.deepEqual(fixture.vault.state().logins, []);
+  assert.deepEqual(loginSummaries([]), []);
+  assert.throws(() => loginSummaries(null), /VAULT_UNAVAILABLE/);
 });
