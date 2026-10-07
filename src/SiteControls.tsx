@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
-import { Bell, Camera, Check, Map, Mic } from 'lucide-react';
+import { Bell, Camera, Check, Map, Mic, Sparkles } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
@@ -14,6 +14,7 @@ const permissionRows: Record<SitePermission, { name: CopyKey; request: CopyKey; 
   microphone: { name: 'permissionMicrophone', request: 'useMicrophone', icon: Mic },
   location: { name: 'permissionLocation', request: 'knowLocation', icon: Map },
   notifications: { name: 'permissionNotifications', request: 'showNotifications', icon: Bell },
+  lyra: { name: 'lyra', request: 'lyraSummarise', icon: Sparkles },
 };
 const decisions: PermissionDecision[] = ['ask', 'allow', 'block'];
 const decisionLabels: Record<PermissionDecision, CopyKey> = { ask: 'permissionAsk', allow: 'permissionAllowed', block: 'permissionBlocked' };

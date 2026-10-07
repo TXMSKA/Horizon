@@ -6,6 +6,7 @@ import { isWebURL } from './browsing';
 import { isProfileId } from './profiles';
 import { encryptedStore, readStoreFile, writeStoreFile } from './store';
 import type { StoreCipher, StoreReadStatus } from './store';
+import type { LyraSource } from '../src/shared/lyra';
 import { desktopText, desktopInputText, desktopTitle } from '../src/shared/desktop-input';
 import { desktopAddress } from '../src/shared/desktop-address';
 export { desktopText, desktopInputText, desktopTitle } from '../src/shared/desktop-input';
@@ -411,6 +412,27 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
       assertUnlocked();
       if (!desktopTitle(title) || !desktopInputText(text, 100000)) throw new Error('DESKTOP_ITEM_INVALID');
       const now = Date.now(); add(id, { id: randomUUID(), folder: destination, kind: 'note', title, text, note: '', source: null, image: null, createdAt: now, updatedAt: now });
+    },
+    addLyra: (id: string, title: string, text: string, sources: LyraSource[]) => {
+      assertUnlocked(); const project = get(id), previous = structuredClone(project), inUse = store.inUse;
+      if (!desktopTitle(title) || !desktopInputText(text, 100000)) throw new Error('DESKTOP_ITEM_INVALID');
+      const links = [...new Map(sources.filter(source => source.url !== null).map(source => [source.url!, source])).values()];
+      if (project.items.length + links.length + 1 > PROJECT_ITEM_LIMIT) throw new Error('PROJECT_ITEM_LIMIT');
+      const now = Date.now();
+      for (const source of links) {
+        if (!isWebURL(source.url) || !desktopTitle(source.title)) throw new Error('LINK_INVALID');
+      }
+      try {
+        // The answer follows its sources in storage so the panel's newest-first list keeps them underneath it.
+        for (const source of links) add(id, { id: randomUUID(), folder: null, kind: 'link', title: source.title, text: '', note: '', source: { url: source.url!, title: source.title }, image: null, createdAt: now, updatedAt: now });
+        const citations = sources.map(source => `${source.title}\n${source.url ?? (source.project ? desktopAddress(get(source.project).name) : 'horizon://desktop/captures')}`).join('\n\n');
+        add(id, { id: randomUUID(), folder: null, kind: 'note', title, text: `${text}\n\n${citations}`, note: '', source: null, image: null, createdAt: now, updatedAt: now });
+        saveStore();
+      } catch {
+        Object.assign(project, previous); store.inUse = inUse;
+        throw new Error('DESKTOP_STORAGE_FAILED');
+      }
+      changed();
     },
     addCapture: (id: string | null, entry: DesktopItem, bytes?: Buffer, image?: Omit<CaptureImage, 'filename' | 'bytes'>) => {
       assertUnlocked();

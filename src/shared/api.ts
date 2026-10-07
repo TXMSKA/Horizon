@@ -1,3 +1,4 @@
+import type { LyraCommand, LyraState } from './lyra';
 export type Language = 'en' | 'es';
 export type LanguageSetting = 'system' | Language;
 export type OnStart = 'restore' | 'new-page';
@@ -48,7 +49,7 @@ export interface FavoritesTree { bar: FavoriteItem[]; other: FavoriteItem[] }
 export type FavoriteParent = 'bar' | 'other' | string;
 export type DownloadStatus = 'progressing' | 'completed' | 'failed' | 'cancelled';
 export interface DownloadEntry { id: string; url: string; filename: string; path: string; received: number; total: number; status: DownloadStatus; startedAt: number }
-export const SITE_PERMISSIONS = ['camera', 'microphone', 'location', 'notifications'] as const;
+export const SITE_PERMISSIONS = ['camera', 'microphone', 'location', 'notifications', 'lyra'] as const;
 export type SitePermission = typeof SITE_PERMISSIONS[number];
 export type PermissionDecision = 'ask' | 'allow' | 'block';
 export type PermissionDecisions = Record<SitePermission, PermissionDecision>;
@@ -59,7 +60,7 @@ export interface PermissionPrompt { id: string; origin: string; permissions: Sit
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 5; history: HistoryEntry[]; favorites: FavoritesTree; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { id: string; groupId: string | null; movable: boolean; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { extensions: ExtensionState[]; extensionWarning: ExtensionWarning | null; extensionsUpdating: boolean; extensionsError: boolean; firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; update: UpdateState; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export interface BrowserState { lyra: LyraState; extensions: ExtensionState[]; extensionWarning: ExtensionWarning | null; extensionsUpdating: boolean; extensionsError: boolean; firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; update: UpdateState; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}` | `extension:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean; label?: string; checked?: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
@@ -85,6 +86,7 @@ export type BrowserCommand =
   | { type: 'open-extension'; id: string; anchor?: CaptureRect }
   | { type: 'check-extension-updates' }
   | { type: 'answer-extension-install'; id: string; allow: boolean }
+  | LyraCommand
   | { type: 'set-on-start'; value: OnStart }
   | { type: 'new-window' | 'new-private-window' | 'reopen-tab' | 'home' | 'reload-no-cache' | 'print' }
   | { type: 'pin-app' | 'unpin-app'; id: HubApp }

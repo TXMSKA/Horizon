@@ -438,8 +438,35 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .lyra-button > span { display: grid; place-items: center; width: var(--size-30); height: var(--size-30); border-radius: var(--radius-pill); background: var(--accent); color: var(--on-accent); }
 .lyra-button:not(:disabled):hover > span { background: var(--accent-hover); }
 .lyra-button:not(:disabled):active > span { background: var(--accent-pressed); }
-.lyra-toolbar-preview { display: flex; flex-direction: column; gap: var(--space-12); width: var(--width-hub); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow-y: auto; padding: var(--space-16); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); font-size: var(--type-label); }
-.lyra-toolbar-preview .preview-notice { margin: 0; }
+.panel-faces { margin-inline-end: auto; }
+.lyra-suggestions, .lyra-tabs { display: flex; flex-direction: column; gap: var(--space-4); }
+.lyra-suggestions > button, .lyra-tab { display: flex; align-items: center; gap: var(--space-10); height: var(--size-36); padding-inline: var(--space-10); border-radius: var(--radius-small); text-align: start; font-size: var(--type-label); }
+.lyra-suggestions > button > svg { width: var(--size-24); color: var(--text-secondary); }
+.lyra-suggestions > button:hover, .lyra-tab:hover { background: var(--surface-hover); }
+.lyra-tab input { flex: none; width: var(--size-16); height: var(--size-16); min-height: 0; accent-color: var(--accent); }
+.lyra-tab > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lyra-question { display: flex; justify-content: flex-end; }
+.lyra-attachment { align-self: flex-end; width: var(--width-lyra-attachment); max-width: 100%; }
+.lyra-question > p { padding: var(--space-10) var(--space-14); border-radius: var(--radius-panel); background: var(--surface-selected); color: var(--text-title); overflow-wrap: anywhere; white-space: pre-wrap; }
+.lyra-answer { white-space: pre-wrap; overflow-wrap: anywhere; }
+.lyra-permission { display: flex; flex-direction: column; gap: var(--space-10); padding: var(--space-16); border: var(--border-width) solid var(--divider); border-radius: var(--radius-panel); background: var(--surface-sunken); }
+.lyra-permission h2 { font-size: var(--type-body); font-weight: var(--weight-heading); }
+.lyra-permission-actions { display: flex; flex-direction: column; gap: var(--space-8); padding-top: var(--space-4); }
+.lyra-permission-actions > div { display: flex; gap: var(--space-8); }
+.lyra-permission-actions > div > button { flex: 1; }
+.lyra-sources { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-6); }
+.lyra-sources .desktop-small-link { display: flex; gap: var(--space-6); min-height: var(--size-28); text-align: start; }
+.lyra-sources .desktop-small-link > span { overflow-wrap: anywhere; }
+/* The summary's sources travel with the saved item, as the board draws; the longer answer link sits under the actions it follows. */
+.lyra-longer { align-self: flex-start; }
+.lyra-loading { display: flex; align-items: center; gap: var(--space-8); flex-wrap: wrap; font-size: var(--type-label); color: var(--text-secondary); }
+.lyra-loading progress { width: 100%; accent-color: var(--accent); }
+.lyra-body > .lyra-spacer { flex: 1; }
+.lyra-ask-field { flex: none; height: var(--size-44); padding: 0 var(--space-4) 0 var(--space-10); gap: var(--space-8); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); font-size: var(--type-label); }
+.lyra-ask-field > input { min-height: 0; }
+.lyra-content { display: flex; justify-content: center; min-height: 0; overflow: hidden; background: var(--surface-raised); }
+.lyra-tab-view { height: 100%; }
+.lyra-tab-view::before { display: none; }
 .hub-popup { position: relative; width: var(--width-hub); height: var(--height-hub); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow-y: auto; border-radius: var(--radius-sheet); background: var(--surface-page); color: var(--text-title); outline: none; }
 .hub-popup::after { content: ''; position: absolute; inset: 0; border: var(--border-width) solid var(--border-popover); border-radius: inherit; pointer-events: none; }
 .hub-app-page { background: var(--surface-raised); }

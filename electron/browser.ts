@@ -6,6 +6,10 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
+import { createLyra } from './lyra';
+import { sealedLyraTokens } from './lyra-token';
+import type { LyraCommand } from '../src/shared/lyra';
+import { LYRA_ADDRESS } from '../src/shared/lyra';
 import { GROUP_COLORS, IPC, SEARCH_ENGINES } from '../src/shared/api';
 import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, ExtensionWarning, ImportProgress, ImportResult, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } from '../src/shared/shortcuts';
@@ -118,7 +122,7 @@ function handleChrome(window: BrowserWindow, channel: string, handler: (event: E
 export function restoredWindows(userData: string, registry: ProfileRegistry) {
   const windows = new Map<string, string>();
   for (const profile of registry.profiles) {
-    const saved = readWindowSessions(resolve(dirname(profileStorePath(userData, profile.id)), 'session.json'), safeStorage, url => url.startsWith('horizon://desktop/'), { readError: false, memoryOnly: false });
+    const saved = readWindowSessions(resolve(dirname(profileStorePath(userData, profile.id)), 'session.json'), safeStorage, url => url === LYRA_ADDRESS || url.startsWith('horizon://desktop/'), { readError: false, memoryOnly: false });
     for (const window of saved.windows) if (!windows.has(window.id) || window.selected) windows.set(window.id, window.selected ? profile.id : windows.get(window.id) ?? registry.activeId);
   }
   return [...windows].map(([id, profileId]) => ({ id, profileId }));
@@ -343,7 +347,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const status = { readError: false, memoryOnly: false }, sessionStatus = { readError: false, memoryOnly: false };
       const store = readStore(storePath, safeStorage, status);
       const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { for (const owner of shared.owners.values()) { owner.persistSessions(); owner.publish(); } });
-      const own = (url: string) => url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
+      const own = (url: string) => url === LYRA_ADDRESS || url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
       data = { store, status, desktop, sessions: readWindowSessions(resolve(dirname(storePath), 'session.json'), safeStorage, own, sessionStatus), sessionStatus, favoritesVersion: 0, importProgress: null };
       shared.profiles.set(profile.id, data);
     }
@@ -353,7 +357,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     // A fresh snapshot shows normal-window edits without lending private code the writable tree.
     if (privateWindow) Object.defineProperty(store, 'favorites', { enumerable: true, get: () => structuredClone(profileData.store.favorites) });
     const desktop = privateWindow ? createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, publish, true) : profileData.desktop;
-    const ownAddress = (url: string) => url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
+    const ownAddress = (url: string) => !privateWindow && url === LYRA_ADDRESS || url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
     const sessionPath = resolve(dirname(storePath), 'session.json');
     const sessionStatus = profileData.sessionStatus;
     const savedSession = migrateSession(privateWindow || options.fresh ? emptySession() : profileData.sessions.windows.find(saved => saved.id === windowId)?.session ?? emptySession());
@@ -368,6 +372,29 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let storageError = false;
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
+    const lyra = createLyra({
+      privateWindow, alive: () => !disposed && !closing && isCurrent(), language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { layout(); publish(); },
+      page: id => {
+        const tab = tabs.find(tab => tab.state.id === id), contents = page(tab?.view);
+        if (!tab || !contents || !isWebURL(tab.state.url) || tab.state.loading || tab.state.error || tab.navigating) throw new Error('LYRA_PAGE_UNAVAILABLE');
+        return { id, url: tab.state.url, title: tab.state.title || new URL(tab.state.url).hostname, generation: tab.pageLoad, contents };
+      },
+      decision: origin => siteSettings(store.siteSettings, origin)?.permissions.lyra ?? 'ask',
+      allow: origin => {
+        const previous = structuredClone(store.siteSettings.permissions);
+        setPermission(store.siteSettings, origin, 'lyra', 'allow');
+        try { saveNow(); } catch { store.siteSettings.permissions = previous; throw new Error('SITE_SETTINGS_SAVE_FAILED'); }
+      },
+      project: id => { desktop.assertUnlocked(); return desktop.content(id); },
+      item: (project, id) => { desktop.assertUnlocked(); return desktop.item(project, id); },
+      save: (project, title, answer, sources) => {
+        desktop.addLyra(project, title, answer, sources); desktopPanel.open = true; desktopPanel.page = { kind: 'project', project };
+      },
+      connect: async () => {
+        const { connect } = await import('lyra-client');
+        return connect({ app: { id: 'horizon', name: 'Horizon', kind: 'cosmic' }, tokens: sealedLyraTokens(resolve(userData, 'lyra.token'), safeStorage) });
+      },
+    });
     let clearingData = false;
     let captureGeneration = 0;
     const captureRequests = new Set<AbortController>();
@@ -475,14 +502,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     sessionOwner.completed = details => { requests.delete(details.id); };
     sessionOwner.failed = details => { requests.delete(details.id); };
 
-    const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
+    const state = () => ({ ...desktop.state(), lyra: lyra.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       extensions: extensions?.list(page(active()?.view)) ?? [], extensionsUpdating: extensions?.status().updating ?? false, extensionsError: extensions?.status().storageError ?? false,
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
     function privateSite(url: string) {
       const site = siteSettings(store.siteSettings, url);
-      return privateWindow && site ? { ...site, blocking: true, permissions: { camera: 'block' as const, microphone: 'block' as const, location: 'block' as const, notifications: 'block' as const } } : site;
+      return privateWindow && site ? { ...site, blocking: true, permissions: { camera: 'block' as const, microphone: 'block' as const, location: 'block' as const, notifications: 'block' as const, lyra: 'block' as const } } : site;
     }
     const snapshotTab = (tab: Tab): SessionTab => {
       if (tab.restore || tab.restoring) return { ...structuredClone((tab.restore ?? tab.restoring)!), groupId: tab.state.groupId };
@@ -629,7 +656,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (!tab.view || !page(tab.view)) continue;
         const fullscreen = isCurrent() && tab.state.id === activeId && tab.state.fullscreen;
         const y = fullscreen ? 0 : top;
-        const panelWidth = !fullscreen && desktopPanel.open ? Math.ceil(400 * window.webContents.getZoomFactor()) : 0;
+        const panelWidth = !fullscreen && (desktopPanel.open || lyra.state().open && active()?.state.url !== LYRA_ADDRESS) ? Math.ceil(400 * window.webContents.getZoomFactor()) : 0;
         tab.view.setBounds({ x: 0, y, width: Math.max(0, width - panelWidth), height: Math.max(0, height - y) });
         tab.view.setVisible(isCurrent() && tab.state.id === activeId && Boolean(tab.state.url) && !tab.state.desktop && !tab.state.settings && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
       }
@@ -674,6 +701,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       activeId = tab.state.id;
       const group = tabGroups.find(group => group.id === tab.state.groupId);
       if (group) group.folded = false;
+      if (isCurrent() && tab.state.url === LYRA_ADDRESS && !lyra.state().open) void lyra.run({ type: 'lyra-open' });
     };
     const zoom = (tab: Tab, delta: -1 | 0 | 1) => {
       const contents = page(tab.view);
@@ -746,8 +774,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       tab.state.groupId = saved.groupId ?? null;
       tab.state.title = saved.title; tab.state.zoom = saved.zoom;
       tab.state.settings = settingsSection(saved.url);
-      tab.state.desktop = ownAddress(saved.url) ? saved.url === 'horizon://desktop/captures' ? 'captures' : desktop.list().find(project => desktopAddress(project.name) === saved.url)!.id : null;
-      if (!tab.state.settings && !tab.state.desktop && (saved.url || saved.entries.length)) {
+      tab.state.desktop = saved.url !== LYRA_ADDRESS && ownAddress(saved.url) ? saved.url === 'horizon://desktop/captures' ? 'captures' : desktop.list().find(project => desktopAddress(project.name) === saved.url)!.id : null;
+      if (saved.url !== LYRA_ADDRESS && !tab.state.settings && !tab.state.desktop && (saved.url || saved.entries.length)) {
         tab.restore = { url: saved.url, title: saved.title, zoom: saved.zoom, entries: structuredClone(saved.entries), index: saved.index };
         tab.state.canGoBack = saved.index > 0; tab.state.canGoForward = saved.index >= 0 && saved.index < saved.entries.length - 1;
       }
@@ -1161,6 +1189,17 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       } finally { captureRequests.delete(request); }
     };
     const run = (command: BrowserCommand) => {
+      if (command.type.startsWith('lyra-')) {
+        if (command.type === 'lyra-tab') {
+          if (privateWindow) throw new Error('LYRA_PRIVATE');
+          const target = tabs.find(tab => tab.state.url === LYRA_ADDRESS) ?? newTab();
+          target.state.url = LYRA_ADDRESS; target.state.title = 'Lyra'; target.restore = undefined; target.restoring = undefined;
+          desktopPanel.open = false; activate(target); update();
+          return lyra.run({ type: 'lyra-open' });
+        }
+        if (['lyra-open', 'lyra-ask', 'lyra-home'].includes(command.type)) desktopPanel.open = false;
+        return lyra.run(command as LyraCommand);
+      }
       const tab = active();
       if (!tab) return;
       const contents = page(tab.view);
@@ -1239,6 +1278,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         }
         case 'retry-desktop-storage': desktop.retry(); break;
         case 'open-desktop-panel':
+          void lyra.run({ type: 'lyra-close' });
           desktopPanel.open = true; desktopPanel.page = structuredClone(command.page);
           if (command.page.kind === 'project' || command.page.kind === 'item' && command.page.project !== null) desktop.use(command.page.project!);
           window.webContents.focus(); break;
@@ -1335,6 +1375,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'theme': case 'migrate-theme': settings.setTheme(command.value, command.type === 'migrate-theme'); break;
         case 'contrast': settings.setContrast(command.value); break;
         case 'new-tab': {
+          if (command.input === LYRA_ADDRESS) return run({ type: 'lyra-tab' });
           const destination = command.input ? desktopDestination(command.input) : null;
           if (destination) { openDesktop(destination); break; }
           const section = command.input ? settingsSection(command.input) : null;
@@ -1413,6 +1454,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           closeTab(target); break;
         }
         case 'navigate': {
+          if (command.input === LYRA_ADDRESS) return run({ type: 'lyra-tab' });
           const destination = desktopDestination(command.input);
           if (destination) { openDesktop(destination); break; }
           const section = settingsSection(command.input);
@@ -1520,6 +1562,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       reconcileDesktop(); refresh(tab); update();
     };
     const suspend = () => {
+      lyra.close();
       groupEditorId = null;
       screenCapture = undefined;
       invalidateCaptures(); desktop.forget();
@@ -1529,6 +1572,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const dispose = (discard = false) => {
       if (disposed) return;
+      lyra.stop();
       if (!discard) flushSession();
       clearTimeout(sessionWrite); sessionWrite = undefined;
       screenCapture = undefined;

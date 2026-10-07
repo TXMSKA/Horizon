@@ -227,7 +227,7 @@ function PrivacySettings({ state, language, onOpen, openClearDialog, onClearDial
   </>;
 }
 
-const permissionLabels: Record<SitePermission, CopyKey> = { camera: 'permissionCamera', microphone: 'permissionMicrophone', location: 'permissionLocation', notifications: 'permissionNotifications' };
+const permissionLabels: Record<SitePermission, CopyKey> = { camera: 'permissionCamera', microphone: 'permissionMicrophone', location: 'permissionLocation', notifications: 'permissionNotifications', lyra: 'lyra' };
 function siteSummary(sites: SiteSettingsEntry[], language: Language): string {
   const t = (key: CopyKey) => text(key, language);
   const site = sites[0]!;

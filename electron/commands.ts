@@ -1,4 +1,5 @@
 import { IMPORT_BROWSERS } from '../src/shared/api';
+import { validateLyraCommand } from '../src/shared/lyra';
 import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
 import { isWebURL } from './browsing';
 import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart } from './settings';
@@ -40,6 +41,7 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
 function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
   const command = object(value);
   const type = command.type;
+  if (typeof type === 'string' && type.startsWith('lyra-')) return validateLyraCommand(value);
   const settingsCommands = ['set-show-capture', 'open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'register-default-browser', 'restart-to-update'];
   if (type === 'set-on-start' || settingsCommands.includes(type as string)) {
     let allowed: string[] = ['type'];

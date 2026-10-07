@@ -6,7 +6,7 @@ import type { PermissionDecision, PermissionDecisions, PermissionPrompt, SitePer
 import { isWebURL } from './browsing';
 
 export const SITE_SETTINGS_LIMIT = 10000;
-export const defaultPermissions = (): PermissionDecisions => ({ camera: 'ask', microphone: 'ask', location: 'ask', notifications: 'ask' });
+export const defaultPermissions = (): PermissionDecisions => ({ camera: 'ask', microphone: 'ask', location: 'ask', notifications: 'ask', lyra: 'ask' });
 export const isSitePermission = (value: unknown): value is SitePermission => SITE_PERMISSIONS.some(permission => permission === value);
 export const isPermissionDecision = (value: unknown): value is PermissionDecision => value === 'ask' || value === 'allow' || value === 'block';
 export function siteOrigin(url: string): string | null { return isWebURL(url) ? new URL(url).origin : null; }
@@ -27,7 +27,7 @@ export function siteSettings(settings: SiteSettingsStore, url: string): SiteSett
   const origin = siteOrigin(url), host = siteHost(url);
   if (!origin || !host) return null;
   const stored = settings.permissions.find(entry => entry.origin === origin);
-  const permissions = stored ? Object.fromEntries(SITE_PERMISSIONS.map(key => [key, stored[key]])) as PermissionDecisions : defaultPermissions();
+  const permissions = stored ? Object.fromEntries(SITE_PERMISSIONS.map(key => [key, stored[key] ?? 'ask'])) as PermissionDecisions : defaultPermissions();
   return { host, origin, blocking: settings.blocking.find(entry => entry.host === host)?.enabled ?? true, dark: settings.dark.find(entry => entry.host === host)?.enabled ?? true, permissions };
 }
 export function setBlocking(settings: SiteSettingsStore, host: string, enabled: boolean): void {
@@ -50,7 +50,7 @@ export function listSites(settings: SiteSettingsStore): SiteSettingsEntry[] {
   return [...origins].sort().map(origin => {
     const host = siteHost(origin)!;
     const stored = permissions.get(origin);
-    const decisions = stored ? Object.fromEntries(SITE_PERMISSIONS.map(permission => [permission, stored[permission]])) as PermissionDecisions : defaultPermissions();
+    const decisions = stored ? Object.fromEntries(SITE_PERMISSIONS.map(permission => [permission, stored[permission] ?? 'ask'])) as PermissionDecisions : defaultPermissions();
     return { host, origin, blocking: blocking.get(host) ?? null, dark: dark.get(host) ?? null, permissions: decisions };
   });
 }
