@@ -3008,7 +3008,7 @@ test('main paints the resolved palette and passes both settings before loading c
     nativeTheme.shouldUseHighContrastColors = true;
     const app = new EventEmitter();
     const switchCalls = [];
-    app.commandLine = { appendSwitch(...args) { switchCalls.push(['append', ...args]); }, removeSwitch(...args) { switchCalls.push(['remove', ...args]); } };
+    app.commandLine = { appendSwitch(...args) { switchCalls.push(['append', ...args]); }, removeSwitch(...args) { switchCalls.push(['remove', ...args]); }, hasSwitch: () => false };
     app.isPackaged = true;
     app.requestSingleInstanceLock = () => true;
     app.enableSandbox = () => {};
@@ -5968,7 +5968,7 @@ test('local HTML launch authorizes only its exact tab main-frame URL and survive
 
 function settingsMain(t, options) {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm'), filename = resolve('dist/electron/main.js'), localRequire = require('node:module').createRequire(filename), directory = temporaryDirectory(t, 'settings-main'), windows = [], launches = [], handlers = new Map(), updated = { options: undefined, started: 0 };
-  const app = Object.assign(new EventEmitter(), { isPackaged: true, requestSingleInstanceLock: () => options.lock !== false, getLocale: () => 'es-AR', getVersion: () => '0.1.0-test', getPath: () => directory, enableSandbox() {}, whenReady: async () => {}, commandLine: { appendSwitch() {}, removeSwitch() {} }, quit() { this.quits = (this.quits || 0) + 1; }, exit() { assert.fail('Mock main failed'); } });
+  const app = Object.assign(new EventEmitter(), { isPackaged: true, requestSingleInstanceLock: () => options.lock !== false, getLocale: () => 'es-AR', getVersion: () => '0.1.0-test', getPath: () => directory, enableSandbox() {}, whenReady: async () => {}, commandLine: { appendSwitch() {}, removeSwitch() {}, hasSwitch: name => (options.switches ?? []).includes(name) }, quit() { this.quits = (this.quits || 0) + 1; }, exit(code) { if (!options.switches) assert.fail('Mock main failed'); this.exitCode = code; } });
   const settings = { theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', migrationAllowed: false, language: 'en', onStart: options.onStart ?? 'restore' };
   const primary = { workAreaSize: { width: 1440, height: 900 }, workArea: { x: 0, y: 0, width: 1440, height: 900 } }, secondary = options.display ?? primary;
   class Window extends EventEmitter {
@@ -5996,6 +5996,15 @@ function settingsMain(t, options) {
   }, require('node:path').dirname(filename), { argv: options.args ?? ['Horizon.exe'], env: options.env ?? {}, platform: 'win32', resourcesPath: directory });
   return { app, settings, windows, launches, handlers, directory, updated };
 }
+
+test('a packaged main refuses remote debugging switches before taking the instance lock or creating a window', async t => {
+  for (const name of ['remote-debugging-port', 'remote-debugging-pipe']) {
+    const main = settingsMain(t, { switches: [name], lock: false }); await new Promise(done => setImmediate(done));
+    assert.equal(main.app.exitCode, 1); assert.equal(main.app.quits, undefined); assert.deepEqual(main.windows, []); assert.equal(main.updated.options, undefined);
+  }
+  const main = settingsMain(t, { switches: [] }); await new Promise(done => setImmediate(done));
+  assert.equal(main.app.exitCode, undefined); assert.equal(main.windows.length, 1);
+});
 
 test('main holds startup and second-instance URLs until chrome loads, restores and focuses; no lock creates no window', async t => {
   const rejected = settingsMain(t, { lock: false }); await new Promise(done => setImmediate(done)); assert.equal(rejected.app.quits, 1); assert.deepEqual(rejected.windows, []);

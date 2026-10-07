@@ -25,8 +25,11 @@ if (!app.isPackaged) {
   app.setAppLogsPath(resolve(runtime, 'logs'));
 }
 
-const instance = app.requestSingleInstanceLock();
-if (!instance) app.quit();
+// Local programs launch browsers with a debugging port to read their pages and cookies; Chrome refuses it on default profiles for that reason, and a packaged Horizon refuses it outright.
+const debugging = app.isPackaged && ['remote-debugging-port', 'remote-debugging-pipe'].some(name => app.commandLine.hasSwitch(name));
+const instance = !debugging && app.requestSingleInstanceLock();
+if (debugging) app.exit(1);
+else if (!instance) app.quit();
 if (instance) {
   let launchWindow: BrowserWindow | undefined;
   let launchBrowser: ReturnType<typeof createBrowser> | undefined;
