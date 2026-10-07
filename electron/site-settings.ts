@@ -4,6 +4,36 @@ import { getDomain } from 'tldts-experimental';
 import { SITE_PERMISSIONS } from '../src/shared/api';
 import type { PermissionDecision, PermissionDecisions, PermissionPrompt, SitePermission, SiteSettings, SiteSettingsEntry, SiteSettingsStore } from '../src/shared/api';
 import { isWebURL } from './browsing';
+import { pageLanguage } from '../src/shared/translate';
+import type { Language } from '../src/shared/api';
+
+export function validTranslationChoices(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const choices = value as Record<string, unknown>;
+  if (Object.keys(choices).length !== 2 || !Array.isArray(choices.always) || !Array.isArray(choices.never) || choices.always.length > 200 || choices.never.length > SITE_SETTINGS_LIMIT) return false;
+  const languages = new Set<string>();
+  return Array.from(choices.always).every(entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).length !== 2 || !Object.hasOwn(entry, 'language') || !Object.hasOwn(entry, 'target') || typeof entry.language !== 'string' || pageLanguage(entry.language) !== entry.language || !['en', 'es'].includes(entry.target) || languages.has(entry.language)) return false;
+    languages.add(entry.language); return true;
+  }) && Array.from(choices.never).every(validHost) && new Set(choices.never).size === choices.never.length;
+}
+export function translationChoice(settings: SiteSettingsStore, url: string, language: string | null) {
+  return { never: settings.translation?.never.includes(siteHost(url) ?? '') ?? false, always: settings.translation?.always.find(entry => entry.language === language)?.target ?? null };
+}
+export function setTranslationChoice(settings: SiteSettingsStore, url: string, choice: 'always' | 'never', language: string | null, target: Language, enabled: boolean) {
+  const host = siteHost(url);
+  if (!host || choice === 'always' && (!language || pageLanguage(language) !== language) || !['en', 'es'].includes(target)) throw new Error('TRANSLATE_INVALID');
+  const next = structuredClone(settings.translation ?? { always: [], never: [] });
+  if (choice === 'never') {
+    next.never = next.never.filter(value => value !== host);
+    if (enabled) next.never.push(host);
+  } else {
+    next.always = next.always.filter(entry => entry.language !== language);
+    if (enabled) next.always.push({ language: language!, target });
+  }
+  if (!validTranslationChoices(next)) throw new Error('TRANSLATE_LIMIT');
+  settings.translation = next;
+}
 
 export const SITE_SETTINGS_LIMIT = 10000;
 export const defaultPermissions = (): PermissionDecisions => ({ camera: 'ask', microphone: 'ask', location: 'ask', notifications: 'ask', lyra: 'ask' });
@@ -43,7 +73,7 @@ export function listSites(settings: SiteSettingsStore): SiteSettingsEntry[] {
   const blocking = new Map(settings.blocking.map(entry => [entry.host, entry.enabled]));
   const dark = new Map(settings.dark.map(entry => [entry.host, entry.enabled]));
   const permissions = new Map(settings.permissions.map(entry => [entry.origin, entry]));
-  const hosts = new Set([...settings.blocking.filter(entry => !entry.enabled).map(entry => entry.host), ...settings.dark.map(entry => entry.host)]);
+  const hosts = new Set([...settings.blocking.filter(entry => !entry.enabled).map(entry => entry.host), ...settings.dark.map(entry => entry.host), ...(settings.translation?.never ?? [])]);
   const origins = new Set(settings.permissions.filter(entry => SITE_PERMISSIONS.some(permission => entry[permission] !== 'ask')).map(entry => entry.origin));
   const originHosts = new Set([...origins].map(siteHost));
   for (const host of hosts) if (!originHosts.has(host)) origins.add(`https://${host}`);
@@ -59,6 +89,7 @@ export function resetSite(settings: SiteSettingsStore, host: string): void {
   settings.blocking = settings.blocking.filter(entry => entry.host !== host);
   settings.dark = settings.dark.filter(entry => entry.host !== host);
   settings.permissions = settings.permissions.filter(entry => siteHost(entry.origin) !== host);
+  if (settings.translation) settings.translation.never = settings.translation.never.filter(entry => entry !== host);
 }
 export function setSiteDark(settings: SiteSettingsStore, host: string, enabled: boolean): void {
   if (!validHost(host)) throw new Error('SITE_UNAVAILABLE');

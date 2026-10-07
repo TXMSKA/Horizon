@@ -3,7 +3,7 @@ import { basename, dirname, extname, isAbsolute, resolve, win32 } from 'node:pat
 import { randomUUID } from 'node:crypto';
 import type { BrowserStore } from '../src/shared/api';
 import { isWebURL } from './browsing';
-import { isPermissionDecision, SITE_SETTINGS_LIMIT, validHost, validOrigin } from './site-settings';
+import { isPermissionDecision, SITE_SETTINGS_LIMIT, validHost, validOrigin, validTranslationChoices } from './site-settings';
 import { migrateBookmarks, validFavorites } from './favorites';
 
 function object(value: unknown, keys: string[]): value is Record<string, unknown> {
@@ -98,7 +98,7 @@ function legacyV4Store(value: unknown): value is LegacyStore {
 export function validateStore(value: unknown): value is BrowserStore {
   return object(value, ['version', 'history', 'favorites', 'downloads', 'siteSettings', 'clearHistoryOnClose', 'clearCacheOnClose']) && value.version === 5 && browsingEntries(value, false)
     && typeof value.clearHistoryOnClose === 'boolean' && typeof value.clearCacheOnClose === 'boolean'
-    && object(value.siteSettings, ['blocking', 'dark', 'permissions']) && siteEntries(value.siteSettings) && hostChoices(value.siteSettings.dark);
+    && (object(value.siteSettings, ['blocking', 'dark', 'permissions']) || object(value.siteSettings, ['blocking', 'dark', 'permissions', 'translation']) && validTranslationChoices(value.siteSettings.translation)) && siteEntries(value.siteSettings) && hostChoices(value.siteSettings.dark);
 }
 
 export function writeStore(path: string, store: BrowserStore, cipher?: StoreCipher): void {

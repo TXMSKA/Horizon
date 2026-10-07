@@ -87,6 +87,8 @@ async function cleanup(code) {
       cwd: lyraRepo, env: { ...process.env, LYRA_HOME: home }, windowsHide: true, stdio: 'ignore', timeout: 15000,
     });
   } catch { /* A failed service may already be asleep. */ }
+  // A service that ignored unfocus would keep this script's output pipe open; stop the temporary one by its run file.
+  try { const run = JSON.parse(require('node:fs').readFileSync(join(home, 'run', 'service.json'), 'utf8')); if (Number.isSafeInteger(run.pid)) process.kill(run.pid); } catch { /* No run file means the service already stopped. */ }
   server.close(); app.exit(code);
 }
 const watchdog = setTimeout(() => { console.error('Lyra verification timed out. Artifacts: ' + root); void cleanup(1); }, 10 * 60 * 1000);

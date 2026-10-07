@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { Check, ExternalLink, House, LayoutDashboard, Palette, Pin, PinOff } from 'lucide-react';
+import { Check, ExternalLink, House, Languages, LayoutDashboard, Palette, Pin, PinOff } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { HUB_APPS } from './shared/api';
@@ -9,7 +9,7 @@ import { Menu } from './Menu';
 import { settingsError } from './Settings';
 import { ToolbarPopover } from './ToolbarPopover';
 
-export const hubApps = { themes: { label: 'themes', icon: Palette }, desktop: { label: 'desktop', icon: LayoutDashboard } } as const;
+export const hubApps = { translate: { label: 'translate', icon: Languages }, themes: { label: 'themes', icon: Palette }, desktop: { label: 'desktop', icon: LayoutDashboard } } as const;
 type HubPage = 'home' | HubApp;
 const themes = ['amber', 'daylight', 'highContrast'] as const;
 type InstalledTheme = typeof themes[number];
@@ -96,7 +96,7 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
     }
     finally { pending.current = false; if (ref.current) setBusy(false); }
   };
-  const apps = HUB_APPS.filter(app => !state.privateWindow || app !== 'desktop');
+  const apps = HUB_APPS.filter(app => !state.privateWindow || app !== 'desktop' && app !== 'translate');
   const open = (app: HubApp) => { closeMenu(false); setError(''); setRetry(null); onPage(app); };
   return <ToolbarPopover opener={opener}><div className={`hub-popup${page !== 'home' ? ' hub-app-page' : ''}`} id="hub-popup" ref={ref} role="dialog" tabIndex={-1} aria-label={t('hub')} aria-busy={busy} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (tileMenu) closeMenu(); else onDismiss(true); }
@@ -109,9 +109,9 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
     {page === 'home' && <div className="hub-ground" aria-hidden="true"><div className="horizon-rule" /><svg className="horizon-sun" viewBox="0 0 64 32"><path d="M0 32 A32 32 0 0 1 64 32" /></svg></div>}
     <div className="hub-content"><nav className="hub-dock" aria-label={t('quickAccess')}>
       <button className="icon-button" type="button" aria-label={t('hubHome')} title={t('hubHome')} aria-current={page === 'home' ? 'page' : undefined} onClick={() => { closeMenu(false); onPage('home'); }}><House aria-hidden="true" /></button>
-      {state.quickAccess.filter(app => !state.privateWindow || app !== 'desktop').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={() => open(app)}><Icon aria-hidden="true" /></button>; })}
+      {state.quickAccess.filter(app => !state.privateWindow || app !== 'desktop' && app !== 'translate').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={() => open(app)}><Icon aria-hidden="true" /></button>; })}
     </nav><div className="hub-page"><h2>{t(page === 'home' ? 'hub' : hubApps[page].label)}</h2>
-      {page === 'home' ? <div className="hub-tiles">{apps.map((app, index) => { const { label, icon: Icon } = hubApps[app]; return <button className="hub-tile" type="button" ref={app === 'themes' ? tile : undefined} key={app} aria-haspopup="menu" aria-expanded={tileMenu === app} onClick={() => open(app)} onContextMenu={event => { event.preventDefault(); tile.current = event.currentTarget; setTileMenu(app); }} onKeyDown={event => {
+      {page === 'home' ? <div className="hub-tiles">{apps.map((app, index) => { const { label, icon: Icon } = hubApps[app]; return <button className="hub-tile" type="button" ref={app === 'themes' ? tile : undefined} key={app} disabled={app === 'translate' && !state.tabs.some(tab => tab.id === state.activeId && /^https?:/.test(tab.url) && !tab.loading && !tab.error)} aria-haspopup="menu" aria-expanded={tileMenu === app} onClick={() => open(app)} onContextMenu={event => { event.preventDefault(); tile.current = event.currentTarget; setTileMenu(app); }} onKeyDown={event => {
         if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) { event.preventDefault(); tile.current = event.currentTarget; setTileMenu(app); return; }
         const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowDown' ? 3 : event.key === 'ArrowUp' ? -3 : 0;
         if (!step) return;

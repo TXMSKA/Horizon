@@ -7,6 +7,9 @@ import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
 import { createLyra } from './lyra';
+import { createTranslation } from './translate';
+import type { TranslateHost } from './translate';
+import type { TranslateCommand } from '../src/shared/translate';
 import { sealedLyraTokens } from './lyra-token';
 import type { LyraCommand } from '../src/shared/lyra';
 import { LYRA_ADDRESS } from '../src/shared/lyra';
@@ -28,7 +31,7 @@ import { PageMenuSession } from './context-menu';
 import { cleanupPartitions, isProfileId, makeProfile, migrateStore, PROFILE_LIMIT, profileName, profileStorePath, readRegistry, removeProfileDirectory, writeRegistry } from './profiles';
 import type { ProfileRegistry } from './profiles';
 import { blockingPolicy, createBlockingEngine } from './blocking';
-import { listSites, PermissionQueue, requestedPermissions, resetSite, secureOrigin, setBlocking, setPermission, setSiteDark, siteHost, siteSettings, stripCookieHeaders } from './site-settings';
+import { listSites, translationChoice, setTranslationChoice, PermissionQueue, requestedPermissions, resetSite, secureOrigin, setBlocking, setPermission, setSiteDark, siteHost, siteSettings, stripCookieHeaders } from './site-settings';
 import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages';
 import { desktopInputText } from '../src/shared/desktop-input';
 import { createDesktop, desktopAddress } from './desktop';
@@ -41,8 +44,8 @@ import { HISTORY_LIMIT, mergeFavorites, mergeHistory } from './import-merge';
 import { emptySession, lazySession, LEGACY_WINDOW_ID, migrateSession, readWindowSessions, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeWindowSessions } from './session-store';
 import type { SessionTab, WindowSessions } from './session-store';
 
-interface TabHost { alive(tab: Tab): boolean; update(): void; publish(): void; fail(tab: Tab, description: string): void; close(tab: Tab): void; count(): number }
-interface Tab { host: TabHost; unbind?: () => void; viewNavigation?: { pending?: number; entries: { generation: number; urls: Set<string> }[] }; restore?: SessionTab; restoring?: SessionTab; state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
+interface TabHost { translation(tab: Tab): TranslateHost; alive(tab: Tab): boolean; update(): void; publish(): void; fail(tab: Tab, description: string): void; close(tab: Tab): void; count(): number }
+interface Tab { translation?: ReturnType<typeof createTranslation>; contentLanguage?: string | null; host: TabHost; unbind?: () => void; viewNavigation?: { pending?: number; entries: { generation: number; urls: Set<string> }[] }; restore?: SessionTab; restoring?: SessionTab; state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
 interface TabRequest { tab: Tab; pageLoad: number; topURL: string }
 interface DownloadOwner { disposed(): boolean; store: BrowserStore; items: Map<string, DownloadItem>; reserved: Set<string>; bindings: Map<string, DownloadBinding>; trusted: Map<string, string>; persist(): void; publish(): void }
 interface DownloadBinding { tab: Tab; path: string; owner: DownloadOwner }
@@ -335,6 +338,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let storageError = false;
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
+    const connectLyra = async () => {
+      const { connect } = await import('lyra-client');
+      return connect({ app: { id: 'horizon', name: 'Horizon', kind: 'cosmic' }, tokens: sealedLyraTokens(resolve(userData, 'lyra.token'), safeStorage) });
+    };
     const lyra = createLyra({
       privateWindow, alive: () => !disposed && !closing && isCurrent(), language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { layout(); publish(); },
       page: id => {
@@ -353,10 +360,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       save: (project, title, answer, sources) => {
         desktop.addLyra(project, title, answer, sources); desktopPanel.open = true; desktopPanel.page = { kind: 'project', project };
       },
-      connect: async () => {
-        const { connect } = await import('lyra-client');
-        return connect({ app: { id: 'horizon', name: 'Horizon', kind: 'cosmic' }, tokens: sealedLyraTokens(resolve(userData, 'lyra.token'), safeStorage) });
-      },
+      connect: connectLyra,
     });
     let clearingData = false;
     let captureGeneration = 0;
@@ -450,6 +454,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     sessionOwner.receive = (details, callback) => {
       const context = requestContext(details);
+      if (!privateWindow && context && details.resourceType === 'mainFrame' && context.pageLoad === context.tab.pageLoad) {
+        const header = Object.entries(details.responseHeaders ?? {}).find(([key]) => key.toLowerCase() === 'content-language')?.[1]?.[0];
+        context.tab.contentLanguage = typeof header === 'string' ? header.slice(0, 80) : null;
+      }
       const headers = context ? stripCookieHeaders(details.responseHeaders ?? {}, true, details.url, context.topURL,
         blockingPolicy(privateWindow, settings.blockAds, settings.blockThirdPartyCookies, siteSettings(store.siteSettings, context.topURL)?.blocking ?? true).thirdPartyCookies, context.pageLoad === context.tab.pageLoad ? context.tab.refusedCookies : new Set()) : privateWindow ? Object.fromEntries(Object.entries(details.responseHeaders ?? {}).filter(([key]) => key.toLowerCase() !== 'set-cookie')) : details.responseHeaders;
       if (context && context.pageLoad === context.tab.pageLoad && context.tab.state.blocked.cookies !== context.tab.refusedCookies.size) { context.tab.state.blocked.cookies = context.tab.refusedCookies.size; publish(); }
@@ -462,7 +470,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     sessionOwner.completed = details => { requests.delete(details.id); };
     sessionOwner.failed = details => { requests.delete(details.id); };
 
-    const state = () => ({ ...desktop.state(), lyra: lyra.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
+    const state = () => ({ ...desktop.state(), lyra: lyra.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), translation: tab.translation?.state() ?? tab.state.translation, blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
@@ -559,7 +567,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       editFavorites(() => { const location = favoriteLocation(store.favorites, id)!; location.siblings.splice(location.index, 1); });
       keepFavorite(deleted);
     };
-    const stopForClear = () => { for (const tab of tabs) page(tab.view)?.stop(); for (const item of items.values()) item.cancel(); requests.clear(); };
+    const stopForClear = () => { for (const tab of tabs) { tab.translation?.stop(); page(tab.view)?.stop(); } for (const item of items.values()) item.cancel(); requests.clear(); };
     const clearData = async (choice: ClearedBrowsingData): Promise<ClearedBrowsingData> => {
       clearingData = true;
       try {
@@ -620,7 +628,27 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       }
     };
     const update = () => { persistSession(); layout(); publish(); };
-    const host: TabHost = { alive: tab => !disposed && !closing && tabs.includes(tab), update, publish, fail: (tab, description) => fail(tab, description), close: tab => closeTab(tab), count: () => tabs.length };
+    const host: TabHost = { translation: tab => ({
+      privateWindow, alive: () => host.alive(tab), language: () => resolveLanguage(settings.language, app.getLocale()), changed: update,
+      page: () => {
+        const contents = page(tab.view);
+        if (!contents || !isWebURL(tab.state.url) || tab.state.loading || tab.state.error || tab.navigating || tab.state.settings || tab.state.desktop) throw new Error('TRANSLATE_PAGE_CHANGED');
+        return { url: tab.state.url, generation: tab.pageLoad, contents, header: tab.contentLanguage ?? null };
+      },
+      never: () => translationChoice(store.siteSettings, tab.state.url, null).never,
+      always: source => translationChoice(store.siteSettings, tab.state.url, source).always,
+      remember: (choice, source, target, enabled) => {
+        if (privateWindow) throw new Error('TRANSLATE_PRIVATE');
+        const previous = structuredClone(store.siteSettings.translation);
+        setTranslationChoice(store.siteSettings, tab.state.url, choice, source, target, enabled);
+        try { saveNow(); } catch {
+          if (previous) store.siteSettings.translation = previous; else delete store.siteSettings.translation;
+          throw new Error('SITE_SETTINGS_SAVE_FAILED');
+        }
+        for (const owner of shared.owners.values()) owner.publish();
+      },
+      connect: connectLyra,
+    }), alive: tab => !disposed && !closing && tabs.includes(tab), update, publish, fail: (tab, description) => fail(tab, description), close: tab => closeTab(tab), count: () => tabs.length };
     const downloadBindings = new Map<string, DownloadBinding>();
     const downloadOwner: DownloadOwner = { disposed: () => disposed, store, items, reserved, bindings: downloadBindings, trusted: trustedDownloads, persist, publish };
     // Native page dialogs disable their parent window, including commands already queued by chrome.
@@ -659,6 +687,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       activeId = tab.state.id;
       const group = tabGroups.find(group => group.id === tab.state.groupId);
       if (group) group.folded = false;
+      if (isCurrent() && !tab.state.loading) tab.translation?.probe();
       if (isCurrent() && tab.state.url === LYRA_ADDRESS && !lyra.state().open) void lyra.run({ type: 'lyra-open' });
     };
     const zoom = (tab: Tab, delta: -1 | 0 | 1) => {
@@ -695,6 +724,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const fail = (tab: Tab, description: string) => {
       if (active() === tab) invalidateCaptures();
+      tab.translation?.reset();
       permissions.drop(tab.state.id); tab.cosmeticPending = false; tab.navigating = false;
       invalidateMenu(tab.state.id);
       tab.state.loading = false;
@@ -709,6 +739,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (active() === tab) invalidateCaptures();
       invalidateMenu(tab.state.id);
       permissions.drop(tab.state.id);
+      tab.translation?.reset(); tab.contentLanguage = null;
       tab.navigating = true;
       clearFavicon(tab, url);
       ensureView(tab);
@@ -726,7 +757,16 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (tab.host.alive(tab) && tab.navigation === navigation) tab.host.fail(tab, error instanceof Error ? error.message : 'ERR_FAILED');
       });
     };
-    const makeTab = (url = ''): Tab => ({ host, pageLoad: 0, refusedCookies: new Set(), state: { id: randomUUID(), groupId: null, movable: true, settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } });
+    const makeTab = (url = ''): Tab => {
+      const tab: Tab = { host, pageLoad: 0, refusedCookies: new Set(), state: { translation: { open: false, phase: 'idle', source: null, target: resolveLanguage(settings.language, app.getLocale()), error: null }, id: randomUUID(), groupId: null, movable: true, settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
+      // The live host follows a tab when its WebContentsView moves to another window.
+      tab.translation = createTranslation({
+        privateWindow, alive: () => tab.host.alive(tab), language: () => tab.host.translation(tab).language(), changed: () => tab.host.update(),
+        page: () => tab.host.translation(tab).page(), never: () => tab.host.translation(tab).never(), always: source => tab.host.translation(tab).always(source),
+        remember: (...args) => tab.host.translation(tab).remember(...args), connect: () => tab.host.translation(tab).connect(),
+      });
+      return tab;
+    };
     const restoredTab = (saved: SessionTab) => {
       const tab = makeTab(saved.url);
       tab.state.groupId = saved.groupId ?? null;
@@ -787,6 +827,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (remember && recordsBrowsing(privateWindow) && !tab.retryDownload) { const saved = restorableTab(snapshotTab(tab), ownAddress); if (saved) rememberClosed(savedSession, saved, index); }
       invalidateMenu(tab.state.id);
       permissions.drop(tab.state.id);
+      tab.translation?.stop();
       leaveFullscreen(tab); clearFavicon(tab);
       tabs.splice(index, 1);
       pruneGroups();
@@ -808,6 +849,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       for (const tab of tabs) {
         const view = tab.view;
         if (!view) continue;
+        tab.translation?.reset(); tab.contentLanguage = null;
         leaveFullscreen(tab); invalidateMenu(tab.state.id); permissions.drop(tab.state.id);
         const contents = page(view);
         const entries = contents?.navigationHistory.getAllEntries() ?? [], index = contents?.navigationHistory.getActiveIndex() ?? -1;
@@ -900,6 +942,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (tab.view !== view || contents.isLoading()) return;
         finishUncommitted(navigationState.pending); navigations.length = 0;
         tab.state.loading = false; tab.navigating = false; refresh(tab); update();
+        if (isCurrent() && active() === tab) tab.translation?.probe();
       });
       on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
         if (tab.view !== view) return;
@@ -907,6 +950,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (isMainFrame) permissions.drop(tab.state.id);
         if (isMainFrame && active() === tab) invalidateCaptures();
         if (isMainFrame && !isInPlace) {
+          tab.translation?.reset(); tab.contentLanguage = null;
           tab.navigating = true;
           tab.pageLoad++; tab.topURL = url; tab.refusedCookies = new Set(); tab.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
           navigationState.pending = tab.pageLoad;
@@ -1138,6 +1182,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       } finally { captureRequests.delete(request); }
     };
     const run = (command: BrowserCommand) => {
+      if (command.type.startsWith('translate-')) {
+        if (privateWindow) throw new Error('TRANSLATE_PRIVATE');
+        const tab = active();
+        if (!tab?.translation) throw new Error('TRANSLATE_PAGE_CHANGED');
+        window.webContents.focus();
+        return tab.translation.run(command as TranslateCommand);
+      }
       if (command.type.startsWith('lyra-')) {
         if (command.type === 'lyra-tab') {
           if (privateWindow) throw new Error('LYRA_PRIVATE');
@@ -1217,7 +1268,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (readStatus.memoryOnly) throw new Error('SITE_SETTINGS_SAVE_FAILED');
           const previous = structuredClone(store.siteSettings);
           resetSite(store.siteSettings, command.host);
-          try { saveNow(); } catch { store.siteSettings.blocking = previous.blocking; store.siteSettings.dark = previous.dark; store.siteSettings.permissions = previous.permissions; throw new Error('SITE_SETTINGS_SAVE_FAILED'); }
+          try { saveNow(); } catch { store.siteSettings.blocking = previous.blocking; store.siteSettings.dark = previous.dark; store.siteSettings.permissions = previous.permissions; if (previous.translation) store.siteSettings.translation = previous.translation; else delete store.siteSettings.translation; throw new Error('SITE_SETTINGS_SAVE_FAILED'); }
           for (const target of tabs) if (siteHost(target.topURL ?? target.state.url) === command.host) {
             permissions.drop(target.state.id); applyDarkCSS(target);
             target.refusedCookies.clear(); target.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
@@ -1508,6 +1559,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const suspend = () => {
       lyra.close();
+      for (const tab of tabs) { const phase = tab.translation?.state().phase; if (phase === 'running' || phase === 'detecting') tab.translation?.run({ type: 'translate-cancel' }); }
       groupEditorId = null;
       screenCapture = undefined;
       invalidateCaptures(); desktop.forget();
@@ -1518,6 +1570,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const dispose = (discard = false) => {
       if (disposed) return;
       lyra.stop();
+      for (const tab of tabs) tab.translation?.stop();
       if (!discard) flushSession();
       clearTimeout(sessionWrite); sessionWrite = undefined;
       screenCapture = undefined;
