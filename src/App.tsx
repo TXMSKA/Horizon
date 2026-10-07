@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AppWindow, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Download, Ellipsis, LayoutGrid,
@@ -17,7 +17,6 @@ import { Menu } from './Menu';
 import { Hub, hubApps } from './Hub';
 import { ToolbarPopover } from './ToolbarPopover';
 import { NewProfilePopover, ProfileControl, ProfilesMenu } from './Profiles';
-import { BrowserPanel } from './BrowserPanel';
 import { FavoritesBar, FavoritesPanel, favoritesError } from './Favorites';
 import { allFavoriteLinks } from './shared/favorites';
 import type { LibraryPanel } from './BrowserPanel';
@@ -38,7 +37,10 @@ import { DESKTOP_TAB_DRAG, parseDesktopDrag } from './shared/desktop-drag';
 import { Settings, settingsError } from './Settings';
 import { FirstRunImport } from './FirstRunImport';
 
-type Panel = LibraryPanel | null;
+type Panel = LibraryPanel | 'passwords' | null;
+const PasswordsPanel = lazy(() => import('./Vault').then(module => ({ default: module.PasswordsPanel })));
+const VaultSuggestion = lazy(() => import('./Vault').then(module => ({ default: module.VaultSuggestion })));
+const BrowserPanel = lazy(() => import('./BrowserPanel').then(module => ({ default: module.BrowserPanel })));
 const sites = {
   wikipedia: 'https://www.wikipedia.org/', youtube: 'https://www.youtube.com/',
   maps: 'https://www.google.com/maps', news: 'https://www.bbc.com/news', mail: 'https://mail.google.com/',
@@ -158,7 +160,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const permissionOpen = Boolean(!groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
   const popover = Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
-  const hidden = Boolean(panel || popover);
+  const vaultSuggestion = !state?.privateWindow && !popover && !findOpen ? state?.vault.suggestion : null;
+  const covered = popover || Boolean(vaultSuggestion);
+  const hidden = Boolean(panel || covered);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
   // Third-party cookies are refused before the filter lists load, so a count can exist while the lists are not ready.
@@ -177,7 +181,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     const leaving = command.type === 'switch-profile' || command.type === 'delete-profile';
     if (leaving) { desktopLeaves.current++; setDesktopLeaving(true); }
     try { await edits.flush(); await window.horizon.command(command); setError(''); return true; }
-    catch (reason) { setError(command.type === 'set-tab-group-folded' && reason instanceof Error && reason.message.includes('Tab limit reached') ? text('groupFoldLimit', language) : command.type.includes('group') ? text('browserError', language) : command.type === 'move-tab-to-window' ? text('actionError', language) : command.type.includes('favorite') || command.type === 'bookmark' ? favoritesError(reason, language) : command.type === 'open-settings' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
+    catch (reason) { setError(command.type === 'set-tab-group-folded' && reason instanceof Error && reason.message.includes('Tab limit reached') ? text('groupFoldLimit', language) : command.type.includes('group') ? text('browserError', language) : command.type === 'move-tab-to-window' ? text('actionError', language) : command.type.includes('favorite') || command.type === 'bookmark' ? favoritesError(reason, language) : command.type === 'open-settings' || command.type.startsWith('vault-') || command.type === 'set-vault-timeout' ? settingsError(reason, language) : desktopError(reason, language)); return false; }
     finally { if (leaving && --desktopLeaves.current === 0) setDesktopLeaving(false); }
   }, [language, edits]);
   const closeCapture = useCallback(() => {
@@ -469,7 +473,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       if (snapshotUrl.current) URL.revokeObjectURL(snapshotUrl.current);
       snapshotUrl.current = null;
     };
-    if (!popover || !pageShowing) {
+    if (!covered || !pageShowing) {
       void reportArea(false).then(() => requestAnimationFrame(removeSnapshot));
     } else {
       void reportArea(false).then(() => window.horizon.capture()).then(bytes => {
@@ -481,7 +485,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       }).catch(() => { if (captureGeneration.current === generation) setError(text('browserError', language)); });
     }
     return () => { captureGeneration.current++; };
-  }, [panel, popover, pageShowing, pageCapturePending, state?.activeId, state?.desktopPanel.open, reportArea, language]);
+  }, [panel, covered, pageShowing, pageCapturePending, state?.activeId, state?.desktopPanel.open, reportArea, language]);
   useLayoutEffect(() => {
     const image = snapshotRef.current;
     if (!snapshot || !image || pageCapturePending) return;
@@ -764,8 +768,10 @@ export function App({ language: initialLanguage }: { language: Language }) {
     }} onNew={() => setProfileOpen('new')} onManage={() => openSettings('profiles')} onPrivate={() => { setProfileOpen(null); profileButtonRef.current?.focus(); void run({ type: 'new-private-window' }); }} />}
     {profileOpen === 'new' && state && !state.privateWindow && <NewProfilePopover state={state} language={language} opener={profileButtonRef} onCancel={() => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus(); }} onSuccess={name => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); setAnnouncement(t('createdProfile').replace('{name}', name)); profileButtonRef.current?.focus(); }} />}
     {menuOpen && <BrowserMenu privateWindow={state?.privateWindow ?? false} language={language} active={active} canReopen={state?.canReopenTab ?? false} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); if (action === 'new-window' || action === 'new-private-window') menuButtonRef.current?.focus(); shortcut(action); }} onPanel={openPanel} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
+    <Suspense fallback={null}>{vaultSuggestion && state && <VaultSuggestion key={vaultSuggestion.id} suggestion={vaultSuggestion} state={state} language={language} run={run} />}
+    {panel === 'passwords' && state && <PasswordsPanel state={state} language={language} opener={menuButtonRef} run={run} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}</Suspense>
     {panel === 'bookmarks' && state && <FavoritesPanel key={state.activeProfileId} state={state} language={language} opener={menuButtonRef} undo={undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} onDelete={destructive} run={run} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
-    {panel && panel !== 'bookmarks' && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
+    <Suspense fallback={null}>{panel && panel !== 'bookmarks' && panel !== 'passwords' && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}</Suspense>
     {state?.firstRun && <FirstRunImport state={state} language={language} returnFocus={addressRef} onOpen={setFirstRunOpen} />}
     {aboutOpen && state && <AboutHorizon version={state.version} language={language} opener={menuButtonRef} onClose={() => setAboutOpen(false)} />}
     {contextMenu && <Menu key={contextMenu.id} id="page-context-menu" label={t('pageMenu')} keyboard={contextMenu.keyboard} point={contextMenu} onDismiss={reason => closeContextMenu(reason === 'escape')}>

@@ -1,5 +1,5 @@
 import type { RefObject } from 'react';
-import { AppWindow, Download, EyeOff, History, Home, Info, Maximize, Minus, Plus, Printer, RotateCw, Search, Settings2, Star, Trash2, Undo2, X, ZoomIn } from 'lucide-react';
+import { AppWindow, Download, EyeOff, History, Home, Info, KeyRound, Maximize, Minus, Plus, Printer, RotateCw, Search, Settings2, Star, Trash2, Undo2, X, ZoomIn } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import type { BrowserCommand, BrowserShortcut, Language, TabState } from './shared/api';
@@ -11,7 +11,7 @@ export function BrowserMenu({ language, active, privateWindow = false, canReopen
   privateWindow?: boolean;
   canReopen: boolean;
   language: Language; active: TabState | undefined; keyboard: boolean; opener: RefObject<HTMLButtonElement | null>;
-  onDismiss: (focus: boolean) => void; onShortcut: (shortcut: BrowserShortcut) => void; onPanel: (panel: LibraryPanel) => void;
+  onDismiss: (focus: boolean) => void; onShortcut: (shortcut: BrowserShortcut) => void; onPanel: (panel: LibraryPanel | 'passwords') => void;
   onSettings: () => void; onAbout: () => void; run: (command: BrowserCommand) => Promise<boolean>;
 }) {
   const t = (key: CopyKey) => text(key, language);
@@ -38,6 +38,7 @@ export function BrowserMenu({ language, active, privateWindow = false, canReopen
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onPanel('bookmarks')}><Star aria-hidden="true" /><span>{t('favorites')}</span><kbd>Ctrl+Shift+O</kbd></button>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onPanel('history')}><History aria-hidden="true" /><span>{t('history')}</span><kbd>Ctrl+H</kbd></button>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onPanel('downloads')}><Download aria-hidden="true" /><span>{t('downloads')}</span><kbd>Ctrl+J</kbd></button>
+    {!privateWindow && <button type="button" role="menuitem" tabIndex={-1} onClick={() => onPanel('passwords')}><KeyRound aria-hidden="true" /><span>{t('passwords')}</span></button>}
     <hr />
     <button type="button" role="menuitem" tabIndex={-1} onClick={onSettings}><Settings2 aria-hidden="true" /><span>{t('settings')}</span></button>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onShortcut('clear-browsing-data')}><Trash2 aria-hidden="true" /><span>{t('clearBrowsingData')}</span><kbd>Ctrl+Shift+Delete</kbd></button>

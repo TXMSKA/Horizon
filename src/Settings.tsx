@@ -210,6 +210,9 @@ function PrivacySettings({ state, language, onOpen, openClearDialog, onClearDial
         <SettingRow title="sitesOwnSettings" hint={t(count === 0 ? 'sitesOwnSettingsNone' : count === 1 ? 'siteOwnSettingsCount' : 'sitesOwnSettingsCount').replace('{count}', String(count))} language={language}>{() => <button className="settings-button" type="button" onClick={() => onOpen('privacy/sites')}>{t('manage')}</button>}</SettingRow>
       </>}
     </SettingsGroup>
+    {!state.privateWindow && <SettingsGroup title="passwords" language={language}>
+      <SettingRow title="vaultTimeout" hint={t('vaultTimeoutHint')} language={language}>{(id, apply, pending) => <SettingsDropdown id={id} label="vaultTimeout" value={state.vault.timeout} choices={(['close', '5', '15', '60'] as const).map(value => ({ value, label: t(value === 'close' ? 'vaultUntilClose' : 'vaultMinutes').replace('{minutes}', value) }))} disabled={pending} language={language} onChange={value => { void apply({ type: 'set-vault-timeout', value }); }} />}</SettingRow>
+    </SettingsGroup>}
     <SettingsGroup title="browsingData" language={language}>
       <SettingRow title="clearBrowsingData" hint={t('clearBrowsingDataHint')} language={language}>{() => <button className="settings-button" ref={opener} type="button" onClick={() => setDialog(true)}>{t('clear')}</button>}</SettingRow>
       {!state.privateWindow && <>

@@ -1,7 +1,7 @@
 import { IMPORT_BROWSERS } from '../src/shared/api';
 import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
 import { isWebURL } from './browsing';
-import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart } from './settings';
+import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart, isVaultTimeout } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
@@ -39,6 +39,19 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
 function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
   const command = object(value);
   const type = command.type;
+  if (typeof type === 'string' && (type.startsWith('vault-') || type === 'set-vault-timeout')) {
+    let fields: string[] = [], valid = false;
+    switch (type) {
+      case 'vault-refresh': case 'vault-lock': case 'vault-hello': case 'vault-dismiss': valid = true; break;
+      case 'set-vault-timeout': fields = ['value']; valid = isVaultTimeout(command.value); break;
+      case 'vault-unlock': fields = ['password']; valid = string(command.password, 128); break;
+      case 'vault-fill': fields = ['suggestion', 'id']; valid = string(command.suggestion, 128) && string(command.id, 128); break;
+      case 'vault-copy': fields = ['id', 'origin']; valid = string(command.id, 128) && isWebURL(command.origin) && new URL(command.origin).origin === command.origin; break;
+      case 'vault-add': fields = ['title', 'website', 'username', 'password']; valid = string(command.title, 500) && isWebURL(command.website) && string(command.username, 32000, true) && string(command.password, 32000); break;
+    }
+    if (!valid || Object.keys(command).length !== fields.length + 1 || !fields.every(key => Object.hasOwn(command, key))) throw new Error('VAULT_COMMAND_INVALID');
+    return value as BrowserCommand;
+  }
   const settingsCommands = ['set-show-capture', 'open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'register-default-browser'];
   if (type === 'set-on-start' || settingsCommands.includes(type as string)) {
     let allowed: string[] = ['type'];
