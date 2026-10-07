@@ -5,6 +5,7 @@ const desktopWrites = new Set(['retry-desktop-storage', 'create-project', 'renam
 
 export function assertPrivateCommand(command: BrowserCommand): void {
   if (command.type.includes('extension') || command.type === 'open-settings' && command.section === 'extensions') throw new Error('EXTENSIONS_UNAVAILABLE');
+  if (command.type.startsWith('translate-')) throw new Error('TRANSLATE_PRIVATE');
   if (command.type.startsWith('lyra-')) throw new Error('LYRA_PRIVATE');
   if (favoriteWrites.has(command.type) || command.type === 'restore' && command.kind === 'bookmarks') throw new Error('Private window favorites are read-only');
   if (command.type === 'import-browser-data') throw new Error('Private window import is unavailable');

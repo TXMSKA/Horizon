@@ -325,6 +325,8 @@
   --picker-black: var(--palette-contrast-dark-surface);
   --picker-hue-gradient: linear-gradient(to right in hsl longer hue, #ff0000, #ff0000);
   --toolbar-popup-gap: 6px;
+  --height-translation-bar: 42px;
+  --width-translation-options: 300px;
   --toolbar-popup-edge: 12px;
   --toolbar-popup-inset: 16px;
   --width-account-popover: 21.25rem;

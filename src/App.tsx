@@ -16,6 +16,7 @@ import { webTabTitle } from './shared/tab-title';
 import { applyTheme } from './theme';
 import { Menu } from './Menu';
 import { Hub, hubApps } from './Hub';
+import { TranslateBar } from './Translate';
 import { ToolbarPopover } from './ToolbarPopover';
 import { NewProfilePopover, ProfileControl, ProfilesMenu } from './Profiles';
 import { BrowserPanel } from './BrowserPanel';
@@ -92,6 +93,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const extensionsButtonRef = useRef<HTMLButtonElement>(null);
   const [aboutOpen, setAboutOpen] = useState(false), [clearDialogRequested, setClearDialogRequested] = useState(false), [firstRunOpen, setFirstRunOpen] = useState(false);
   const [hubPage, setHubPage] = useState<'home' | keyof typeof hubApps | null>(null);
+  const [translateMenuScope, setTranslateMenuScope] = useState<string | null>(null);
   const lyraOpen = state?.lyra.open ?? false;
   const setLyraOpen = useCallback((open: boolean) => { void window.horizon.command({ type: open ? 'lyra-open' : 'lyra-close' }).catch(() => {}); }, []);
   const hubButtonRef = useRef<HTMLButtonElement>(null), lyraButtonRef = useRef<HTMLButtonElement>(null);
@@ -154,6 +156,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const desktopScope = `${state?.activeProfileId}:${state?.activeId}:${activeUrl}`;
   const liveDesktopScope = useRef(desktopScope);
   useLayoutEffect(() => { liveDesktopScope.current = desktopScope; }, [desktopScope]);
+  const translateOptions = translateMenuScope === desktopScope;
+  const translation = !state?.privateWindow && !active?.loading && !active?.error && /^https?:/.test(activeUrl) && active?.translation.open ? active.translation : null;
   const desktopMode = desktopOverlay?.scope === desktopScope ? desktopOverlay.mode : null;
   const bookmarked = state ? allFavoriteLinks(state.store.favorites).some(item => item.url === activeUrl) : false;
   const site = state?.siteSettings;
@@ -162,10 +166,11 @@ export function App({ language: initialLanguage }: { language: Language }) {
   useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.privateWindow ? null : state?.permissionPrompt;
-  const permissionOpen = Boolean(!extensionsOpen && !state?.extensionWarning && !groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
+  const permissionOpen = Boolean(!extensionsOpen && !state?.extensionWarning && !groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && !translateOptions && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
   const popover = extensionsOpen || Boolean(state?.extensionWarning) || Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
-  const hidden = Boolean(panel || popover);
+  const translationMenuShowing = translateOptions && Boolean(translation) && !popover;
+  const hidden = Boolean(panel || popover || translationMenuShowing);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && activeUrl !== LYRA_ADDRESS && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
   // Third-party cookies are refused before the filter lists load, so a count can exist while the lists are not ready.
@@ -476,7 +481,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       if (snapshotUrl.current) URL.revokeObjectURL(snapshotUrl.current);
       snapshotUrl.current = null;
     };
-    if (!popover || !pageShowing) {
+    if (!(popover || translationMenuShowing) || !pageShowing) {
       void reportArea(false).then(() => requestAnimationFrame(removeSnapshot));
     } else {
       void reportArea(false).then(() => window.horizon.capture()).then(bytes => {
@@ -488,7 +493,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       }).catch(() => { if (captureGeneration.current === generation) setError(text('browserError', language)); });
     }
     return () => { captureGeneration.current++; };
-  }, [panel, popover, pageShowing, pageCapturePending, state?.activeId, state?.desktopPanel.open, reportArea, language]);
+  }, [panel, popover, translationMenuShowing, pageShowing, pageCapturePending, state?.activeId, state?.desktopPanel.open, reportArea, language]);
   useLayoutEffect(() => {
     const image = snapshotRef.current;
     if (!snapshot || !image || pageCapturePending) return;
@@ -559,6 +564,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') void run({ type: 'zoom', delta: action === 'zoom-in' ? 1 : action === 'zoom-out' ? -1 : 0 });
     else if (action === 'stop') {
       if (extensionsOpen) { setExtensionsOpen(false); extensionsButtonRef.current?.focus(); }
+      else if (translateOptions) setTranslateMenuScope(null);
       else if (aboutOpen) setAboutOpen(false);
       else if (desktopMode) closeCapture();
       else if (captureHint) setCaptureHint(false);
@@ -577,7 +583,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'reload-no-cache' || action === 'bookmark') {
       openPanel(null); setSuggestionsOpen(false); void run({ type: action });
     }
-  }, [extensionsOpen, aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, tabMenu, closeTabMenu, groupEditor, closeGroupEditor, finishTabDrag, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
+  }, [extensionsOpen, translateOptions, aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, tabMenu, closeTabMenu, groupEditor, closeGroupEditor, finishTabDrag, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
   useEffect(() => {
     const unsubscribe = window.horizon.onShortcut(shortcut);
     const keydown = (event: KeyboardEvent) => {
@@ -724,7 +730,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
           {!state?.privateWindow && <button className={`icon-button${bookmarked ? ' accent bookmarked' : ''}`} type="button" disabled={!/^https?:/.test(activeUrl)} aria-label={t(bookmarked ? 'removeBookmark' : 'bookmark')} aria-pressed={bookmarked} title={t(bookmarked ? 'removeBookmark' : 'bookmark')} onClick={() => shortcut('bookmark')}><Star aria-hidden="true" /></button>}
         </form>
         <div className="tools">{state?.showCapture !== false && <button className="icon-button" ref={desktopButtonRef} type="button" aria-label={t('captureShortcut')} aria-describedby={showCaptureHint ? 'capture-shortcut' : undefined} aria-haspopup="dialog" aria-expanded={Boolean(desktopMode)} onMouseEnter={() => setCaptureHint(true)} onMouseLeave={() => setCaptureHint(false)} onFocus={event => { if (!restoringCaptureFocus.current && event.currentTarget.matches(':focus-visible')) setCaptureHint(true); }} onBlur={() => setCaptureHint(false)} onClick={() => { setCaptureHint(false); void openCapture(); }}><Scan aria-hidden="true" /></button>}
-          {state?.quickAccess.filter(app => !state.privateWindow || app !== 'desktop').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={event => { if (app === 'desktop') void openDesktopPanel({ kind: 'home' }, event.currentTarget); else openHub(app); }}><Icon aria-hidden="true" /></button>; })}
+          {state?.quickAccess.filter(app => !state.privateWindow || app !== 'desktop' && app !== 'translate').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={event => { if (app === 'desktop') void openDesktopPanel({ kind: 'home' }, event.currentTarget); else if (app === 'translate') { setHubPage(null); void run({ type: 'translate-open' }); } else openHub(app); }}><Icon aria-hidden="true" /></button>; })}
           {!state?.privateWindow && state?.extensions.filter(extension => extension.pinned).map(extension => <ExtensionAction key={`${state.activeProfileId}:${extension.id}`} extension={extension} language={language} run={run} onActivate={() => setExtensionsOpen(false)} />)}
           {!state?.privateWindow && <button className="icon-button" ref={extensionsButtonRef} type="button" aria-label={t('extensions')} title={t('extensions')} aria-haspopup="dialog" aria-controls="extensions-popover" aria-expanded={extensionsOpen} onClick={() => {
             setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); closeFind(); closeContextMenu(); setExtensionsOpen(previous => !previous);
@@ -743,6 +749,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
         {iconButton(ArrowUp, 'previousMatch', () => { void run({ type: 'find', text: findText, forward: false, next: true }); }, !findText)}{iconButton(ArrowDown, 'nextMatch', () => { void run({ type: 'find', text: findText, forward: true, next: true }); }, !findText)}{iconButton(X, 'close', () => { closeFind(); void run({ type: 'focus-page' }); })}
       </div>}
       {(error || state?.storageReadError || state?.storageError || (state?.desktopReadError && dismissedDesktopRead !== state.activeProfileId) || state?.desktopLocked || state?.desktopStorageError) && <div className="shell-status" role="alert"><span>{error || t(state?.desktopLocked ? 'DESKTOP_LOCKED' : state?.desktopReadError && dismissedDesktopRead !== state.activeProfileId ? 'desktopReadFailed' : state?.desktopStorageError ? 'DESKTOP_STORAGE_FAILED' : state?.storageReadError ? 'storageReadError' : 'storageError')}</span>{state?.desktopLocked && <button className="text-button" type="button" onClick={() => { void retryDesktopStorage(); }}>{t('retry')}</button>}{(error || state?.desktopReadError && !state.desktopLocked && dismissedDesktopRead !== state.activeProfileId) && iconButton(X, 'close', () => { if (error) setError(''); else if (state) setDismissedDesktopRead(state.activeProfileId); })}</div>}
+      {translation && state && <TranslateBar key={desktopScope} value={translation} state={state} language={language} options={translationMenuShowing} onOptions={open => setTranslateMenuScope(open ? desktopScope : null)} dismiss={popover} />}
       <div className={`loading-line${active?.loading ? ' loading' : ''}`} aria-hidden="true" />
     </header>
     {menuTab && <ToolbarPopover opener={tabMenuOpener}><Menu id="tab-menu" className="browser-tools-menu" label={t('tabActions').replace('{name}', menuTab.settings ? t('settings') : menuTab.desktop ? desktopTabTitle(menuTab, language) : webTabTitle(menuTab, t('home')))} describedBy={tabMoveReason ? 'tab-move-reason' : undefined} keyboard opener={tabMenuOpener} onDismiss={reason => closeTabMenu(reason !== 'outside')}>
@@ -757,7 +764,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     {desktopMode === 'capture' && state && <CapturePreview state={state} language={language} shot={captureShot} header={headerRef} opener={desktopButtonRef} onClose={closeCapture} onSave={saveDesktopCapture} onVisible={captureVisible} onShot={setCaptureShot} />}
     {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} privateWindow={state.privateWindow} counts={active.blocked} ready={state.blockingReady} blockAds={state.blockAds} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}
     {permissionOpen && permissionPrompt && <PermissionDialog key={`${siteScope}:${permissionPrompt.id}`} prompt={permissionPrompt} language={language} favicon={siteFavicon} initial={siteInitial} onAnswer={answerPermission} />}
-    {hubPage && state && <Hub onAnnounce={setAnnouncement} state={state} language={language} page={hubPage} opener={hubButtonRef} onPage={page => { if (page === 'desktop') void openDesktopPanel({ kind: 'home' }, hubButtonRef.current ?? undefined); else setHubPage(page); }} onDismiss={focus => { setHubPage(null); if (focus) hubButtonRef.current?.focus(); }} />}
+    {hubPage && state && <Hub onAnnounce={setAnnouncement} state={state} language={language} page={hubPage} opener={hubButtonRef} onPage={page => { if (page === 'desktop') void openDesktopPanel({ kind: 'home' }, hubButtonRef.current ?? undefined); else if (page === 'translate') { setHubPage(null); void run({ type: 'translate-open' }); } else setHubPage(page); }} onDismiss={focus => { setHubPage(null); if (focus) hubButtonRef.current?.focus(); }} />}
     {profileOpen === 'menu' && state && !state.privateWindow && <ProfilesMenu state={state} language={language} keyboard={profileByKeyboard.current} opener={profileButtonRef} onDismiss={reason => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); if (reason === 'escape') profileButtonRef.current?.focus(); }} onSwitch={profile => {
       setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus();
       void run({ type: 'switch-profile', id: profile.id }).then(success => { if (success) { setAnnouncement(t('switchedProfile').replace('{name}', profile.name)); profileButtonRef.current?.focus(); } });

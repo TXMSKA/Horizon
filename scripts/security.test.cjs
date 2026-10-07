@@ -934,7 +934,7 @@ test('Hub tiles, dock and menus support keyboard opening, pending saves, retry a
   const { Hub } = interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: (_reason, language) => copy.text('SETTINGS_SAVE_FAILED', language) } }, {
     document, window: { horizon: { command: command => { sent.push(command); return new Promise((resolve, fail) => { complete = resolve; reject = fail; }); } } },
   });
-  const state = { quickAccess: [], showCapture: true }, opener = { current: { contains: () => false } }, focus = { focus: () => focused++ };
+  const state = { quickAccess: [], showCapture: true, tabs: [] }, opener = { current: { contains: () => false } }, focus = { focus: () => focused++ };
   const render = () => hooks.render(() => Hub({ state, language: 'en', page, opener, onPage: value => { page = value; }, onAnnounce: value => announced.push(value), onDismiss: value => dismissed.push(value) }));
   const nodes = (tree, role) => notebookNodes(tree, node => node.props.role === role);
   const tile = tree => notebookNodes(tree, node => node.props.className === 'hub-tile').find(node => node.props.children[1].props.children === 'Themes');
@@ -4276,7 +4276,7 @@ test('capture rectangles require exact integer bounds inside the stored image', 
 test('pages contain no script execution or isolated-world selection read', () => {
   for (const file of ['electron/captures.ts', 'electron/browser.ts', 'electron/preload.ts'])
     assert.doesNotMatch(readFileSync(file, 'utf8'), /executeJavaScript|SELECTION_WORLD|SELECTION_CODE|captureSelection/);
-  assert.match(readFileSync('docs/security/electron-checklist.md', 'utf8'), /No script runs in web pages/);
+  assert.match(readFileSync('docs/security/electron-checklist.md', 'utf8'), /Translation is the approved exception/);
 });
 
 test('page protocol refuses hidden views, caps device height, uses only two commands and always detaches', async () => {
@@ -6505,7 +6505,7 @@ test('Desktop tab titles and card metadata follow the board in both languages', 
 });
 
 test('the Hub draws Desktop first and focuses its first built tile', () => {
-  assert.deepEqual(require('../dist/src/shared/api.js').HUB_APPS, ['desktop', 'themes']);
+  assert.deepEqual(require('../dist/src/shared/api.js').HUB_APPS, ['desktop', 'translate', 'themes']);
   const hub = readFileSync('src/Hub.tsx', 'utf8');
   assert.match(hub, /const apps = HUB_APPS.filter/); assert.match(hub, /apps.map/);
   assert.ok(hub.includes("querySelector<HTMLButtonElement>(page === 'home' ? '.hub-tile'"));
@@ -6967,3 +6967,4 @@ test('Lyra command schemas reject extra fields, oversize requests and sparse tab
   for (const file of ['electron/lyra.ts', 'electron/lyra-context.ts', 'src/Lyra.tsx']) assert.doesNotMatch(readFileSync(file, 'utf8'), /executeJavaScript|dangerouslySetInnerHTML|11434|fetch\(/);
 });
 require('./group-search-colors.test.cjs');
+require('./translate.test.cjs');
