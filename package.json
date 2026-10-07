@@ -13,12 +13,13 @@
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "tsc -p tsconfig.electron.json && vite build --configLoader native && node scripts/contrast.mjs",
+    "build:clients": "tsc -p packages/lyra-client && tsc -p packages/vault-client",
+    "build": "npm run build:clients && tsc -p tsconfig.electron.json && vite build --configLoader native && node scripts/contrast.mjs",
     "dist": "npm run build && electron-builder --publish never",
     "dist:win": "npm run build && electron-builder --win --publish never",
     "dist:linux": "npm run build && electron-builder --linux --publish never",
     "lint": "eslint . --max-warnings=0",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.electron.json --noEmit",
+    "typecheck": "npm run build:clients && tsc -p tsconfig.json && tsc -p tsconfig.electron.json --noEmit",
     "start": "node scripts/start.mjs",
     "setup:electron": "node scripts/setup-electron.mjs",
     "scan:secrets": "node scripts/scan-secrets.mjs",
@@ -35,11 +36,11 @@
     "electron-chrome-web-store": "0.13.0",
     "electron-updater": "6.8.9",
     "lucide-react": "1.48.0",
-    "lyra-client": "file:../Lyra/packages/client",
+    "lyra-client": "file:packages/lyra-client",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "tldts-experimental": "7.4.15",
-    "vault-client": "file:../Vault/packages/client"
+    "vault-client": "file:packages/vault-client"
   },
   "devDependencies": {
     "@electron/fuses": "2.1.3",
