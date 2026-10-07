@@ -76,7 +76,8 @@ function siteEntries(settings: Record<string, unknown>): boolean {
   if (!hostChoices(settings.blocking) || !Array.isArray(settings.permissions) || settings.permissions.length > SITE_SETTINGS_LIMIT) return false;
   const origins = new Set<string>();
   return Array.from(settings.permissions).every(entry => {
-    if (!object(entry, ['origin', 'camera', 'microphone', 'location', 'notifications']) || !validOrigin(entry.origin) || origins.has(entry.origin)
+    if (!(object(entry, ['origin', 'camera', 'microphone', 'location', 'notifications']) || object(entry, ['origin', 'camera', 'microphone', 'location', 'notifications', 'lyra'])) || !validOrigin(entry.origin) || origins.has(entry.origin)
+      || Object.hasOwn(entry, 'lyra') && !isPermissionDecision(entry.lyra)
       || !['camera', 'microphone', 'location', 'notifications'].every(key => isPermissionDecision(entry[key]))) return false;
     origins.add(entry.origin); return true;
   });
@@ -159,6 +160,7 @@ export function readStore(path: string, cipher?: StoreCipher, status: StoreReadS
         if (!validateStore(value)) throw new Error('Invalid browser store');
         store = value;
       }
+      for (const entry of store.siteSettings.permissions) if (entry.lyra === undefined) { entry.lyra = 'ask'; upgrade = true; }
       upgrade ||= !encrypted && Boolean(cipher?.isEncryptionAvailable());
     } catch {
       status.readError = true;

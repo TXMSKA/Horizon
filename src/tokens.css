@@ -240,6 +240,7 @@
   /* Scene translucency is not an opaque control/text contrast surface. */
   --surface-capture-veil: var(--palette-daylight-capture-veil);
   --width-capture-preview: 356px;
+  --width-lyra-attachment: 17.5rem;
   --width-capture-action: 78px;
   --width-capture-editor: 1100px;
   --height-capture-editor: 48px;

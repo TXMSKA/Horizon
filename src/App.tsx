@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AppWindow, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Download, Ellipsis, LayoutGrid,
@@ -9,6 +9,7 @@ import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { SEARCH_ENGINES } from './shared/api';
+import { LYRA_ADDRESS } from './shared/lyra';
 import type { BrowserCommand, BrowserShortcut, BrowserState, CaptureShot, ContextMenuItemId, DesktopPanelPage, Language, ProjectSummary, PageContextMenu, SettingsSection, TabGroup, WindowAction } from './shared/api';
 import { browserShortcut, completeAddress, shortcutTabIndex } from './shared/shortcuts';
 import { webTabTitle } from './shared/tab-title';
@@ -31,12 +32,14 @@ import { blockedCount, blockedTotal, PermissionDialog, ShieldPopover } from './S
 import { CapturePreview } from './Capture';
 import { desktopTabTitle, DesktopResume, DesktopStatus, desktopError } from './Desktop';
 import type { DesktopNotice } from './Desktop';
-import { DesktopPanel, DesktopTab } from './DesktopView';
+const DesktopPanel = lazy(() => import('./DesktopView').then(module => ({ default: module.DesktopPanel })));
+const DesktopTab = lazy(() => import('./DesktopView').then(module => ({ default: module.DesktopTab })));
 import { desktopSuggestions } from './shared/desktop-address';
 import { DesktopEdits } from './shared/desktop-edits';
 import { DESKTOP_TAB_DRAG, parseDesktopDrag } from './shared/desktop-drag';
 import { Settings, settingsError } from './Settings';
 import { FirstRunImport } from './FirstRunImport';
+const LyraPanel = lazy(() => import('./Lyra').then(module => ({ default: module.LyraPanel })));
 
 type Panel = LibraryPanel | null;
 const sites = {
@@ -86,8 +89,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false), [clearDialogRequested, setClearDialogRequested] = useState(false), [firstRunOpen, setFirstRunOpen] = useState(false);
   const [hubPage, setHubPage] = useState<'home' | keyof typeof hubApps | null>(null);
-  const [lyraOpen, setLyraOpen] = useState(false);
-  const hubButtonRef = useRef<HTMLButtonElement>(null), lyraButtonRef = useRef<HTMLButtonElement>(null), lyraRef = useRef<HTMLDivElement>(null);
+  const lyraOpen = state?.lyra.open ?? false;
+  const setLyraOpen = useCallback((open: boolean) => { void window.horizon.command({ type: open ? 'lyra-open' : 'lyra-close' }).catch(() => {}); }, []);
+  const hubButtonRef = useRef<HTMLButtonElement>(null), lyraButtonRef = useRef<HTMLButtonElement>(null);
   const [profileOpen, setProfileOpen] = useState<'menu' | 'new' | null>(null);
   const [desktopOverlay, setDesktopOverlay] = useState<{ scope: string; mode: 'capture' } | null>(null);
   const liveDesktopOverlay = useRef(desktopOverlay);
@@ -157,9 +161,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const permissionPrompt = state?.privateWindow ? null : state?.permissionPrompt;
   const permissionOpen = Boolean(!groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
-  const popover = Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
+  const popover = Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
-  const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
+  const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && activeUrl !== LYRA_ADDRESS && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
   // Third-party cookies are refused before the filter lists load, so a count can exist while the lists are not ready.
   const showBlocked = Boolean(site?.blocking && totalBlocked > 0);
@@ -489,17 +493,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       if (captureGeneration.current === snapshot.generation) void reportArea(true);
     })).catch(() => { if (captureGeneration.current === snapshot.generation) setError(text('browserError', language)); });
   }, [snapshot, pageCapturePending, reportArea, language]);
-  useEffect(() => {
-    if (!lyraOpen) return;
-    lyraRef.current?.focus();
-    const outside = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!lyraRef.current?.contains(target) && !lyraButtonRef.current?.contains(target)) setLyraOpen(false);
-    };
-    document.addEventListener('pointerdown', outside);
-    return () => document.removeEventListener('pointerdown', outside);
-  }, [lyraOpen]);
-  useEffect(() => { setHubPage(null); setLyraOpen(false); }, [state?.activeId, state?.activeProfileId]);
+  useEffect(() => { setHubPage(null); }, [state?.activeId, state?.activeProfileId]);
   useEffect(() => { setShieldScope(null); }, [siteScope]);
   useEffect(() => { setDesktopOverlay(null); }, [desktopScope]);
   useEffect(() => { setDesktopNotice(null); }, [state?.activeProfileId]);
@@ -555,7 +549,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       if (tab) { closeFind(); openPanel(null); setDirty(false); setSuggestionsOpen(false); void run({ type: 'activate-tab', id: tab.id }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); }); }
     } else if (action === 'history' || action === 'downloads' || action === 'favorites') openPanel(action === 'favorites' ? 'bookmarks' : action);
     else if (action === 'fullscreen') { openPanel(null); closeFind(); void run({ type: 'fullscreen' }); }
-    else if ((action === 'find' || action === 'find-next' || action === 'find-previous') && activeUrl && !active?.desktop && !active?.settings && !active?.error) {
+    else if ((action === 'find' || action === 'find-next' || action === 'find-previous') && activeUrl && !active?.desktop && !active?.settings && activeUrl !== LYRA_ADDRESS && !active?.error) {
       if (action !== 'find' && findOpen && findText) void run({ type: 'find', text: findText, forward: action === 'find-next', next: true });
       else { openPanel(null); setSuggestionsOpen(false); setFindOpen(true); requestAnimationFrame(() => { findRef.current?.focus(); findRef.current?.select(); }); }
     }
@@ -730,7 +724,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
           <button className="icon-button" ref={hubButtonRef} type="button" aria-label={t('hub')} title={t('hub')} aria-haspopup="dialog" aria-expanded={Boolean(hubPage)} aria-controls="hub-popup" onClick={() => { if (hubPage) { setHubPage(null); hubButtonRef.current?.focus(); } else openHub('home'); }}><LayoutGrid aria-hidden="true" /></button>
           <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} privateWindow={state?.privateWindow ?? false} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { setDesktopOverlay(null); setShieldScope(null); dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); setHubPage(null); setLyraOpen(false); setPanel(null); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
           <button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-haspopup="menu" aria-expanded={menuOpen || Boolean(panel)} aria-controls={panel ? "browser-library-panel" : "browser-menu"} onClick={event => { setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); closeContextMenu(); menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setPanel(null); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button>
-          <button className="icon-button lyra-button" ref={lyraButtonRef} type="button" aria-label={t('lyra')} title={t('lyra')} aria-haspopup="dialog" aria-expanded={lyraOpen} aria-controls="lyra-preview" onClick={() => { closeFind(); dismissUndo(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(previous => !previous); }}><span><Sparkles aria-hidden="true" /></span></button>
+          {!state?.privateWindow && <button className="icon-button lyra-button" ref={lyraButtonRef} type="button" aria-label={t('lyra')} title={t('lyra')} aria-expanded={lyraOpen} aria-controls="lyra-panel" onClick={() => { closeFind(); dismissUndo(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(!lyraOpen); }}><span><Sparkles aria-hidden="true" /></span></button>}
         </div>
       </div>
       {state && <FavoritesBar key={`${state.activeProfileId}:${state.activeId}`} state={state} language={language} run={run} onDelete={destructive} onOverlay={setFavoritesOpen} dismiss={Boolean(groupEditor || panel || menuOpen || profileOpen || hubPage || lyraOpen || desktopMode || suggestionsOpen || contextMenu || tabMenu || shieldOpen || aboutOpen || desktopModalOpen)} onActivate={() => { closeFind(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }} undo={panel === 'bookmarks' ? null : undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} />}
@@ -754,10 +748,6 @@ export function App({ language: initialLanguage }: { language: Language }) {
     {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} privateWindow={state.privateWindow} counts={active.blocked} ready={state.blockingReady} blockAds={state.blockAds} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}
     {permissionOpen && permissionPrompt && <PermissionDialog key={`${siteScope}:${permissionPrompt.id}`} prompt={permissionPrompt} language={language} favicon={siteFavicon} initial={siteInitial} onAnswer={answerPermission} />}
     {hubPage && state && <Hub onAnnounce={setAnnouncement} state={state} language={language} page={hubPage} opener={hubButtonRef} onPage={page => { if (page === 'desktop') void openDesktopPanel({ kind: 'home' }, hubButtonRef.current ?? undefined); else setHubPage(page); }} onDismiss={focus => { setHubPage(null); if (focus) hubButtonRef.current?.focus(); }} />}
-    {lyraOpen && <ToolbarPopover opener={lyraButtonRef}><div className="lyra-toolbar-preview" id="lyra-preview" ref={lyraRef} role="dialog" aria-label={t('lyra')} tabIndex={-1} onKeyDown={event => {
-      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setLyraOpen(false); lyraButtonRef.current?.focus(); }
-      if (event.key === 'Tab') { setLyraOpen(false); lyraButtonRef.current?.focus(); }
-    }}><h2><Sparkles className="accent" aria-hidden="true" />{t('lyra')}</h2><p>{t('askLyra')}</p><p className="preview-notice">{t('unavailable')}</p></div></ToolbarPopover>}
     {profileOpen === 'menu' && state && !state.privateWindow && <ProfilesMenu state={state} language={language} keyboard={profileByKeyboard.current} opener={profileButtonRef} onDismiss={reason => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); if (reason === 'escape') profileButtonRef.current?.focus(); }} onSwitch={profile => {
       setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus();
       void run({ type: 'switch-profile', id: profile.id }).then(success => { if (success) { setAnnouncement(t('switchedProfile').replace('{name}', profile.name)); profileButtonRef.current?.focus(); } });
@@ -788,8 +778,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
         }),
       ])}
     </Menu>}
-    <div className="content-shell"><main id="content" className={active?.settings ? 'settings-content-area' : active?.desktop ? 'desktop-content' : activeUrl ? 'web-content' : 'start-content'} tabIndex={-1}>
-      {active?.settings && state ? <Settings key={state.activeProfileId} state={state} section={active.settings} language={language} onOpen={openSettings} openClearDialog={clearDialogRequested} onClearDialogOpened={() => setClearDialogRequested(false)} /> : active?.desktop && desktopProps ? <DesktopTab key={`${state!.activeProfileId}:${active.desktop}`} id={active.desktop} selected={active.desktopItem} props={desktopProps} onOpen={openDesktop} /> : active?.error && failure ? <section className="error-page" role="alert"><ErrorIcon aria-hidden="true" /><h1>{t(failure.heading)}</h1><p>{t(failure.sentence)}</p><div className="error-details"><p>{active.url}</p><p>{active.error}</p></div><button className="text-button" type="button" onClick={() => { void run({ type: 'reload' }); }}>{t('retry')}</button></section> : activeUrl ? (snapshot && <img className={`web-snapshot${active?.fullscreen ? ' fullscreen-snapshot' : ''}`} ref={snapshotRef} src={snapshot.url} alt="" aria-hidden="true" />) : !state ? <p role="status">{t('loading')}</p> : <div className={`start-page${state.privateWindow ? ' private-start-page' : ''}`}>
+    <div className="content-shell"><main id="content" className={activeUrl === LYRA_ADDRESS ? 'lyra-content' : active?.settings ? 'settings-content-area' : active?.desktop ? 'desktop-content' : activeUrl ? 'web-content' : 'start-content'} tabIndex={-1}>
+      {activeUrl === LYRA_ADDRESS && state && !state.privateWindow ? <Suspense fallback={<p role="status">{t('loading')}</p>}><LyraPanel key={state.activeProfileId} state={state} language={language} tab onClose={() => { setLyraOpen(false); void run({ type: 'home' }); }} onDesktop={() => { void openDesktopPanel({ kind: 'home' }); }} /></Suspense> : active?.settings && state ? <Settings key={state.activeProfileId} state={state} section={active.settings} language={language} onOpen={openSettings} openClearDialog={clearDialogRequested} onClearDialogOpened={() => setClearDialogRequested(false)} /> : active?.desktop && desktopProps ? <Suspense fallback={<p role="status">{t('loading')}</p>}><DesktopTab key={`${state!.activeProfileId}:${active.desktop}`} id={active.desktop} selected={active.desktopItem} props={desktopProps} onOpen={openDesktop} /></Suspense> : active?.error && failure ? <section className="error-page" role="alert"><ErrorIcon aria-hidden="true" /><h1>{t(failure.heading)}</h1><p>{t(failure.sentence)}</p><div className="error-details"><p>{active.url}</p><p>{active.error}</p></div><button className="text-button" type="button" onClick={() => { void run({ type: 'reload' }); }}>{t('retry')}</button></section> : activeUrl ? (snapshot && <img className={`web-snapshot${active?.fullscreen ? ' fullscreen-snapshot' : ''}`} ref={snapshotRef} src={snapshot.url} alt="" aria-hidden="true" />) : !state ? <p role="status">{t('loading')}</p> : <div className={`start-page${state.privateWindow ? ' private-start-page' : ''}`}>
         <div className="start-sky"><div className="start-browsing">
           <h1>{t('product')}</h1>
           <form className="search-field start-search" onSubmit={event => { event.preventDefault(); navigate(startSearch); }}><Search aria-hidden="true" /><input spellCheck={false} autoComplete="off" aria-label={t('search')} placeholder={t('search')} value={startSearch} maxLength={8192} onChange={event => setStartSearch(event.target.value)} /><Sparkles className="accent" aria-hidden="true" /></form>
@@ -801,11 +791,11 @@ export function App({ language: initialLanguage }: { language: Language }) {
           <svg className="horizon-sun" viewBox="0 0 64 32" aria-hidden="true"><path d="M0 32 A32 32 0 0 1 64 32" /></svg>
           {!state.privateWindow && <div className="start-research">
             <DesktopResume state={state} language={language} onOpen={(project, item) => { void openDesktopPanel(item ? { kind: 'item', project, id: item } : { kind: 'project', project }); }} onNew={button => { void openDesktopPanel({ kind: 'new-project' }, button); }} />
-            <div className="lyra-preview"><div className="lyra-prompt"><Sparkles className="accent" aria-hidden="true" />{t('askLyra')}</div><p className="preview-notice">{t('unavailable')}</p></div>
+            <div className="lyra-preview"><button className="lyra-prompt" type="button" onClick={() => setLyraOpen(true)}><Sparkles className="accent" aria-hidden="true" />{t('askLyra')}</button><p className="preview-notice">{t('lyraShort')}</p></div>
           </div>}
         </div>
       </div>}
-    </main>{state?.desktopPanel.open && !active?.fullscreen && desktopProps && <DesktopPanel key={state.activeProfileId} props={desktopProps} onClose={closeDesktopPanel} onTab={panelToTab} />}</div>
+    </main>{state?.lyra.open && activeUrl !== LYRA_ADDRESS && !active?.fullscreen && !state.privateWindow && <Suspense fallback={<aside className="desktop-panel"><div className="desktop-panel-body" role="status">{t('loading')}</div></aside>}><LyraPanel key={state.activeProfileId} state={state} language={language} onClose={() => { setLyraOpen(false); lyraButtonRef.current?.focus(); }} onDesktop={() => { void openDesktopPanel({ kind: 'home' }); }} /></Suspense>}{state?.desktopPanel.open && !active?.fullscreen && desktopProps && <Suspense fallback={<aside className="desktop-panel"><div className="desktop-panel-body" role="status">{t('loading')}</div></aside>}><DesktopPanel key={state.activeProfileId} props={desktopProps} onClose={closeDesktopPanel} onTab={panelToTab} onLyra={() => setLyraOpen(true)} /></Suspense>}</div>
     {suggestionsOpen && createPortal(<div className="suggestions" aria-label={t('suggestions')}>
       <ul id="address-suggestions" role="listbox" aria-label={t('suggestions')}>
         {suggestions.map((item, index) => <li role="option" id={`suggestion-${index}`} aria-selected={index === suggestionIndex} key={`${item.kind}:${item.url}`} onMouseDown={event => event.preventDefault()} onClick={() => chooseSuggestion(item)}>{item.kind === 'search' ? <Search aria-hidden="true" /> : item.kind === 'bookmark' ? <Star aria-hidden="true" /> : item.kind === 'project' ? <Folder aria-hidden="true" /> : <History aria-hidden="true" />}<strong>{item.title}</strong>{item.hint && <small>{item.hint}</small>}</li>)}
