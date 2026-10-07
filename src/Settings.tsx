@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
-import { Check, ChevronDown, ChevronLeft, Folder, LoaderCircle, Palette, Settings2, ShieldCheck, Users } from 'lucide-react';
+import { Check, ChevronDown, ChevronLeft, Folder, LoaderCircle, Palette, Puzzle, Settings2, ShieldCheck, Users } from 'lucide-react';
 import { copy, text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS, SEARCH_ENGINES, SITE_PERMISSIONS } from './shared/api';
@@ -11,12 +11,14 @@ import { Menu } from './Menu';
 import { PopupAnchor } from './PopupAnchor';
 import { ProfilesSettings } from './Profiles';
 import { Switch } from './Switch';
+import { ExtensionsSettings } from './Extensions';
 
 export const SETTINGS_SECTIONS = [
   { section: 'general', label: 'general', icon: Settings2 },
   { section: 'appearance', label: 'appearance', icon: Palette },
   { section: 'privacy', label: 'privacy', icon: ShieldCheck },
   { section: 'profiles', label: 'profiles', icon: Users },
+  { section: 'extensions', label: 'extensions', icon: Puzzle },
 ] as const;
 
 export function settingsError(reason: unknown, language: Language): string {
@@ -256,15 +258,16 @@ export function Settings({ state, section, language, onOpen, openClearDialog, on
   state: BrowserState; section: SettingsSection; language: Language; onOpen: (section: SettingsSection) => void; openClearDialog?: boolean; onClearDialogOpened?: () => void;
 }) {
   const t = (key: CopyKey) => text(key, language);
-  if (state.privateWindow && (section === 'profiles' || section === 'privacy/sites')) section = section === 'profiles' ? 'general' : 'privacy';
+  if (state.privateWindow && (section === 'profiles' || section === 'extensions' || section === 'privacy/sites')) section = section === 'privacy/sites' ? 'privacy' : 'general';
   const current = section === 'privacy/sites' ? 'privacy' : section;
   return <section className="settings-page" aria-label={t('settings')}><nav className="settings-rail" aria-label={t('settingsSections')}><div className="settings-rail-heading"><HorizonMark /><span>{t('settings')}</span></div>
-    {SETTINGS_SECTIONS.filter(({ section }) => !state.privateWindow || section !== 'profiles').map(({ section: target, label, icon: Icon }) => <button className={`settings-rail-row${target === current ? ' selected' : ''}`} type="button" key={target} aria-label={t(label)} title={t(label)} aria-current={target === current ? 'page' : undefined} onClick={() => onOpen(target)}><Icon aria-hidden="true" /><span>{t(label)}</span></button>)}
+    {SETTINGS_SECTIONS.filter(({ section }) => !state.privateWindow || section !== 'profiles' && section !== 'extensions').map(({ section: target, label, icon: Icon }) => <button className={`settings-rail-row${target === current ? ' selected' : ''}`} type="button" key={target} aria-label={t(label)} title={t(label)} aria-current={target === current ? 'page' : undefined} onClick={() => onOpen(target)}><Icon aria-hidden="true" /><span>{t(label)}</span></button>)}
   </nav><div className="settings-content"><div className="settings-column"><div className="settings-page-heading">{section === 'privacy/sites' && <button className="settings-back" type="button" onClick={() => onOpen('privacy')}><ChevronLeft aria-hidden="true" />{t('privacy')}</button>}<h1 id="settings-title" tabIndex={-1}>{t(section === 'privacy/sites' ? 'sitesOwnSettings' : current)}</h1></div>
     {section === 'general' && <GeneralSettings state={state} language={language} />}
     {section === 'appearance' && <AppearanceSettings state={state} language={language} />}
     {section === 'privacy' && <PrivacySettings state={state} language={language} onOpen={onOpen} openClearDialog={openClearDialog} onClearDialogOpened={onClearDialogOpened} />}
     {section === 'privacy/sites' && <SitesSettings state={state} language={language} />}
     {section === 'profiles' && <ProfilesSettings state={state} language={language} />}
+    {section === 'extensions' && !state.privateWindow && <ExtensionsSettings state={state} language={language} />}
   </div></div></section>;
 }

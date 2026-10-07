@@ -268,6 +268,7 @@
   --width-settings-column: 56.75rem;
   --width-settings-dropdown: 13.75rem;
   --width-settings-dialog: 35rem;
+  --width-extension-warning: 28.75rem;
   --surface-chrome: light-dark(var(--palette-daylight-chrome), var(--palette-amber-chrome));
   --surface-raised: light-dark(var(--palette-daylight-surface), var(--palette-amber-surface));
   --surface-sunken: light-dark(var(--palette-daylight-surface-2), var(--palette-amber-surface-2));

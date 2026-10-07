@@ -4,6 +4,7 @@ import { isWebURL } from './browsing';
 import { isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart } from './settings';
 import { isContextMenuItemId } from './context-menu';
 import { isProfileColor, isProfileId, profileName } from './profiles';
+import { extensionId } from './extension-policy';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
 import { folderName, projectName, desktopInputText, desktopTitle } from './desktop';
 import { validCaptureRect } from '../src/shared/capture';
@@ -45,7 +46,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     let valid = false;
     switch (type) {
       case 'set-on-start': allowed.push('value'); valid = isOnStart(command.value); break;
-      case 'open-settings': allowed.push('section'); valid = ['general', 'appearance', 'privacy', 'privacy/sites', 'profiles'].includes(command.section as string); break;
+      case 'open-settings': allowed.push('section'); valid = ['general', 'appearance', 'privacy', 'privacy/sites', 'profiles', 'extensions'].includes(command.section as string); break;
       case 'set-search-engine': allowed.push('value'); valid = isSearchEngine(command.value); break;
       case 'set-language': allowed.push('value'); valid = isLanguageSetting(command.value); break;
       case 'set-show-capture': case 'set-ask-where-to-save': case 'set-block-ads': case 'set-block-third-party-cookies': case 'set-clear-history-on-close': case 'set-clear-cache-on-close': allowed.push('value'); valid = typeof command.value === 'boolean'; break;
@@ -67,6 +68,11 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     return Object.hasOwn(command, 'type') && required.every(key => Object.hasOwn(command, key));
   };
   switch (type) {
+    case 'set-extension-enabled': valid = exact(['id', 'enabled']) && extensionId(command.id) && typeof command.enabled === 'boolean'; break;
+    case 'set-extension-pinned': valid = exact(['id', 'pinned']) && extensionId(command.id) && typeof command.pinned === 'boolean'; break;
+    case 'remove-extension': case 'open-extension': valid = exact(['id']) && extensionId(command.id); break;
+    case 'check-extension-updates': valid = exact([]); break;
+    case 'answer-extension-install': valid = exact(['id', 'allow']) && isProfileId(command.id) && typeof command.allow === 'boolean'; break;
     case 'create-tab-group': case 'remove-tab-from-group': valid = exact(['id']) && string(command.id, 128); break;
     case 'open-tab-group-editor': case 'close-tab-group-editor': valid = exact(['id']) && groupId(command.id); break;
     case 'add-tab-to-group': valid = exact(['id', 'group']) && string(command.id, 128) && groupId(command.group); break;

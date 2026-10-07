@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@ghostery/adblocker": "2.18.2",
+    "electron-chrome-web-store": "0.13.0",
     "lucide-react": "1.48.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
@@ -40,5 +41,8 @@
     "typescript-eslint": "8.70.1",
     "vite": "8.3.0"
   },
-  "packageManager": "npm@11.19.1"
+  "packageManager": "npm@11.19.1",
+  "overrides": {
+    "adm-zip": "0.6.1"
+  }
 }

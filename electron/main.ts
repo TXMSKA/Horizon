@@ -10,6 +10,7 @@ import { readWindowSessions, writeWindowSessions } from './session-store';
 import { createSettings, resolveLanguage } from './settings';
 import { launchAddress } from './launch';
 import { darkPagesActive, setDarkPagesSwitch } from './dark-pages';
+import { existingExtensions, profileExtensions } from './extensions';
 
 // The approved design frame: the window and the interface scale are both sized against it.
 const DESIGN_WIDTH = 1440;
@@ -55,7 +56,7 @@ if (instance) {
   ]);
 
   app.on('web-contents-created', (_event, contents) => {
-    hardenContents(contents, isProfileSession(contents.session), url => isLaunchNavigation(contents, url));
+    hardenContents(contents, isProfileSession(contents.session) || !!existingExtensions(contents.session), url => isLaunchNavigation(contents, url));
   });
 
   app.whenReady().then(async () => {
@@ -67,6 +68,8 @@ if (instance) {
     }, nativeTheme.shouldUseHighContrastColors);
     const language = resolveLanguage(settings.language, app.getLocale());
     const registry = cleanupPartitions(app.getPath('sessionData'), registryPath, readRegistry(registryPath, language), app.getPath('userData'));
+    const extensions = registry.profiles.map(profile => profileExtensions(app.getPath('userData'), profile, session.fromPartition(profile.partition), () => { for (const { browser } of windows.values()) browser.extensionsChanged(); }));
+    await Promise.all(extensions.map(manager => manager.ready));
     secureSession(session.defaultSession);
     const tokens = readFileSync(resolve(__dirname, '../tokens.css'), 'utf8');
     if (darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors)) setDarkPagesSwitch(app.commandLine, true);
@@ -189,6 +192,8 @@ if (instance) {
     }
     if (saved.length) for (const { id, profileId } of saved) await createWindow(profileId, false, undefined, id, false);
     else await createWindow(registry.activeId, false, undefined, undefined, false);
+    const normalWindowOpen = () => [...windows.values()].some(({ window, browser }) => !browser.privateWindow && !window.isDestroyed());
+    for (const manager of extensions) void manager.startUpdates(normalWindowOpen).catch(() => {});
   }).catch((error: unknown) => {
     console.error(error);
     app.exit(1);

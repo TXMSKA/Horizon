@@ -7,7 +7,7 @@ import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
 import { GROUP_COLORS, IPC, SEARCH_ENGINES } from '../src/shared/api';
-import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, ImportProgress, ImportResult, Profile, SettingsSection, TabState } from '../src/shared/api';
+import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, ExtensionWarning, ImportProgress, ImportResult, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } from '../src/shared/shortcuts';
 import { groupBoundaryIndex, moveGroupedTab, nearestVisibleTab, retainedTabGroups } from '../src/shared/tab-groups';
 import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName, settingsAddress, settingsSection } from './browsing';
@@ -36,6 +36,8 @@ import { discoverImportSources, readImport } from './import';
 import { HISTORY_LIMIT, mergeFavorites, mergeHistory } from './import-merge';
 import { emptySession, lazySession, LEGACY_WINDOW_ID, migrateSession, readWindowSessions, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeWindowSessions } from './session-store';
 import type { SessionTab, WindowSessions } from './session-store';
+import { existingExtensions, profileExtensions } from './extensions';
+import { isExtensionURL } from './extension-policy';
 
 interface TabHost { alive(tab: Tab): boolean; update(): void; publish(): void; fail(tab: Tab, description: string): void; close(tab: Tab): void; count(): number }
 interface Tab { host: TabHost; unbind?: () => void; viewNavigation?: { pending?: number; entries: { generation: number; urls: Set<string> }[] }; restore?: SessionTab; restoring?: SessionTab; state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
@@ -72,9 +74,9 @@ function attachSession(target: Session, owner: SessionOwner) {
     owners = new Set(); sessionOwners.set(target, owners); profileSessions.add(target);
     const select = (contents: WebContents | number | null | undefined) => [...owners!].find(owner => owner.owns(contents)) ?? (!contents ? owners!.values().next().value : undefined);
     const requests = new Map<number, SessionOwner>();
-    const requestOwner = (details: { id: number; webContentsId?: number }) => {
+    const requestOwner = (details: { id: number; webContentsId?: number; url?: string; initiatorOrigin?: string }) => {
       const saved = requests.get(details.id);
-      const owner = (details.webContentsId === undefined ? undefined : select(details.webContentsId)) ?? [...owners!].find(owner => owner.ownsRequest?.(details.id)) ?? (saved && owners!.has(saved) ? saved : undefined) ?? (!details.webContentsId ? select(undefined) : undefined);
+      const owner = (details.webContentsId === undefined ? undefined : select(details.webContentsId)) ?? [...owners!].find(owner => owner.ownsRequest?.(details.id)) ?? (saved && owners!.has(saved) ? saved : undefined) ?? (!details.webContentsId || isExtensionURL(target, details.url ?? '') || isExtensionURL(target, details.initiatorOrigin ?? '') ? select(undefined) : undefined);
       if (owner) requests.set(details.id, owner);
       return owner;
     };
@@ -149,6 +151,16 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   let cookiesBlocked = settings.blockThirdPartyCookies;
   let closing = false;
   let deleting = false;
+  let extensionDecision: { warning: ExtensionWarning; answer(allow: boolean): void } | null = null;
+  const cancelExtensionDecision = () => { extensionDecision?.answer(false); };
+  const askExtension = (profileId: string, warning: Omit<ExtensionWarning, 'requestId'>) => {
+    if (privateWindow || closing || extensionDecision || selectedProfile !== profileId || window.isDestroyed()) return Promise.resolve(false);
+    return new Promise<boolean>(done => {
+      const requestId = randomUUID(), timer = setTimeout(() => extensionDecision?.warning.requestId === requestId && extensionDecision.answer(false), 300000);
+      extensionDecision = { warning: { ...warning, requestId }, answer: allow => { clearTimeout(timer); extensionDecision = null; done(allow); publish(); } };
+      publish();
+    });
+  };
   let clearingBrowsingData = false;
   let area: ContentArea = { top: 96, hidden: true };
   const pageMenu = new PageMenuSession();
@@ -158,6 +170,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const current = () => runtimes.get(selectedProfile)!;
   const state = (): BrowserState => ({
     ...current().state(), firstRun: !settings.onboarded && !privateWindow, version: app.getVersion(), activeProfileId: selectedProfile, privateWindow,
+    extensionWarning: extensionDecision?.warning ?? null,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast,
     quickAccess: settings.quickAccess, showCapture: settings.showCapture,
@@ -184,6 +197,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     return runtime;
   };
   const switchProfile = (id: string) => {
+    cancelExtensionDecision();
     const profile = registry.profiles.find(profile => profile.id === id);
     if (!profile) throw new Error('Unknown profile');
     const next = runtimeFor(profile);
@@ -212,6 +226,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (privateWindow) assertPrivateCommand(command);
     if (privateWindow && ['switch-profile', 'create-profile', 'update-profile', 'delete-profile', 'set-blocking', 'set-site-permission', 'answer-permission', 'reset-site', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].includes(command.type)) throw new Error('Private window settings are fixed');
     switch (command.type) {
+      case 'answer-extension-install':
+        if (!extensionDecision || extensionDecision.warning.requestId !== command.id) throw new Error('EXTENSION_NOT_FOUND');
+        extensionDecision.answer(command.allow); return;
+      case 'set-extension-enabled': return existingExtensions(current().webSession)!.setEnabled(command.id, command.enabled);
+      case 'set-extension-pinned': return existingExtensions(current().webSession)!.setPinned(command.id, command.pinned);
+      case 'remove-extension': return existingExtensions(current().webSession)!.remove(command.id);
+      case 'check-extension-updates': return existingExtensions(current().webSession)!.checkUpdates();
+      case 'open-extension': return existingExtensions(current().webSession)!.openPopup(command.id, window);
       case 'move-tab-to-window': {
         const source = current(), tab = source.tabs.find(tab => tab.state.id === command.id);
         if (!tab) throw new Error('Unknown tab');
@@ -281,6 +303,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
             const attempt = async (cleanup: () => unknown) => { try { await cleanup(); } catch (error: unknown) { storageFailure(error); } };
             const runtime = runtimes.get(profile.id);
             await attempt(() => runtime?.dispose(true));
+            cancelExtensionDecision();
+            await attempt(() => existingExtensions(session.fromPartition(profile.partition))?.stop());
             // Stop service workers and sockets before clearing caches so background traffic cannot refill them.
             await attempt(async () => {
               const target = runtime?.webSession ?? session.fromPartition(profile.partition);
@@ -356,6 +380,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const reserved = new Set<string>();
     const webPreferences = pagePreferences(privateWindow ? shared.privatePartition! : profile.partition, privateWindow);
     const webSession = session.fromPartition(webPreferences.partition!);
+    const extensions = privateWindow ? undefined : profileExtensions(userData, profile, webSession, () => { for (const owner of shared.owners.values()) owner.publish(); });
+    const detachExtensions = extensions?.attach({ contents: window.webContents, warning: warning => askExtension(profile.id, warning) });
     const permissions = new PermissionQueue(store.siteSettings, publish, () => persist());
     const tabFor = (contents: WebContents | null | undefined) => contents && tabs.find(tab => tab.view?.webContents === contents);
     const sessionOwner: SessionOwner = { owns: contents => tabs.some(tab => typeof contents === 'number' ? tab.view?.webContents.id === contents : tab.view?.webContents === contents) };
@@ -396,11 +422,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     sessionOwner.before = (details, callback) => {
       if (privateWindow && details.resourceType === 'script') { callback({ cancel: true }); return; }
+      if (extensions && isExtensionURL(webSession, details.url)) { callback({ cancel: disposed || closing }); return; }
       const scheme = new URL(details.url).protocol;
       const tab = details.webContentsId === undefined ? undefined : tabs.find(tab => tab.view?.webContents.id === details.webContentsId);
       const cancel = details.resourceType === 'mainFrame' ? !(isAllowedURL(details.url) || !!tab?.view && isLaunchNavigation(tab.view.webContents, details.url))
         : details.resourceType === 'subFrame' ? !isAllowedSubframeURL(details.url)
-        : !['http:', 'https:', 'data:', 'blob:', 'ws:', 'wss:'].includes(scheme);
+        : !['http:', 'https:', 'data:', 'blob:', 'ws:', 'wss:'].includes(scheme) && !(extensions && isExtensionURL(webSession, details.url));
       if (cancel || disposed || closing || clearingData) { callback({ cancel: true }); return; }
       const context = requestContext(details);
       if (privateWindow && !blocker.ready && /^(?:https?|wss?):/.test(scheme)) { callback({ cancel: true }); return; }
@@ -437,6 +464,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
 
     const state = () => ({ ...desktop.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
+      extensions: extensions?.list() ?? [], extensionsUpdating: extensions?.status().updating ?? false, extensionsError: extensions?.status().storageError ?? false,
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
     function privateSite(url: string) {
@@ -823,6 +851,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     function contentsSetup(tab: Tab, view: WebContentsView) {
       tab.unbind?.(); tab.host = host;
       const contents = view.webContents;
+      if (extensions) {
+        const detach = extensions.attach({ contents, warning: warning => askExtension(profile.id, warning) });
+        contents.once('destroyed', detach);
+      }
       const emitter: EventEmitter = contents;
       const removers: (() => void)[] = [];
       const on: WebContents['on'] = (event, listener) => {
@@ -1502,6 +1534,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (discard) { clearTimeout(pendingWrite); pendingWrite = undefined; } else flush();
       attempt(() => webSession.removeListener('will-download', downloadHandler));
       detachSession();
+      detachExtensions?.();
       if (privateWindow) desktop.dispose(true);
       requests.clear();
     };
@@ -1660,6 +1693,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   // A destroyed window can no longer hand out its webContents, so the handlers' key is kept from now.
   const chromeContents = window.webContents;
   window.on('closed', () => {
+    cancelExtensionDecision();
     closing = true; invalidateMenu();
     blocker.stop();
     nativeTheme.removeListener('updated', systemDarkPages);
@@ -1730,6 +1764,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     },
   }))));
   initial.persist(); if (!initial.tabs.length && !options.empty) initial.newTab(); else layout();
+  if (!privateWindow) {
+    const extensions = existingExtensions(initial.webSession)!;
+    void extensions.ready.then(() => extensions.startUpdates()).catch(() => { publish(); });
+  }
   void blocker.start();
   refreshDefaultBrowser();
   const moveTab = (id: string, destinationId: string) => {
@@ -1745,5 +1783,5 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     source.transferTab(source.tabs.find(tab => tab.state.id === id)!, target);
   };
   return { layout, flush, windowId, privateWindow, activeProfile: () => selectedProfile, registry: () => shared.registry, settingsChanged: () => { for (const owner of shared.owners.values()) owner.settingsChanged(); }, openLaunch: (url: string) => { if (!privateWindow && (isWebURL(url) || isLocalHTMLURL(url))) current().newTab(url, true, undefined, true); },
-    moveTab };
+    extensionsChanged: publish, moveTab };
 }

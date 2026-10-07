@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, mkdirSync, symlinkSync, rmSync } = require('node:fs');
-const { resolve, join } = require('node:path');
+const { resolve, join, dirname } = require('node:path');
 const { validateSender, secureSession, hardenContents, CONTENT_SECURITY_POLICY } = require('../dist/electron/security.js');
 const { serveHorizon } = require('../dist/electron/protocol.js');
 const { classifyInput, isAllowedURL, isAllowedSubframeURL, isWebURL, parseErrorName } = require('../dist/electron/browsing.js');
@@ -17,6 +17,205 @@ const { randomUUID, createCipheriv, createDecipheriv } = require('node:crypto');
 const { contextMenuGroups, PageMenuSession } = require('../dist/electron/context-menu.js');
 const { PermissionQueue, defaultPermissions, requestedPermissions, setPermission, setBlocking, setSiteDark, siteSettings, stripCookieHeaders, cookieSite, secureOrigin, SITE_SETTINGS_LIMIT } = require('../dist/electron/site-settings.js');
 const testTemporaryRoot = resolve(process.env.HORIZON_TEST_TEMP ?? '.runtime');
+
+
+function emptyExtensionService() {
+  const services = new WeakMap();
+  return {
+    profileExtensions(_userData, _profile, target) {
+      if (!services.has(target)) services.set(target, { ready: Promise.resolve(), list: () => [], status: () => ({ updating: false, storageError: false }), attach: () => () => {}, checkUpdates: async () => {}, startUpdates: async () => {}, stop: async () => {} });
+      return services.get(target);
+    },
+    existingExtensions: target => services.get(target),
+  };
+}
+const browserTestExtensions = emptyExtensionService();
+
+test('store preload executes the vendor bridge only in the exact HTTPS main-frame origin', () => {
+  const { isWebStoreURL } = require('../dist/electron/extension-policy.js');
+  const { runInNewContext } = require('node:vm');
+  const guarded = readFileSync('dist/electron/store-preload.js', 'utf8');
+  const guard = guarded.slice(0, guarded.indexOf('{') + 1) + ' entered = true; }';
+  for (const url of ['https://chromewebstore.google.com/', 'https://chromewebstore.google.com/detail/test']) {
+    assert.equal(isWebStoreURL(url), true);
+    for (const main of [true, false]) {
+      const context = { process: { isMainFrame: main }, location: new URL(url), URL, entered: false };
+      runInNewContext(guard, context); assert.equal(context.entered, main);
+    }
+  }
+  for (const url of ['http://chromewebstore.google.com/', 'https://chromewebstore.google.com.evil.example/', 'https://chromewebstore.google.com:444/', 'https://chromewebstore.google.com@evil.example/', 'https://user:password@chromewebstore.google.com/', 'https://example.com/', 'about:blank', 'file:///test']) {
+    assert.equal(isWebStoreURL(url), false);
+    const context = { process: { isMainFrame: true }, location: new URL(url), URL, entered: false };
+    runInNewContext(guard, context); assert.equal(context.entered, false);
+  }
+  assert.match(guarded, /var DEBUG = false;/);
+  assert.doesNotMatch(guarded, /var DEBUG = true;/);
+  const browser = readFileSync('dist/electron/web-store.cjs', 'utf8');
+  assert.equal([...browser.matchAll(/var d\d* = \(\) => \{\};/g)].length, 4);
+  assert.doesNotMatch(browser, /var d\d* = \(0, import_debug/);
+  assert.match(browser, /return path5.join\(__dirname, "store-preload.js"\);/);
+});
+
+test('private windows refuse extension commands and extension folders remain inside their owning profiles', () => {
+  const { extensionDirectory, extensionAsset, unsupportedPermissions } = require('../dist/electron/extension-policy.js');
+  const { assertPrivateCommand } = require('../dist/electron/private-commands.js');
+  const first = makeProfile('First', 'amber'), second = makeProfile('Second', 'blue');
+  assert.notEqual(extensionDirectory(testTemporaryRoot, first), extensionDirectory(testTemporaryRoot, second));
+  assert.equal(extensionDirectory(testTemporaryRoot, first), resolve(testTemporaryRoot, 'profiles', first.id, 'extensions'));
+  assert.throws(() => extensionDirectory(testTemporaryRoot, first, true));
+  assert.throws(() => extensionDirectory(testTemporaryRoot, { ...first, id: '../outside' }));
+  assert.throws(() => extensionDirectory(testTemporaryRoot, { ...first, partition: 'private-test' }));
+  assert.throws(() => extensionAsset(testTemporaryRoot, '../outside'));
+  for (const command of [{ type: 'set-extension-enabled', id: 'a'.repeat(32), enabled: true }, { type: 'set-extension-pinned', id: 'a'.repeat(32), pinned: true }, { type: 'remove-extension', id: 'a'.repeat(32) }, { type: 'open-extension', id: 'a'.repeat(32) }, { type: 'check-extension-updates' }, { type: 'answer-extension-install', id: randomUUID(), allow: true }, { type: 'open-settings', section: 'extensions' }]) {
+    assert.deepEqual(validateCommand(command), command); assert.throws(() => assertPrivateCommand(command));
+  }
+  assert.throws(() => validateCommand({ type: 'set-extension-enabled', id: '../outside', enabled: true }));
+  assert.throws(() => validateCommand({ type: 'set-extension-pinned', id: 'a'.repeat(32), pinned: true, profile: first.id }));
+  assert.deepEqual(unsupportedPermissions({ permissions: ['storage', 'https://example.com/*', 'declarativeNetRequest', 'history'], action: {} }), ['action', 'declarativeNetRequest', 'history']);
+});
+
+test('extension downloads require the requested publisher signature and reject altered CRX code', () => {
+  const originalFetch = globalThis.fetch;
+  const { verifyStoreArchive, allowedStoreDownload } = require('../dist/electron/extension-download.js');
+  assert.equal(globalThis.fetch, originalFetch);
+  const { generateKeyPairSync, createHash, sign } = require('node:crypto');
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const key = publicKey.export({ format: 'der', type: 'spki' }), hash = createHash('sha256').update(key).digest().subarray(0, 16);
+  const id = hash.toString('hex').replace(/[0-9a-f]/g, digit => String.fromCharCode(97 + parseInt(digit, 16)));
+  const integer = value => { const bytes = []; do { bytes.push((value & 127) | (value > 127 ? 128 : 0)); value = Math.floor(value / 128); } while (value); return Buffer.from(bytes); };
+  const field = (tag, value) => Buffer.concat([integer(tag * 8 + 2), integer(value.length), value]);
+  const signed = field(1, hash), size = Buffer.alloc(4); size.writeUInt32LE(signed.length);
+  const archive = Buffer.from('PK-test-extension-code');
+  const signature = sign('sha256', Buffer.concat([Buffer.from('CRX3 SignedData\0'), size, signed, archive]), privateKey);
+  const header = Buffer.concat([field(2, Buffer.concat([field(1, key), field(2, signature)])), field(10000, signed)]);
+  const prefix = Buffer.alloc(12); prefix.write('Cr24'); prefix.writeUInt32LE(3, 4); prefix.writeUInt32LE(header.length, 8);
+  const crx = Buffer.concat([prefix, header, archive]);
+  assert.doesNotThrow(() => verifyStoreArchive(crx, id));
+  const changed = Buffer.from(crx); changed[changed.length - 1] ^= 1;
+  assert.throws(() => verifyStoreArchive(changed, id));
+  assert.throws(() => verifyStoreArchive(crx, 'a'.repeat(32)));
+  assert.throws(() => verifyStoreArchive(crx.subarray(0, 30), id));
+  const oldFormat = Buffer.from(crx); oldFormat.writeUInt32LE(2, 4); assert.throws(() => verifyStoreArchive(oldFormat, id));
+  for (const url of ['https://clients2.google.com/service/update2/crx', 'https://clients2.googleusercontent.com/crx/blobs/test']) assert.equal(allowedStoreDownload(url, true), true);
+  for (const url of ['http://clients2.google.com/service/update2/crx', 'https://clients2.google.com.evil.example/service/update2/crx', 'https://127.0.0.1/crx/test', 'https://user:secret@clients2.google.com/service/update2/crx', 'https://clients2.google.com/other', 'https://clients2.googleusercontent.com/not-crx', 'https://clients2.google.com:444/service/update2/crx']) assert.equal(allowedStoreDownload(url, true), false);
+});
+
+test('store downloads bound icon bodies and refuse redirects outside the approved hosts', async t => {
+  const { compileFunction } = require('node:vm'), filename = resolve('dist/electron/extension-download.js');
+  const calls = [];
+  let response = () => new Response('icon');
+  t.mock.method(globalThis, 'fetch', async (url, options) => { calls.push(url); assert.equal(options.redirect, 'manual'); assert.equal(options.credentials, 'omit'); assert.ok(options.signal); return response(); });
+  const exported = {}, localRequire = require('node:module').createRequire(filename);
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__filename'])(exported, localRequire, filename);
+  assert.equal(await (await exported.storeFetch('https://lh3.googleusercontent.com/icon')).text(), 'icon');
+  response = () => new Response(null, { status: 302, headers: { location: 'https://127.0.0.1/private' } });
+  await assert.rejects(exported.storeFetch('https://lh3.googleusercontent.com/icon')); assert.equal(calls.length, 2);
+  response = () => new Response(new Uint8Array(1024 * 1024 + 1));
+  await assert.rejects(exported.storeFetch('https://lh3.googleusercontent.com/icon'));
+  response = () => new Response('small', { headers: { 'content-length': String(1024 * 1024 + 1) } });
+  await assert.rejects(exported.storeFetch('https://lh3.googleusercontent.com/icon'));
+  await assert.rejects(exported.storeFetch('https://gstatic.com/icon', { method: 'POST' }));
+});
+
+test('extension ZIP validation rejects extraction escapes, duplicate names, unsafe modes and decompression bombs', () => {
+  const { verifyStoreZIP } = require('../dist/electron/extension-download.js'), { crc32, deflateRawSync } = require('node:zlib');
+  const zip = files => {
+    const locals = [], records = []; let offset = 0;
+    for (const file of files) {
+      const name = Buffer.from(file.name), content = Buffer.from(file.content ?? 'extension code'), data = file.deflate ? deflateRawSync(content) : content;
+      const size = file.size ?? content.length, checksum = crc32(content), method = file.deflate ? 8 : 0;
+      const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50); local.writeUInt16LE(method, 8); local.writeUInt32LE(checksum, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(size, 22); local.writeUInt16LE(name.length, 26);
+      const central = Buffer.alloc(46); central.writeUInt32LE(0x02014b50); central.writeUInt16LE(method, 10); central.writeUInt32LE(checksum, 16); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(size, 24); central.writeUInt16LE(name.length, 28); central.writeUInt32LE(((file.mode ?? 0o100644) << 16) >>> 0, 38); central.writeUInt32LE(offset, 42);
+      locals.push(local, name, data); records.push(central, name); offset += local.length + name.length + data.length;
+    }
+    const directory = Buffer.concat(records), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16);
+    return Buffer.concat([...locals, directory, end]);
+  };
+  assert.doesNotThrow(() => verifyStoreZIP(zip([{ name: 'manifest.json' }, { name: 'scripts/content.js', deflate: true }])));
+  for (const name of ['../outside', '/absolute', 'C:/outside', 'file:stream', 'folder\\outside', 'CON.txt', 'trailing.', 'folder/../outside']) assert.throws(() => verifyStoreZIP(zip([{ name }])));
+  assert.throws(() => verifyStoreZIP(zip([{ name: 'same.js' }, { name: 'SAME.js' }])));
+  assert.throws(() => verifyStoreZIP(zip([{ name: 'link', mode: 0o120777 }])));
+  assert.throws(() => verifyStoreZIP(zip([{ name: 'program', mode: 0o104755 }])));
+  assert.throws(() => verifyStoreZIP(zip([{ name: 'giant', size: 0xffffffff }])));
+  assert.throws(() => verifyStoreZIP(zip([{ name: 'bomb', content: 'x'.repeat(10000), size: 0, deflate: true }])));
+  const corrupt = zip([{ name: 'manifest.json' }]); corrupt[30 + 'manifest.json'.length] ^= 1;
+  assert.throws(() => verifyStoreZIP(corrupt));
+});
+
+test('extension sessions reject spoofed IPC and keep installed, disabled and pinned state separate across restart', async t => {
+  const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
+  const root = temporaryDirectory(t, 'extensions'), first = makeProfile('First', 'amber'), second = makeProfile('Second', 'blue'), id = 'a'.repeat(32);
+  const handlers = new Map(), downloads = [], decisions = [];
+  let version = '1.0', permissions = ['history'];
+  const partitions = new Map();
+  const electron = { session: { fromPartition: partition => partitions.get(partition) }, ipcMain: { handle: (channel, callback) => handlers.set(channel, callback) }, nativeImage: {} };
+  const target = () => {
+    const extensions = new EventEmitter(), loaded = new Map(), preloads = new Map();
+    extensions.getExtension = id => loaded.get(id) ?? null; extensions.getAllExtensions = () => [...loaded.values()];
+    extensions.removeExtension = id => loaded.delete(id);
+    extensions.loadExtension = async path => {
+      const manifest = JSON.parse(readFileSync(join(path, 'manifest.json'), 'utf8'));
+      const extension = { id, path, name: manifest.name, version: manifest.version, manifest }; loaded.set(id, extension); extensions.emit('extension-loaded', {}, extension); return extension;
+    };
+    return { extensions, serviceWorkers: {}, preloads, isPersistent: () => true, setPermissionRequestHandler: callback => { let allowed; callback(null, 'media', value => { allowed = value; }); assert.equal(allowed, false); }, setPermissionCheckHandler: callback => assert.equal(callback(), false), setDevicePermissionHandler: callback => assert.equal(callback(), false), registerPreloadScript: script => preloads.set(script.id, script), unregisterPreloadScript: id => preloads.delete(id) };
+  };
+  const vendor = {
+    downloadExtension: async (id, root) => { downloads.push(id); const path = join(root, id, version + '_0'); mkdirSync(path, { recursive: true }); writeFileSync(join(path, 'manifest.json'), JSON.stringify({ name: 'Test', version, permissions })); return path; },
+    installExtension: async (id, options) => options.session.extensions.loadExtension(join(options.extensionsPath, id, version + '_0')),
+    installChromeWebStore: async options => {
+      options.session.registerPreloadScript({ id: 'electron-chrome-web-store', filePath: 'vendor' });
+      if (!handlers.has('chromeWebstore.beginInstall')) electron.ipcMain.handle('chromeWebstore.beginInstall', async (event, details) => {
+        const decision = await options.beforeInstall({ id: details.id, frame: event.senderFrame, manifest: { permissions: ['storage'] } });
+        if (decision.action === 'allow') await vendor.installExtension(details.id, options); return decision;
+      });
+      for (const channel of ['chromeWebstore.getExtensionStatus', 'chrome.management.getAll']) if (!handlers.has(channel)) electron.ipcMain.handle(channel, () => 'vendor fallback');
+    },
+  };
+  const filename = resolve('dist/electron/extensions.js'), localRequire = require('node:module').createRequire(filename), exported = {};
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? electron : name === './extension-download' ? { store: vendor } : localRequire(name), dirname(filename));
+  const originalHandle = electron.ipcMain.handle, one = target(), two = target();
+  partitions.set(first.partition, one); partitions.set(second.partition, two);
+  assert.throws(() => exported.profileExtensions(root, first, two, () => {}));
+  assert.throws(() => exported.profileExtensions(root, first, { ...one, isPersistent: () => false }, () => {}));
+  const manager = exported.profileExtensions(root, first, one, () => {}), other = exported.profileExtensions(root, second, two, () => {});
+  await Promise.all([manager.ready, other.ready]); assert.equal(electron.ipcMain.handle, originalHandle);
+  const frame = { url: 'https://chromewebstore.google.com/detail/test', isDestroyed: () => false };
+  const contents = { session: one, mainFrame: frame, isDestroyed: () => false };
+  let allow = false;
+  manager.attach({ contents, warning: async warning => { decisions.push(warning); return allow; } });
+  const event = { sender: contents, senderFrame: frame }, args = { id, iconUrl: 'https://lh3.googleusercontent.com/test.png' };
+  const invoke = handlers.get('chromeWebstore.beginInstall');
+  for (const url of ['https://chromewebstore.google.com.evil.example/', 'https://example.com/', 'http://chromewebstore.google.com/']) {
+    frame.url = url; assert.throws(() => invoke(event, args));
+  }
+  frame.url = 'https://chromewebstore.google.com/';
+  assert.throws(() => invoke({ ...event, senderFrame: { ...frame } }, args));
+  assert.throws(() => invoke({ sender: { ...contents, session: target() }, senderFrame: frame }, args));
+  assert.throws(() => invoke(event, { ...args, id: '../outside' }));
+  assert.throws(() => invoke(event, { ...args, iconUrl: 'http://127.0.0.1/private' }));
+  assert.equal(downloads.length, 0);
+  assert.equal((await invoke(event, args)).action, 'deny'); assert.equal(manager.list().length, 0); assert.equal(one.extensions.getAllExtensions().length, 0);
+  assert.deepEqual(decisions[0].unsupported, ['history']);
+  allow = true; assert.equal((await invoke(event, args)).action, 'allow'); assert.equal(manager.list().length, 1);
+  assert.deepEqual(other.list(), []); assert.deepEqual(two.extensions.getAllExtensions(), []);
+  assert.equal(one.preloads.has('electron-chrome-web-store'), false); assert.equal(one.preloads.has('horizon-web-store'), true);
+  await manager.setPinned(id, true); await manager.setEnabled(id, false); assert.equal(one.extensions.getExtension(id), null);
+  assert.equal(handlers.get('chromeWebstore.getExtensionStatus')(event, id, '{}'), 'disabled');
+  assert.equal(handlers.get('chrome.management.getAll')(event)[0].enabled, false);
+  version = '1.1'; permissions = ['history', 'tabs']; allow = false;
+  await manager.checkUpdates(); assert.equal(manager.list()[0].version, '1.0'); assert.equal(one.extensions.getExtension(id), null);
+  allow = true; await manager.checkUpdates(); assert.equal(manager.list()[0].version, '1.1'); assert.equal(manager.list()[0].pinned, true); assert.equal(manager.list()[0].enabled, false);
+  version = '1.0'; await manager.checkUpdates(); assert.equal(manager.list()[0].version, '1.1');
+  const fresh = target(); partitions.set(first.partition, fresh);
+  const reopened = exported.profileExtensions(root, first, fresh, () => {}); await reopened.ready;
+  assert.equal(reopened.list()[0].enabled, false); assert.equal(reopened.list()[0].pinned, true); assert.equal(fresh.extensions.getExtension(id), null);
+  version = '1.2';
+  const count = downloads.length; await reopened.checkUpdates(() => false); assert.equal(downloads.length, count);
+  await reopened.checkUpdates(() => true); assert.equal(reopened.list()[0].version, '1.2'); assert.equal(fresh.extensions.getExtension(id), null);
+  await reopened.setEnabled(id, true); assert.ok(fresh.extensions.getExtension(id));
+  await reopened.remove(id); assert.deepEqual(reopened.list(), []); assert.equal(existsSync(join(root, 'profiles', first.id, 'extensions', id)), false);
+  await Promise.all([manager.stop(), other.stop(), reopened.stop()]);
+});
 
 function sessionTab(url = 'https://example.com/current', title = 'Current') {
   return { url, title, zoom: 1.3, entries: [{ url: 'https://example.com/back', title: 'Back' }, { url, title }, { url: 'https://example.com/forward', title: 'Forward' }], index: 1 };
@@ -1075,7 +1274,7 @@ test('settings sections and their public addresses map one to one', () => {
   const source = ts.createSourceFile('api.ts', readFileSync('src/shared/api.ts', 'utf8'), ts.ScriptTarget.Latest, true);
   const type = source.statements.find(node => ts.isTypeAliasDeclaration(node) && node.name.text === 'SettingsSection');
   const sections = type.type.types.map(node => node.literal.text);
-  const expected = { general: 'horizon://settings', appearance: 'horizon://settings/appearance', privacy: 'horizon://settings/privacy', 'privacy/sites': 'horizon://settings/privacy/sites', profiles: 'horizon://settings/profiles' };
+  const expected = { general: 'horizon://settings', appearance: 'horizon://settings/appearance', privacy: 'horizon://settings/privacy', 'privacy/sites': 'horizon://settings/privacy/sites', profiles: 'horizon://settings/profiles', extensions: 'horizon://settings/extensions' };
   assert.deepEqual(sections.sort(), Object.keys(expected).sort());
   assert.equal(new Set(sections.map(settingsAddress)).size, sections.length);
   for (const [section, address] of Object.entries(expected)) {
@@ -1087,7 +1286,7 @@ test('settings sections and their public addresses map one to one', () => {
   const rail = page.statements.filter(ts.isVariableStatement).flatMap(node => [...node.declarationList.declarations]).find(node => node.name.getText(page) === 'SETTINGS_SECTIONS');
   const entries = rail.initializer.expression.elements;
   const destinations = entries.map(entry => entry.properties.find(property => property.name.getText(page) === 'section').initializer.text);
-  assert.deepEqual(destinations, ['general', 'appearance', 'privacy', 'profiles']);
+  assert.deepEqual(destinations, ['general', 'appearance', 'privacy', 'profiles', 'extensions']);
   for (const section of destinations) assert.equal(settingsSection(settingsAddress(section)), section);
 });
 
@@ -1101,7 +1300,7 @@ test('profiles are managed in settings and the profiles panel route is removed',
 });
 
 function settingsInterface(react = {}) {
-  return interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './HorizonMark': {}, './Import': {}, './Menu': {}, './PopupAnchor': {}, './Profiles': {}, './Switch': {} });
+  return interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './HorizonMark': {}, './Import': {}, './Menu': {}, './PopupAnchor': {}, './Extensions': { ExtensionsSettings: 'extension-settings' }, './Profiles': {}, './Switch': {} });
 }
 
 test('settings failures use the complete named code and never expose command messages', () => {
@@ -1795,7 +1994,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const localRequire = createRequire(filename);
   const loaded = { exports: {} };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'module', '__filename', '__dirname', 'setTimeout', 'clearTimeout'])(loaded.exports,
-    name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name), createBlockingEngine() { return {
+    name => name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name), createBlockingEngine() { return {
       get ready() { return mockBlockingReady; }, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '',
       match(url) { blockingCalls.push(url); return url.includes('/blocked-ad') ? { kind: 'ads' } : url.includes('/blocked-tracker') ? { kind: 'trackers' } : undefined; },
     }; } } : name === './store' ? { ...localRequire(name), writeStore(path, store, cipher) {
@@ -2680,7 +2879,7 @@ test('dark page flips replace views in every profile without closing tabs and si
     } },
   };
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
-  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name),
+  compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name),
     createBlockingEngine: () => ({ ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '', match: () => undefined }),
   } : localRequire(name), require('node:path').dirname(filename));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
@@ -3020,7 +3219,7 @@ test('main paints the resolved palette and passes both settings before loading c
       app, nativeTheme,
       protocol: { registerSchemesAsPrivileged() {} },
       screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1440, height: 900 } }) },
-      session: { defaultSession: { protocol: {} } },
+      session: { fromPartition: () => ({}), defaultSession: { protocol: {} } },
       ipcMain: { handle() {} },
       BrowserWindow: class extends EventEmitter {
         constructor(options) {
@@ -3043,6 +3242,7 @@ test('main paints the resolved palette and passes both settings before loading c
     };
     let changed;
     compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])( {}, name => {
+      if (name === './extensions') return browserTestExtensions;
       if (name === 'electron') return electron;
       if (name === './settings') return { ...localRequire(name), createSettings(path, callback, high) { assert.equal(path, join(directory, 'settings.json')); assert.equal(high, true); changed = callback; return settings; } };
       if (name === './security') return { START_URL: 'horizon://app/', secureSession() {} };
@@ -4080,7 +4280,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
-    name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
+    name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
   electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialog: async (...args) => { options.captureSaveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.captureSaveChoice ?? { canceled: true }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
@@ -4542,7 +4742,7 @@ test('browser menu keeps the drawn order, shortcuts and working zoom controls', 
   const { BrowserMenu } = interfaceModule('src/BrowserMenu.tsx', { 'lucide-react': {}, './copy': copy, './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' } });
   const tree = BrowserMenu({ language: 'en', active: { url: 'https://example.com/', zoom: 1 }, keyboard: true, opener: { current: null }, onDismiss() {}, onShortcut: action => shortcuts.push(action), onPanel: panel => panels.push(panel), onSettings() {}, onAbout() {}, run: async command => { commands.push(command); return true; } });
   const items = notebookNodes(tree, node => node.props.role === 'menuitem');
-  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'New window', 'New private window', 'Reopen closed tab', 'Close tab', 'Home', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Reload past the cache', 'Print page', 'Favorites', 'History', 'Downloads', 'Settings', 'Clear browsing data', 'About Horizon']);
+  assert.deepEqual(items.map(item => item.props['aria-label'] ?? item.props.children[1].props.children), ['New tab', 'New window', 'New private window', 'Reopen closed tab', 'Close tab', 'Home', 'Zoom out', 'Zoom in', 'Fullscreen', 'Find in page', 'Reload past the cache', 'Print page', 'Favorites', 'History', 'Downloads', 'Extensions', 'Settings', 'Clear browsing data', 'About Horizon']);
   assert.deepEqual(notebookNodes(tree, node => node.type === 'kbd').map(node => node.props.children), ['Ctrl+T', 'Ctrl+N', 'Ctrl+Shift+N', 'Ctrl+Shift+T', 'Ctrl+F4', 'Alt+Home', 'Ctrl+F', 'Ctrl+F5 / Shift+F5', 'Ctrl+P', 'Ctrl+Shift+O', 'Ctrl+H', 'Ctrl+J', 'Ctrl+Shift+Delete']);
   assert.equal(notebookNodes(tree, node => node.type === 'hr').length, 4);
   items[1].props.onClick(); items[2].props.onClick(); items[6].props.onClick(); items[7].props.onClick(); items[8].props.onClick(); items[12].props.onClick();
@@ -4922,7 +5122,7 @@ test('browser panel routes are removed, panels use the menu anchor and all menu 
   const app = readFileSync('src/App.tsx', 'utf8'), menu = readFileSync('src/BrowserMenu.tsx', 'utf8'), panel = readFileSync('src/BrowserPanel.tsx', 'utf8'), { copy } = interfaceModule('src/copy.ts');
   assert.doesNotMatch(app, /className="library-panel"|panel-content|filteredEntries|confirmClearHistory/);
   assert.match(app, /<BrowserPanel[^>]+opener=\{menuButtonRef\}/); assert.match(panel, /<ToolbarPopover opener=\{opener\}/); assert.match(menu, /<ToolbarPopover opener=\{opener\}/);
-  assert.doesNotMatch(menu, /menuitemradio|highContrast|darkPages|passwords|extensions/);
+  assert.doesNotMatch(menu, /menuitemradio|highContrast|darkPages|passwords/);
   assert.match(app, /onClear=\{\(\) => openSettings\('privacy', true\)\}/);
   for (const route of ['horizon://history', 'horizon://bookmarks', 'horizon://downloads']) assert.throws(() => classifyInput(route));
   for (const key of ['newTab', 'newWindow', 'newPrivateWindow', 'privateWindow', 'private', 'saveCaptureFile', 'captureFileSaved', 'CAPTURE_SAVE_FAILED', 'privateBlockingHint', 'privateHistoryTitle', 'privateHistory', 'privateDownloadsTitle', 'privateDownloads', 'zoom', 'zoomIn', 'zoomOut', 'fullscreen', 'find', 'favorites', 'history', 'downloads', 'settings', 'aboutHorizon', 'appVersion', 'today', 'yesterday', 'downloadSize', 'downloadStateSize', 'downloadRetry', 'downloadRemove', 'downloadDone', 'close']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim(), `${key}: ${language}`);
@@ -5920,7 +6120,8 @@ function settingsMain(t, options) {
     async loadURL() { if (options.loadError) throw new Error('Synthetic chrome load failure'); if (options.stall) await new Promise(done => { options.finish = done; }); this.loaded = true; }
   }
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname', 'process'])({}, name => {
-    if (name === 'electron') return { app, BrowserWindow: Window, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), protocol: { registerSchemesAsPrivileged() {} }, screen: { getPrimaryDisplay: () => primary, getDisplayMatching: () => secondary, getDisplayNearestPoint: point => { options.point = point; return secondary; } }, safeStorage: plainCipher, session: { defaultSession: { protocol: {} } }, ipcMain: { handle(name, fn) { handlers.set(name, fn); } } };
+    if (name === './extensions') return browserTestExtensions;
+    if (name === 'electron') return { app, BrowserWindow: Window, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), protocol: { registerSchemesAsPrivileged() {} }, screen: { getPrimaryDisplay: () => primary, getDisplayMatching: () => secondary, getDisplayNearestPoint: point => { options.point = point; return secondary; } }, safeStorage: plainCipher, session: { fromPartition: () => ({}), defaultSession: { protocol: {} } }, ipcMain: { handle(name, fn) { handlers.set(name, fn); } } };
     if (name === './settings') return { ...localRequire(name), createSettings: () => settings };
     if (name === './browser') return { restoredWindows: () => options.restoreWindows ?? [], createBrowser: (window, _userData, _downloads, _settings, registry, _defaultBrowser, browserOptions) => {
       window.browserOptions = browserOptions;
@@ -6283,7 +6484,7 @@ function captureAppGlobals(overrides = {}) {
   return {
     activeUrl: 'https://example.com/', active: {}, desktopScope: 'scope', liveDesktopScope: { current: 'scope' }, liveDesktopOverlay: { current: null },
     language: 'en', closeFind() {}, closeContextMenu() {}, reportArea: async () => {}, capturePending: { current: false },
-    setCaptureHint() {}, setShieldScope() {}, setProfileOpen() {}, setHubPage() {}, setLyraOpen() {}, setMenuOpen() {}, setSuggestionsOpen() {}, setPanel() {},
+    setCaptureHint() {}, setExtensionsOpen() {}, setShieldScope() {}, setProfileOpen() {}, setHubPage() {}, setLyraOpen() {}, setMenuOpen() {}, setSuggestionsOpen() {}, setPanel() {},
     setCaptureShot() {}, setDesktopOverlay() {}, setDesktopNotice() {}, restoringCaptureFocus: { current: false }, desktopButtonRef: { current: null }, hubButtonRef: { current: null },
     text: interfaceModule('src/copy.ts').text, desktopError: desktopInterface().desktopError, ...overrides,
   };
