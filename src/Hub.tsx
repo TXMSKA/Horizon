@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { Check, ExternalLink, House, Languages, LayoutDashboard, Palette, Pin, PinOff } from 'lucide-react';
+import { Check, ExternalLink, House, Languages, LayoutDashboard, Palette, Pin, PinOff, Trash2 } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
-import { HUB_APPS } from './shared/api';
-import type { BrowserCommand, BrowserState, HubApp, Language } from './shared/api';
+import { HUB_APPS, MARKETPLACE_THEMES } from './shared/api';
+import type { BrowserCommand, BrowserState, HubApp, Language, MarketplaceTheme } from './shared/api';
 import { Menu } from './Menu';
 import { settingsError } from './Settings';
 import { ToolbarPopover } from './ToolbarPopover';
@@ -12,7 +12,7 @@ import { ToolbarPopover } from './ToolbarPopover';
 export const hubApps = { translate: { label: 'translate', icon: Languages }, themes: { label: 'themes', icon: Palette }, desktop: { label: 'desktop', icon: LayoutDashboard } } as const;
 type HubPage = 'home' | HubApp;
 const themes = ['amber', 'daylight', 'highContrast'] as const;
-type InstalledTheme = typeof themes[number];
+type InstalledTheme = typeof themes[number] | MarketplaceTheme;
 
 function ThemePreview({ theme }: { theme: InstalledTheme }) {
   return <span className="hub-theme-preview" data-preview-theme={theme} aria-hidden="true">
@@ -22,9 +22,22 @@ function ThemePreview({ theme }: { theme: InstalledTheme }) {
   </span>;
 }
 
-function InstalledThemes({ state, language }: { state: BrowserState; language: Language }) {
+function InstalledThemes({ state, language, onInstalled }: { state: BrowserState; language: Language; onInstalled: () => void }) {
   const t = (key: CopyKey) => text(key, language), pending = useRef(false);
-  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState<InstalledTheme | null>(null);
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState<InstalledTheme | BrowserCommand | null>(null);
+  const cards = useRef<HTMLDivElement>(null), removing = useRef<MarketplaceTheme | null>(null);
+  const installed = [...themes, ...(state.installedThemes ?? [])];
+  useLayoutEffect(() => {
+    if (removing.current && !state.installedThemes.includes(removing.current)) {
+      cards.current?.querySelector<HTMLButtonElement>('[aria-checked=true]')?.focus(); removing.current = null;
+    }
+  }, [state.installedThemes]);
+  const [systemHighContrast, setSystemHighContrast] = useState(() => matchMedia('(forced-colors: active)').matches);
+  useEffect(() => {
+    const system = matchMedia('(forced-colors: active)'), changed = () => setSystemHighContrast(system.matches);
+    system.addEventListener('change', changed);
+    return () => system.removeEventListener('change', changed);
+  }, []);
   const [systemDark, setSystemDark] = useState(() => matchMedia('(prefers-color-scheme: dark)').matches);
   useEffect(() => {
     const system = matchMedia('(prefers-color-scheme: dark)'), changed = () => setSystemDark(system.matches);
@@ -32,7 +45,7 @@ function InstalledThemes({ state, language }: { state: BrowserState; language: L
     return () => system.removeEventListener('change', changed);
   }, []);
   const resolved = state.theme === 'system' ? systemDark ? 'amber' : 'daylight' : state.theme;
-  const chosen = state.contrast === 'high' ? 'highContrast' : resolved;
+  const chosen = state.contrast === 'high' || systemHighContrast ? 'highContrast' : resolved;
   const choose = async (value: InstalledTheme) => {
     const theme = value === 'highContrast' ? 'amber' : value, contrast = value === 'highContrast' ? 'high' : 'standard';
     if (pending.current || state.theme === theme && state.contrast === contrast && !error) return;
@@ -43,18 +56,40 @@ function InstalledThemes({ state, language }: { state: BrowserState; language: L
     } catch (reason) { setError(settingsError(reason, language)); setRetry(value); }
     finally { pending.current = false; setBusy(false); }
   };
-  return <section className="hub-installed" aria-labelledby="hub-installed-label" aria-busy={busy}>
-    <h3 id="hub-installed-label">{t('installed')}</h3>
-    <div className="hub-theme-cards" role="radiogroup" aria-label={t('themes')}>
-      {themes.map((theme, index) => <button className="hub-theme-card" type="button" role="radio" key={theme} aria-checked={chosen === theme} aria-disabled={busy} tabIndex={chosen === theme ? 0 : -1} onClick={() => { void choose(theme); }} onKeyDown={event => {
-        const next = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? (index + 1) % themes.length : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? (index + themes.length - 1) % themes.length : event.key === 'Home' ? 0 : event.key === 'End' ? themes.length - 1 : -1;
-        if (next < 0) return;
-        event.preventDefault(); if (pending.current) return;
-        (event.currentTarget.parentElement?.children[next] as HTMLButtonElement | undefined)?.focus(); void choose(themes[next]!);
-      }}><ThemePreview theme={theme} /><span className="hub-theme-name"><span>{t(theme)}</span>{chosen === theme && <Check aria-hidden="true" />}</span></button>)}
-    </div>
-    {error && <div className="settings-feedback error" role="alert"><span>{error}</span>{retry && <button className="text-button" type="button" aria-disabled={busy} onClick={() => { void choose(retry); }}>{t('retry')}</button>}</div>}
-  </section>;
+  const catalogAction = async (command: BrowserCommand) => {
+    if (pending.current) return;
+    pending.current = true; setBusy(true); setError(''); setRetry(null);
+    if (command.type === 'remove-theme') removing.current = command.id;
+    try {
+      await window.horizon.command(command);
+      if (command.type === 'install-theme' && cards.current) onInstalled();
+    } catch (reason) { removing.current = null; setError(settingsError(reason, language)); setRetry(command); }
+    finally { pending.current = false; setBusy(false); }
+  };
+  return <div className="hub-themes" aria-busy={busy}>
+    <section className="hub-installed" aria-labelledby="hub-installed-label">
+      <h3 id="hub-installed-label">{t('installed')}</h3>
+      <div className="hub-theme-cards" role="radiogroup" aria-label={t('themes')} ref={cards}>
+        {installed.map((theme, index) => <div className="hub-theme-item" key={theme}>
+          <button className="hub-theme-card" data-theme-id={theme} type="button" role="radio" aria-checked={chosen === theme} aria-disabled={busy} tabIndex={chosen === theme ? 0 : -1} onClick={() => { void choose(theme); }} onKeyDown={event => {
+            const next = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? (index + 1) % installed.length : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? (index + installed.length - 1) % installed.length : event.key === 'Home' ? 0 : event.key === 'End' ? installed.length - 1 : -1;
+            if (next < 0) return;
+            event.preventDefault(); if (pending.current) return;
+            event.currentTarget.closest('[role=radiogroup]')?.querySelectorAll<HTMLButtonElement>('[role=radio]')[next]?.focus(); void choose(installed[next]!);
+          }}><ThemePreview theme={theme} /><span className="hub-theme-name"><span>{t(theme)}</span>{chosen === theme && <Check aria-hidden="true" />}</span></button>
+          {MARKETPLACE_THEMES.includes(theme as MarketplaceTheme) && <button className="hub-theme-remove icon-button" type="button" aria-label={t('removeTheme').replace('{name}', t(theme))} aria-disabled={busy} onClick={() => { void catalogAction({ type: 'remove-theme', id: theme as MarketplaceTheme }); }}><Trash2 aria-hidden="true" /></button>}
+        </div>)}
+      </div>
+    </section>
+    <section className="hub-installed" aria-labelledby="hub-marketplace-label">
+      <h3 id="hub-marketplace-label">{t('marketplace')}</h3>
+      <div className="hub-theme-cards">{MARKETPLACE_THEMES.filter(theme => !state.installedThemes?.includes(theme)).map(theme => <div className="hub-theme-card" key={theme}>
+        <ThemePreview theme={theme} /><span className="hub-theme-name"><span>{t(theme)}</span><button className="hub-theme-get" type="button" aria-label={t('getTheme').replace('{name}', t(theme))} aria-disabled={busy} onClick={() => { void catalogAction({ type: 'install-theme', id: theme }); }}>{t('get')}</button></span>
+      </div>)}</div>
+      {MARKETPLACE_THEMES.every(theme => state.installedThemes?.includes(theme)) && <p className="settings-note">{t('allThemesInstalled')}</p>}
+    </section>
+    {error && <div className="settings-feedback error" role="alert"><span>{error}</span>{retry && <button className="text-button" type="button" aria-disabled={busy} onClick={() => { if (typeof retry === 'string') void choose(retry); else void catalogAction(retry); }}>{t('retry')}</button>}</div>}
+  </div>;
 }
 
 export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnounce }: {
@@ -117,7 +152,7 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
         if (!step) return;
         event.preventDefault(); const next = (index + step + apps.length * 3) % apps.length;
         (event.currentTarget.parentElement?.children[next] as HTMLButtonElement | undefined)?.focus();
-      }}><span className="hub-tile-icon"><Icon aria-hidden="true" /></span><span>{t(label)}</span></button>; })}</div> : <InstalledThemes state={state} language={language} />}
+      }}><span className="hub-tile-icon"><Icon aria-hidden="true" /></span><span>{t(label)}</span></button>; })}</div> : <InstalledThemes state={state} language={language} onInstalled={() => onDismiss(true)} />}
       {error && <div className="settings-feedback error" role="alert"><span>{error}</span>{retry && <button className="text-button" type="button" ref={retryButton} aria-disabled={busy} onClick={() => { void pin(retry); }}>{t('retry')}</button>}</div>}
     </div></div>
     {tileMenu && <ToolbarPopover opener={tile} within={ref} className="hub-menu-anchor"><div ref={menu}><Menu id="hub-tile-menu" className="hub-tile-menu" label={t('appActions').replace('{name}', t(hubApps[tileMenu].label))} keyboard opener={tile} onDismiss={reason => closeMenu(reason !== 'outside')}>

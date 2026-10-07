@@ -8,7 +8,12 @@ const css = readFileSync('src/tokens.css', 'utf8');
 const high = css.match(/:root\[data-contrast="high"\]\s*\{([^}]+)\}/)?.[1];
 if (!high) throw new Error('Missing high-contrast semantic pair.');
 const declarations = source => Object.fromEntries([...source.matchAll(/--([\w-]+):\s*([^;]+);/g)].map(match => [match[1], match[2].trim()]));
-const standard = declarations(css.replace(high, ''));
+const fjord = css.match(/:root\[data-theme="fjord"\]\s*\{([^}]+)\}/)?.[1];
+if (!fjord) throw new Error('Missing Fjord semantic roles.');
+const standard = declarations(css.replace(high, '').replace(fjord, ''));
+const marketplace = { ...standard, ...declarations(fjord) };
+const paletteRoles = Object.keys(standard).filter(key => key.startsWith('palette-amber-'));
+for (const key of paletteRoles) if (!Object.hasOwn(standard, key.replace('palette-amber-', 'palette-fjord-'))) throw new Error(`Missing Fjord role: ${key}`);
 const contrast = { ...standard, ...declarations(high) };
 const roles = Object.keys(contrast).filter(key => contrast[key].startsWith('light-dark('));
 const resolve = (key, variables, light) => {
@@ -28,17 +33,17 @@ const ratio = (a, b) => {
   const first = luminance(a), second = luminance(b);
   return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 };
-const surfaces = roles.filter(key => key.startsWith('surface-'));
+const surfaces = roles.filter(key => key.startsWith('surface-') && key !== 'surface-overlay');
 // Horizon rules, dividers and popover rims are decoration; the frame is the actionable boundary.
 const decoration = ['divider', 'border-popover', 'border-subtle', 'graphic-horizon', 'switch-edge'];
 // Named profile colours are graphic foregrounds and must pass on every surface, including selected rows.
 const foregrounds = roles.filter(key => !key.startsWith('surface-') && !decoration.includes(key) && key !== 'on-accent');
 let failed = false;
 let checks = 0;
-for (const [theme, variables, light] of [['amber', standard, false], ['daylight', standard, true], ['contrast-dark', contrast, false], ['contrast-light', contrast, true]]) {
+for (const [theme, variables, light] of [['amber', standard, false], ['daylight', standard, true], ['fjord', marketplace, false], ['contrast-dark', contrast, false], ['contrast-light', contrast, true]]) {
   const check = (role, surface, threshold) => {
     const value = resolve(role, variables, light);
-    if (value === undefined && role.startsWith('outline-') && variables === standard) return Infinity;
+    if (value === undefined && role.startsWith('outline-') && !theme.startsWith('contrast-')) return Infinity;
     const contrast = ratio(value, resolve(surface, variables, light));
     checks++;
     if (contrast < threshold) {
@@ -67,4 +72,4 @@ for (const [theme, variables, light] of [['amber', standard, false], ['daylight'
   }
 }
 if (failed) process.exit(1);
-console.log(`${checks} contrast pairs passed across four palettes.`);
+console.log(`${checks} contrast pairs passed across five palettes.`);

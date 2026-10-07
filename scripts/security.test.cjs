@@ -982,7 +982,7 @@ test('installed theme radios save explicit choices, follow system changes and se
   const system = { matches: true, addEventListener(_name, callback) { changed = callback; }, removeEventListener() {} };
   const state = { theme: 'system', contrast: 'standard', quickAccess: [], showCapture: true };
   const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check' }, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: () => 'Failed' } }, {
-    matchMedia: () => system, window: { horizon: { command: command => { commands.push(command); return new Promise(resolve => { complete = () => { state[command.type] = command.value; resolve(); }; }); } } },
+    matchMedia: query => query === '(forced-colors: active)' ? { matches: false, addEventListener() {}, removeEventListener() {} } : system, window: { horizon: { command: command => { commands.push(command); return new Promise(resolve => { complete = () => { state[command.type] = command.value; resolve(); }; }); } } },
   });
   // A Hub page supplies the radio component's props without needing a browser window.
   const tree = hubHooks.render(() => Hub({ state, language: 'en', page: 'themes', opener: { current: null }, onPage() {}, onDismiss() {}, onAnnounce() {} }));
@@ -993,7 +993,7 @@ test('installed theme radios save explicit choices, follow system changes and se
   let panel = render(); themeHooks.flush(); assert.equal(radios(panel)[0].props['aria-checked'], true);
   system.matches = false; changed(); panel = render(); assert.equal(radios(panel)[1].props['aria-checked'], true);
   radios(panel)[1].props.onClick(); assert.deepEqual(commands, [{ type: 'theme', value: 'daylight' }]); complete(); for (let i = 0; i < 4; i++) await Promise.resolve();
-  panel = render(); const currentTarget = { parentElement: { children: [{ focus() {} }, { focus() {} }, { focus() {} }] } };
+  panel = render(); const currentTarget = { closest: () => ({ querySelectorAll: () => [{ focus() {} }, { focus() {} }, { focus() {} }] }) };
   radios(panel)[1].props.onKeyDown({ key: 'ArrowRight', currentTarget, preventDefault() {} }); radios(panel)[2].props.onClick();
   assert.deepEqual(commands.at(-1), { type: 'theme', value: 'amber' }); complete(); for (let i = 0; i < 4; i++) await Promise.resolve();
   assert.deepEqual(commands.at(-1), { type: 'contrast', value: 'high' }); complete(); for (let i = 0; i < 4; i++) await Promise.resolve();
@@ -1001,6 +1001,55 @@ test('installed theme radios save explicit choices, follow system changes and se
   assert.equal(radios(panel)[2].props.tabIndex, 0); assert.ok(radios(panel).slice(0, 2).every(node => node.props.tabIndex === -1));
   assert.equal(notebookNodes(panel, node => node.type === 'Check').length, 1);
   themeHooks.dispose();
+});
+
+test('Hub offers only Fjord, serializes Get and retries removal without removing built-ins', async () => {
+  const copy = interfaceModule('src/copy.ts');
+  for (const language of ['en', 'es']) {
+    const hubHooks = notebookTestHooks(), themeHooks = notebookTestHooks(), commands = [];
+    let hooks = hubHooks, dismissed = 0, denyRemoval = true, focused = 0;
+    const state = { theme: 'daylight', contrast: 'standard', installedThemes: [], quickAccess: [] };
+    const react = Object.fromEntries(Object.keys(hubHooks.react).map(key => [key, (...args) => hooks.react[key](...args)]));
+    const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check', Trash2: 'Trash2' }, './copy': copy,
+      './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: () => 'Failed' } }, {
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      window: { horizon: { command: async command => {
+        commands.push(command);
+        if (command.type === 'install-theme') { state.installedThemes = ['fjord']; state.theme = 'fjord'; }
+        if (command.type === 'remove-theme') {
+          if (denyRemoval) throw new Error('SETTINGS_SAVE_FAILED');
+          state.installedThemes = []; state.theme = 'daylight';
+        }
+      } } },
+    });
+    const tree = hubHooks.render(() => Hub({ state, language, page: 'themes', opener: { current: null }, onPage() {}, onDismiss: () => dismissed++, onAnnounce() {} }));
+    const component = notebookNodes(tree, node => typeof node.type === 'function' && node.props.state === state)[0];
+    hooks = themeHooks;
+    const render = () => {
+      const panel = themeHooks.render(() => component.type(component.props));
+      notebookNodes(panel, node => node.props.role === 'radiogroup')[0].props.ref.current = { querySelector: () => ({ focus: () => focused++ }) };
+      themeHooks.flush(); return panel;
+    };
+    const radios = panel => notebookNodes(panel, node => node.props.role === 'radio');
+    const removals = panel => notebookNodes(panel, node => node.props.className === 'hub-theme-remove icon-button');
+    let panel = render(); assert.equal(radios(panel).length, 3); assert.equal(removals(panel).length, 0);
+    const get = notebookNodes(panel, node => node.props.className === 'hub-theme-get'); assert.equal(get.length, 1);
+    assert.equal(get[0].props['aria-label'], copy.text('getTheme', language).replace('{name}', 'Fjord'));
+    get[0].props.onClick(); get[0].props.onClick(); await new Promise(setImmediate);
+    assert.deepEqual(commands, [{ type: 'install-theme', id: 'fjord' }]); assert.equal(dismissed, 1);
+    panel = render(); assert.equal(radios(panel).length, 4); assert.equal(radios(panel)[3].props['aria-checked'], true);
+    assert.equal(notebookNodes(panel, node => node.props.className === 'hub-theme-get').length, 0);
+    assert.equal(removals(panel).length, 1);
+    assert.equal(removals(panel)[0].props['aria-label'], copy.text('removeTheme', language).replace('{name}', 'Fjord'));
+    removals(panel)[0].props.onClick(); await new Promise(setImmediate); panel = render();
+    const alert = notebookNodes(panel, node => node.props.role === 'alert')[0]; assert.ok(alert);
+    assert.equal(radios(panel)[3].props['aria-checked'], true); denyRemoval = false;
+    notebookNodes(alert, node => node.type === 'button')[0].props.onClick(); await new Promise(setImmediate); panel = render();
+    assert.equal(radios(panel).length, 3); assert.equal(radios(panel)[1].props['aria-checked'], true);
+    assert.equal(removals(panel).length, 0); assert.equal(focused, 1);
+    assert.deepEqual(commands.slice(1), [{ type: 'remove-theme', id: 'fjord' }, { type: 'remove-theme', id: 'fjord' }]);
+    themeHooks.dispose();
+  }
 });
 
 function menuParams(overrides = {}) {
@@ -2913,6 +2962,112 @@ test('settings validate themes, write atomically and preserve corrupt or oversiz
   assert.equal(existing.theme, 'system');
 });
 
+test('Fjord installation and active removal persist the chosen built-in theme and contrast', t => {
+  const directory = temporaryDirectory(t, 'marketplace');
+  for (const theme of ['system', 'amber', 'daylight']) for (const contrast of ['standard', 'high']) {
+    const path = join(directory, `${theme}-${contrast}.json`), changes = [];
+    const settings = createSettings(path, value => changes.push(value));
+    settings.setTheme(theme, false); settings.setContrast(contrast);
+    settings.installTheme('fjord');
+    assert.equal(settings.theme, 'fjord'); assert.equal(settings.contrast, 'standard');
+    assert.deepEqual(settings.installedThemes, ['fjord']);
+    const exposed = settings.installedThemes; exposed.length = 0;
+    assert.deepEqual(settings.installedThemes, ['fjord']);
+    settings.installTheme('fjord'); assert.deepEqual(settings.installedThemes, ['fjord']);
+    const restarted = createSettings(path, () => {});
+    assert.equal(restarted.theme, 'fjord'); assert.deepEqual(restarted.installedThemes, ['fjord']);
+    restarted.removeTheme('fjord');
+    assert.equal(restarted.theme, theme); assert.equal(restarted.contrast, contrast);
+    assert.deepEqual(restarted.installedThemes, []);
+    const removed = createSettings(path, () => {});
+    assert.equal(removed.theme, theme); assert.equal(removed.contrast, contrast);
+    assert.deepEqual(removed.installedThemes, []);
+    assert.equal(readdirSync(directory).some(name => name.endsWith('.tmp')), false);
+  }
+});
+
+test('catalog settings reject unknown ids and malformed installations and safely recover a stored id', t => {
+  const path = join(temporaryDirectory(t, 'theme-validation'), 'settings.json');
+  const settings = createSettings(path, () => {});
+  const builtIn = readSettings(path);
+  for (const id of ['amber', 'daylight', 'highContrast', 'dune', 'graphite', 'moss', '__proto__', '../fjord', '', null, {}, ['fjord']]) {
+    assert.throws(() => settings.installTheme(id)); assert.throws(() => settings.removeTheme(id));
+    assert.throws(() => validateCommand({ type: 'install-theme', id }));
+    assert.throws(() => validateCommand({ type: 'remove-theme', id }));
+  }
+  assert.throws(() => settings.setTheme('fjord', false));
+  for (const id of ['dune', 'graphite', 'moss', '__proto__', '', null]) assert.throws(() => settings.setTheme(id, false));
+  for (const type of ['install-theme', 'remove-theme']) {
+    assert.doesNotThrow(() => validateCommand({ type, id: 'fjord' }));
+    assert.throws(() => validateCommand({ type, id: 'fjord', palette: 'untrusted' }));
+  }
+  settings.setTheme('daylight', false); settings.setLanguage('es'); settings.installTheme('fjord');
+  const sample = readSettings(path); assert.equal(validateSettings(sample), true);
+  assert.equal(validateSettings({ ...builtIn, theme: 'fjord' }), false);
+  for (const marketplace of [null, {}, { ...sample.marketplace, extra: true },
+    { ...sample.marketplace, installed: ['fjord', 'fjord'] }, { ...sample.marketplace, installed: ['dune'] },
+    { ...sample.marketplace, installed: [] }, { ...sample.marketplace, builtIn: 'fjord' },
+    { ...sample.marketplace, contrast: 'invalid' }]) {
+    assert.equal(validateSettings({ ...sample, marketplace }), false);
+    assert.throws(() => writeSettings(path, { ...sample, marketplace }));
+  }
+  writeFileSync(path, JSON.stringify({ ...sample, theme: 'unknown' }));
+  const recovered = readSettings(path);
+  assert.equal(recovered.theme, 'daylight'); assert.equal(recovered.language, 'es');
+  assert.deepEqual(recovered.marketplace.installed, ['fjord']);
+  assert.equal(JSON.parse(readFileSync(path)).theme, 'daylight');
+  writeFileSync(path, JSON.stringify({ ...builtIn, theme: 'unknown', language: 'es' }));
+  assert.equal(readSettings(path).theme, 'system'); assert.equal(readSettings(path).language, 'es');
+});
+
+test('removal preserves an inactive choice and failed writes preserve installation and fallback', t => {
+  const path = join(temporaryDirectory(t, 'theme-removal'), 'settings.json'), changes = [];
+  const settings = createSettings(path, value => changes.push(value));
+  settings.setTheme('daylight', false); settings.installTheme('fjord');
+  settings.setTheme('amber', false); settings.setContrast('high'); settings.removeTheme('fjord');
+  assert.equal(settings.theme, 'amber'); assert.equal(settings.contrast, 'high');
+  settings.installTheme('fjord');
+  rmSync(path); mkdirSync(path);
+  const count = changes.length;
+  assert.throws(() => settings.removeTheme('fjord'), /SETTINGS_SAVE_FAILED/);
+  assert.equal(settings.theme, 'fjord'); assert.deepEqual(settings.installedThemes, ['fjord']); assert.equal(changes.length, count);
+  rmSync(path, { recursive: true }); settings.removeTheme('fjord');
+  assert.equal(settings.theme, 'amber'); assert.equal(settings.contrast, 'high');
+  rmSync(path); mkdirSync(path);
+  assert.throws(() => settings.installTheme('fjord'), /SETTINGS_SAVE_FAILED/);
+  assert.equal(settings.theme, 'amber'); assert.deepEqual(settings.installedThemes, []);
+});
+
+test('theme IPC installs, applies across windows and removes with a persistent fallback', t => {
+  const browser = notebookBrowser(t), { command, state } = browser;
+  command({ type: 'theme', value: 'daylight' });
+  command({ type: 'install-theme', id: 'fjord' });
+  assert.equal(state().theme, 'fjord'); assert.deepEqual(state().installedThemes, ['fjord']);
+  const child = browser.addWindow(); assert.equal(child.state().theme, 'fjord');
+  assert.throws(() => command({ type: 'remove-theme', id: 'amber' }));
+  assert.equal(state().theme, 'fjord');
+  child.command({ type: 'remove-theme', id: 'fjord' });
+  assert.equal(state().theme, 'daylight'); assert.deepEqual(state().installedThemes, []);
+  assert.equal(createSettings(join(browser.directory, 'settings.json'), () => {}).theme, 'daylight');
+  assert.throws(() => command({ type: 'theme', value: 'fjord' }));
+});
+
+test('system High contrast overrides Fjord and releasing it restores the saved palette', () => {
+  const { compileFunction } = require('node:vm'), { transpileModule, ModuleKind } = require('typescript');
+  const source = transpileModule(readFileSync('src/theme.ts', 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS } }).outputText;
+  const root = { dataset: {} }, exported = {};
+  let update;
+  const contrast = { matches: true, addEventListener(_name, callback) { update = callback; } };
+  const scheme = { matches: false, addEventListener() {} };
+  compileFunction(source, ['exports', 'window', 'document', 'matchMedia'])(exported,
+    { horizon: { initialTheme: 'fjord', initialContrast: 'standard' } }, { documentElement: root },
+    query => query === '(forced-colors: active)' ? contrast : scheme);
+  exported.applyTheme('fjord', 'standard'); assert.deepEqual(root.dataset, { theme: 'fjord', contrast: 'high' });
+  contrast.matches = false; update(); assert.deepEqual(root.dataset, { theme: 'fjord', contrast: 'standard' });
+  exported.applyTheme('fjord', 'high'); contrast.matches = true; update(); contrast.matches = false; update();
+  assert.equal(root.dataset.contrast, 'high');
+});
+
 test('dark page flips replace views in every profile without closing tabs and site choices update only matching profile hosts', async t => {
   const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm');
   const directory = temporaryDirectory(t, 'dark-browser'), views = [], handlers = new Map(), sessions = new Map(), switchCalls = [], order = [];
@@ -3219,7 +3374,7 @@ test('favicon fetching preserves validated raster bytes without decoding, tries 
 test('sandboxed preload validates the startup theme and exposes only the frozen browser API', async () => {
   const { compileFunction } = require('node:vm');
   const filename = resolve('dist/electron/preload.js');
-  for (const contrast of ['standard', 'high', 'invalid', '']) for (const [argument, expected] of [['system', 'system'], ['amber', 'amber'], ['daylight', 'daylight'], ['dark', 'system'], ['', 'system']]) {
+  for (const contrast of ['standard', 'high', 'invalid', '']) for (const [argument, expected] of [['system', 'system'], ['amber', 'amber'], ['daylight', 'daylight'], ['fjord', 'fjord'], ['dark', 'system'], ['', 'system']]) {
     let exposed;
     const invocations = [];
     const electron = {
@@ -3271,12 +3426,12 @@ test('renderer applies both startup settings and preserves contrast across syste
   const { compileFunction } = require('node:vm');
   const { transpileModule, ModuleKind } = require('typescript');
   const source = transpileModule(readFileSync('src/theme.ts', 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS } }).outputText;
-  for (const theme of ['system', 'amber', 'daylight']) for (const contrast of ['standard', 'high']) {
+  for (const theme of ['system', 'amber', 'daylight', 'fjord']) for (const contrast of ['standard', 'high']) {
     const root = { dataset: {} };
     let changed;
     const media = { matches: false, addEventListener(name, handler) { assert.equal(name, 'change'); changed = handler; } };
     const exported = {};
-    compileFunction(source, ['exports', 'window', 'document', 'matchMedia'])(exported, { horizon: { initialTheme: theme, initialContrast: contrast } }, { documentElement: root }, query => { assert.equal(query, '(prefers-color-scheme: dark)'); return media; });
+    compileFunction(source, ['exports', 'window', 'document', 'matchMedia'])(exported, { horizon: { initialTheme: theme, initialContrast: contrast } }, { documentElement: root }, query => query === '(forced-colors: active)' ? { matches: false, addEventListener() {} } : media);
     exported.applyTheme(theme, contrast);
     assert.deepEqual(root.dataset, { theme: theme === 'system' ? 'daylight' : theme, contrast });
     media.matches = true; changed();
@@ -3294,13 +3449,13 @@ test('main paints the resolved palette and passes both settings before loading c
   const filename = resolve('dist/electron/main.js');
   const directory = temporaryDirectory(t, 'first-paint');
   const localRequire = require('node:module').createRequire(filename);
-  for (const theme of ['system', 'amber', 'daylight']) for (const contrast of ['standard', 'high']) for (const dark of [false, true]) for (const mode of ['off', 'on', 'system']) {
+  for (const theme of ['system', 'amber', 'daylight', 'fjord']) for (const contrast of ['standard', 'high']) for (const dark of [false, true]) for (const mode of ['off', 'on', 'system']) for (const systemHigh of [false, true]) {
     const windows = [];
     let painted;
     const settings = { theme, contrast, darkPages: mode, darkStrength: 'standard', darkTone: 'neutral', migrationAllowed: false };
     const nativeTheme = new EventEmitter();
     nativeTheme.shouldUseDarkColors = dark;
-    nativeTheme.shouldUseHighContrastColors = true;
+    nativeTheme.shouldUseHighContrastColors = systemHigh;
     const app = new EventEmitter();
     const switchCalls = [];
     app.commandLine = { appendSwitch(...args) { switchCalls.push(['append', ...args]); }, removeSwitch(...args) { switchCalls.push(['remove', ...args]); }, hasSwitch: () => false };
@@ -3327,11 +3482,11 @@ test('main paints the resolved palette and passes both settings before loading c
         removeMenu() {}
         async loadURL(url) {
           assert.equal(url, 'horizon://app/');
-          const darkScheme = theme === 'amber' || theme === 'system' && dark;
-          const expected = contrast === 'high' ? darkScheme ? '#000000' : '#ffffff' : darkScheme ? '#171514' : '#eeebe9';
+          const darkScheme = theme === 'amber' || theme === 'fjord' || theme === 'system' && dark;
+          const expected = contrast === 'high' || systemHigh ? darkScheme ? '#000000' : '#ffffff' : theme === 'fjord' ? '#18252b' : darkScheme ? '#171514' : '#eeebe9';
           assert.equal(this.options.backgroundColor, expected);
           assert.ok(this.options.webPreferences.additionalArguments.includes('--horizon-theme=' + theme));
-          assert.ok(this.options.webPreferences.additionalArguments.includes('--horizon-contrast=' + contrast));
+          assert.ok(this.options.webPreferences.additionalArguments.includes('--horizon-contrast=' + (systemHigh ? 'high' : contrast)));
           this.loaded = true;
         }
       },
@@ -3340,7 +3495,7 @@ test('main paints the resolved palette and passes both settings before loading c
     compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])( {}, name => {
       if (name === './extensions') return browserTestExtensions;
       if (name === 'electron') return electron;
-      if (name === './settings') return { ...localRequire(name), createSettings(path, callback, high) { assert.equal(path, join(directory, 'settings.json')); assert.equal(high, true); changed = callback; return settings; } };
+      if (name === './settings') return { ...localRequire(name), createSettings(path, callback, high) { assert.equal(path, join(directory, 'settings.json')); assert.equal(high, systemHigh); changed = callback; return settings; } };
       if (name === './security') return { START_URL: 'horizon://app/', secureSession() {} };
       if (name === './protocol') return { serveHorizon: async () => {} };
       if (name === './browser') return { restoredWindows: () => [], createBrowser: () => ({ layout() {} }) };
@@ -3351,11 +3506,11 @@ test('main paints the resolved palette and passes both settings before loading c
     assert.equal(window.loaded, true);
     settings.contrast = contrast === 'high' ? 'standard' : 'high';
     changed();
-    const darkScheme = theme === 'amber' || theme === 'system' && dark;
-    assert.equal(painted, settings.contrast === 'high' ? darkScheme ? '#000000' : '#ffffff' : darkScheme ? '#171514' : '#eeebe9');
+    const darkScheme = theme === 'amber' || theme === 'fjord' || theme === 'system' && dark;
+    assert.equal(painted, settings.contrast === 'high' || systemHigh ? darkScheme ? '#000000' : '#ffffff' : theme === 'fjord' ? '#18252b' : darkScheme ? '#171514' : '#eeebe9');
     nativeTheme.shouldUseDarkColors = !dark;
     nativeTheme.emit('updated');
-    if (theme === 'system') assert.equal(painted, settings.contrast === 'high' ? dark ? '#ffffff' : '#000000' : dark ? '#eeebe9' : '#171514');
+    if (theme === 'system') assert.equal(painted, settings.contrast === 'high' || systemHigh ? dark ? '#ffffff' : '#000000' : dark ? '#eeebe9' : '#171514');
     window.emit('closed');
     assert.equal(nativeTheme.listenerCount('updated'), 0);
   }

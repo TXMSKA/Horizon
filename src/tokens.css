@@ -41,6 +41,48 @@
   --palette-amber-sun: #dda15a;
   --palette-amber-field: #201e1c;
   --palette-amber-field-line: #322e2b;
+  --palette-fjord-canvas: #10191d;
+  --palette-fjord-surface: #1b2a30;
+  --palette-fjord-surface-2: #24353c;
+  --palette-fjord-surface-3: #2d424a;
+  --palette-fjord-glass: rgba(27,42,48,0.9);
+  --palette-fjord-hover: #24353c;
+  --palette-fjord-border-subtle: #728e98;
+  --palette-fjord-line: #819da7;
+  --palette-fjord-line-strong: #819da7;
+  --palette-fjord-frame: #91adb7;
+  --palette-fjord-title: #eef5f6;
+  --palette-fjord-text: #dce9ed;
+  --palette-fjord-soft: #bed1d8;
+  --palette-fjord-dim: #b4cad2;
+  --palette-fjord-primary: #a4d1da;
+  --palette-fjord-primary-hover: #badfe6;
+  --palette-fjord-on-primary: #10282f;
+  --palette-fjord-wash: #233a43;
+  --palette-fjord-on-wash: #d9eff4;
+  --palette-fjord-primary-border: #91adb7;
+  --palette-fjord-error: #f2b9b7;
+  --palette-fjord-error-wash: #3b262b;
+  --palette-fjord-success: #b7dbca;
+  --palette-fjord-warning: #e1d2a9;
+  --palette-fjord-purple: #bba0cf;
+  --palette-fjord-cyan: #8dbec5;
+  --palette-fjord-info: #bfd5ec;
+  --palette-fjord-overlay: rgba(8,20,25,0.65);
+  --palette-fjord-capture-veil: rgba(0, 0, 0, 0.45);
+  --palette-fjord-shadow: #10191d;
+  --palette-fjord-cover-from: #2d424a;
+  --palette-fjord-cover-to: #142127;
+  --palette-fjord-white: #eef5f6;
+  --palette-fjord-none: none;
+  --palette-fjord-chrome: #142127;
+  --palette-fjord-page: #18252b;
+  --palette-fjord-sky: #18252b;
+  --palette-fjord-ground: #142127;
+  --palette-fjord-horizon: #a4d1da;
+  --palette-fjord-sun: #a4d1da;
+  --palette-fjord-field: #24353c;
+  --palette-fjord-field-line: #819da7;
   --palette-daylight-canvas: #eeebe9;
   --palette-daylight-surface: #f4f2f0;
   --palette-daylight-surface-2: #e1dedb;
@@ -236,6 +278,7 @@
 
 :root {
   color-scheme: only light;
+  --surface-overlay: light-dark(var(--palette-daylight-overlay), var(--palette-amber-overlay));
   --surface-page: light-dark(var(--palette-daylight-page), var(--palette-amber-page));
   /* Scene translucency is not an opaque control/text contrast surface. */
   --surface-capture-veil: var(--palette-daylight-capture-veil);
@@ -337,6 +380,8 @@
   --size-hub-tile: 4.5rem;
   --gap-hub-columns: 3.5rem;
   --gap-hub-rows: 1.9375rem;
+  --gap-hub-theme-preview: 0.3125rem;
+  --height-hub-theme-name: 1.625rem;
   --width-hub-theme: 9.875rem;
   --height-hub-theme: 4.25rem;
   --width-hub-tile-menu: 14.5rem;
@@ -479,6 +524,49 @@
   --surface-transparent: var(--color-transparent);
 }
 
+:root[data-theme="fjord"] {
+  color-scheme: dark;
+  --surface-overlay: var(--palette-fjord-overlay);
+  --surface-capture-veil: var(--palette-fjord-capture-veil);
+  --surface-page: var(--palette-fjord-page);
+  --surface-chrome: var(--palette-fjord-chrome);
+  --surface-raised: var(--palette-fjord-surface);
+  --surface-sunken: var(--palette-fjord-surface-2);
+  --surface-field: var(--palette-fjord-field);
+  --surface-hover: var(--palette-fjord-hover);
+  --surface-pressed: var(--palette-fjord-surface-3);
+  --surface-canvas: var(--palette-fjord-canvas);
+  --surface-selected: var(--palette-fjord-wash);
+  --border-popover: var(--palette-fjord-line-strong);
+  --border-subtle: var(--palette-fjord-border-subtle);
+  --surface-error: var(--palette-fjord-error-wash);
+  --text-title: var(--palette-fjord-title);
+  --text-primary: var(--palette-fjord-text);
+  --text-secondary: var(--palette-fjord-soft);
+  --text-placeholder: var(--palette-fjord-dim);
+  --text-error: var(--palette-fjord-error);
+  --border-control: var(--palette-fjord-frame);
+  --divider: var(--palette-fjord-line);
+  --focus: var(--palette-fjord-primary);
+  --accent: var(--palette-fjord-primary);
+  --accent-hover: var(--palette-fjord-primary-hover);
+  --graphic-horizon: var(--palette-fjord-horizon);
+  --surface-ground: var(--palette-fjord-ground);
+  --surface-tab-active: var(--palette-fjord-page);
+  --surface-address: var(--palette-fjord-surface-2);
+  --graphic-sun: var(--palette-fjord-sun);
+  --on-accent: var(--palette-fjord-on-primary);
+  --switch-edge: var(--palette-fjord-line-strong);
+  --profile-amber: var(--palette-fjord-primary);
+  --profile-blue: var(--palette-fjord-info);
+  --profile-green: var(--palette-fjord-success);
+  --profile-red: var(--palette-fjord-error);
+  --profile-yellow: var(--palette-fjord-warning);
+  --profile-grey: var(--palette-fjord-dim);
+  --profile-purple: var(--palette-fjord-purple);
+  --profile-cyan: var(--palette-fjord-cyan);
+}
+
 :root[data-contrast="high"] {
   --surface-capture-veil: var(--palette-contrast-light-capture-veil);
   --profile-amber: light-dark(var(--palette-contrast-light-primary), var(--palette-contrast-dark-primary));
@@ -523,7 +611,7 @@
   --switch-edge: light-dark(var(--palette-contrast-light-line-strong), var(--palette-contrast-dark-line-strong));
 }
 
-:root[data-contrast="high"][data-theme="amber"] { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }
+:root[data-contrast="high"][data-theme="amber"], :root[data-contrast="high"][data-theme="fjord"] { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }
 
 [data-preview-theme=amber] {
   --preview-sky: var(--palette-amber-sky);
@@ -560,4 +648,17 @@
   --preview-sun: var(--palette-contrast-dark-sun);
   --preview-field: var(--palette-contrast-dark-field);
   --preview-field-line: var(--palette-contrast-dark-field-line);
+}
+
+[data-preview-theme=fjord] {
+  --preview-sky: var(--palette-fjord-sky);
+  --preview-chrome: var(--palette-fjord-chrome);
+  --preview-accent: var(--palette-fjord-primary);
+  --preview-tab: var(--palette-fjord-surface-3);
+  --preview-toolbar: var(--palette-fjord-surface-2);
+  --preview-ground: var(--palette-fjord-ground);
+  --preview-horizon: var(--palette-fjord-horizon);
+  --preview-sun: var(--palette-fjord-sun);
+  --preview-field: var(--palette-fjord-field);
+  --preview-field-line: var(--palette-fjord-field-line);
 }
