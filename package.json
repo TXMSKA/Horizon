@@ -2,6 +2,7 @@
   "name": "horizon",
   "version": "0.1.0",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "description": "Horizon standalone browser",
   "author": "TXMSKA",
   "homepage": "https://txmska.com/projects/horizon/",
@@ -29,6 +30,8 @@
   },
   "dependencies": {
     "@ghostery/adblocker": "2.18.2",
+    "electron-chrome-extensions": "4.9.0",
+    "electron-chrome-web-store": "0.13.0",
     "electron-updater": "6.8.9",
     "lucide-react": "1.48.0",
     "react": "19.3.0",
@@ -47,5 +50,8 @@
     "typescript-eslint": "8.70.1",
     "vite": "8.3.0"
   },
-  "packageManager": "npm@11.19.1"
+  "packageManager": "npm@11.19.1",
+  "overrides": {
+    "adm-zip": "0.6.1"
+  }
 }

@@ -1,5 +1,6 @@
 import type { IpcMainInvokeEvent, Session, WebContents } from 'electron';
 import { isAllowedSubframeURL, isAllowedURL } from './browsing';
+import { isExtensionURL } from './extension-policy';
 
 export const START_URL = 'horizon://app/';
 export const CONTENT_SECURITY_POLICY = [
@@ -38,9 +39,10 @@ export function secureSession(target: Session): void {
 }
 
 export function hardenContents(contents: WebContents, web: boolean, authorizeLaunch: (url: string) => boolean = () => false): void {
-  contents.on('will-navigate', (event) => { if (!web || !(isAllowedURL(event.url) || authorizeLaunch(event.url))) event.preventDefault(); });
-  contents.on('will-frame-navigate', (event) => { if (!web || !(event.isMainFrame ? isAllowedURL(event.url) || authorizeLaunch(event.url) : isAllowedSubframeURL(event.url))) event.preventDefault(); });
-  contents.on('will-redirect', (event) => { if (!web || !(event.isMainFrame ? isAllowedURL(event.url) || authorizeLaunch(event.url) : isAllowedSubframeURL(event.url))) event.preventDefault(); });
+  const extension = (url: string) => web && isExtensionURL(contents.session, url);
+  contents.on('will-navigate', (event) => { if (!web || !(isAllowedURL(event.url) || authorizeLaunch(event.url) || extension(event.url))) event.preventDefault(); });
+  contents.on('will-frame-navigate', (event) => { if (!web || !(event.isMainFrame ? isAllowedURL(event.url) || authorizeLaunch(event.url) || extension(event.url) : isAllowedSubframeURL(event.url) || extension(event.url))) event.preventDefault(); });
+  contents.on('will-redirect', (event) => { if (!web || !(event.isMainFrame ? isAllowedURL(event.url) || authorizeLaunch(event.url) || extension(event.url) : isAllowedSubframeURL(event.url) || extension(event.url))) event.preventDefault(); });
   contents.on('will-attach-webview', (event) => event.preventDefault());
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
 }

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   AppWindow, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Download, Ellipsis, LayoutGrid,
   ClipboardPaste, Copy, ExternalLink, Folder, History, Image, LoaderCircle, Minus, Scan, Plus, Redo2, Scissors, SpellCheck, TextSelect, Undo2,
-  RotateCw, Search, SearchX, ServerOff, Shield, ShieldAlert, ShieldCheck, ShieldOff, Sparkles, Square, Star, TriangleAlert, WifiOff, X,
+  Puzzle, RotateCw, Search, SearchX, ServerOff, Shield, ShieldAlert, ShieldCheck, ShieldOff, Sparkles, Square, Star, TriangleAlert, WifiOff, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
@@ -37,13 +37,14 @@ import { DesktopEdits } from './shared/desktop-edits';
 import { DESKTOP_TAB_DRAG, parseDesktopDrag } from './shared/desktop-drag';
 import { Settings, settingsError } from './Settings';
 import { FirstRunImport } from './FirstRunImport';
+import { ExtensionAction, ExtensionInstallDialog, ExtensionsPopover } from './Extensions';
 
 type Panel = LibraryPanel | null;
 const sites = {
   wikipedia: 'https://www.wikipedia.org/', youtube: 'https://www.youtube.com/',
   maps: 'https://www.google.com/maps', news: 'https://www.bbc.com/news', mail: 'https://mail.google.com/',
 } as const;
-const pageMenuRows: Record<Exclude<ContextMenuItemId, `spell:${string}`>, { label: CopyKey; icon: LucideIcon }> = {
+const pageMenuRows: Record<Exclude<ContextMenuItemId, `spell:${string}` | `extension:${string}`>, { label: CopyKey; icon: LucideIcon }> = {
   'open-link': { label: 'openLink', icon: ExternalLink }, 'copy-link': { label: 'copyLink', icon: Copy },
   'open-image': { label: 'openImage', icon: Image }, 'save-image': { label: 'saveImage', icon: Download },
   'copy-image': { label: 'copyImage', icon: Copy }, 'copy-image-address': { label: 'copyImageAddress', icon: Copy },
@@ -84,6 +85,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const undoTimeout = useRef<number | undefined>(undefined);
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [extensionsOpen, setExtensionsOpen] = useState(false);
+  const extensionsButtonRef = useRef<HTMLButtonElement>(null);
   const [aboutOpen, setAboutOpen] = useState(false), [clearDialogRequested, setClearDialogRequested] = useState(false), [firstRunOpen, setFirstRunOpen] = useState(false);
   const [hubPage, setHubPage] = useState<'home' | keyof typeof hubApps | null>(null);
   const [lyraOpen, setLyraOpen] = useState(false);
@@ -155,9 +158,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.privateWindow ? null : state?.permissionPrompt;
-  const permissionOpen = Boolean(!groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
+  const permissionOpen = Boolean(!extensionsOpen && !state?.extensionWarning && !groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
-  const popover = Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
+  const popover = extensionsOpen || Boolean(state?.extensionWarning) || Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || lyraOpen || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
   const hidden = Boolean(panel || popover);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
@@ -193,7 +196,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (state?.desktopStorageError && desktopMode !== 'capture') setDesktopNotice({ message: text('DESKTOP_STORAGE_FAILED', language), failure: true, action: text('retry', language), onAction: () => { void retryDesktopStorage(); } });
   }, [state?.desktopStorageError, desktopMode, language, retryDesktopStorage]);
   const openDesktop = (id: string, item?: string) => {
-    setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setDirty(false);
+    setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setDirty(false);
     void run({ type: 'open-desktop', id, ...(item ? { item } : {}) });
   };
   const saveDesktopCapture = async (project: ProjectSummary) => {
@@ -223,7 +226,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     }
   };
   const closeShield = useCallback((focusShield = true) => {
-    setShieldScope(null); if (focusShield) shieldButtonRef.current?.focus();
+    setExtensionsOpen(false); setShieldScope(null); if (focusShield) shieldButtonRef.current?.focus();
   }, []);
   const answerPermission = useCallback(async (answer: 'allow' | 'block' | 'dismiss', focusPage = true) => {
     if (!permissionPrompt) return;
@@ -238,7 +241,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   }, [run]);
   const closeTabMenu = useCallback((focus = false) => { setTabMenu(null); if (focus) tabMenuOpener.current?.focus(); }, []);
   const showTabMenu = (id: string, opener: HTMLButtonElement) => {
-    closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
+    closeContextMenu(); setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
     tabMenuOpener.current = opener; setTabMenu(id);
   };
   // A tab sent into a collapsed group is hidden, so focus goes to the group's label instead.
@@ -248,7 +251,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (id) void run({ type: 'close-tab-group-editor', id }).then(success => { if (success && focus) groupOpener.current?.focus(); });
   }, [state?.groupEditorId, run]);
   const showGroupEditor = (group: TabGroup, opener: HTMLButtonElement) => {
-    closeContextMenu(); closeTabMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
+    closeContextMenu(); closeTabMenu(); setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
     groupOpener.current = opener; void run({ type: 'open-tab-group-editor', id: group.id });
   };
   useEffect(() => {
@@ -294,7 +297,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   useEffect(() => { if (tabMenu && !state?.tabs.some(tab => tab.id === tabMenu)) closeTabMenu(); }, [tabMenu, state?.tabs, closeTabMenu]);
   useEffect(() => window.horizon.onContextMenu(menu => {
     contextMenuRef.current = menu; setContextMenu(menu);
-    if (menu) { setTabMenu(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }
+    if (menu) { setTabMenu(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }
   }), []);
   const dismissUndo = useCallback(() => {
     undoGeneration.current++; window.clearTimeout(undoTimeout.current); undoTimeout.current = undefined;
@@ -311,7 +314,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const focusAddress = useCallback(() => {
     dismissUndo();
     closeContextMenu();
-    setDesktopOverlay(null); setShieldScope(null); setPanel(null); setMenuOpen(false); setProfileOpen(null); setHubPage(null); setLyraOpen(false);
+    setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setPanel(null); setMenuOpen(false); setProfileOpen(null); setHubPage(null); setLyraOpen(false);
     addressRef.current?.focus(); addressRef.current?.select();
   }, [dismissUndo, closeContextMenu]);
   const closeFind = useCallback(() => {
@@ -322,18 +325,18 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (next) closeFind();
     dismissUndo();
     closeContextMenu();
-    setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setPanel(next); setMenuOpen(false); setSuggestionsOpen(false);
+    setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setPanel(next); setMenuOpen(false); setSuggestionsOpen(false);
   }, [closeFind, dismissUndo, closeContextMenu]);
   const openSettings = (section: SettingsSection, clear = false) => {
     if (state?.privateWindow && section === 'profiles') section = 'general';
     closeFind(); dismissUndo(); closeContextMenu();
-    setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setDirty(false);
+    setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setDirty(false);
     setClearDialogRequested(false); void run({ type: 'open-settings', section }).then(success => { if (success && clear) setClearDialogRequested(true); });
   };
   const openDesktopPanel = useCallback(async (page: DesktopPanelPage, opener?: HTMLElement) => {
     if (!state?.desktopPanel.open) desktopOpener.current = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : hubButtonRef.current);
     closeFind(); closeContextMenu();
-    setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
+    setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
     if (active?.fullscreen && !await run({ type: 'fullscreen' })) return false;
     return run({ type: 'open-desktop-panel', page });
   }, [state?.desktopPanel.open, active?.fullscreen, closeFind, closeContextMenu, run]);
@@ -348,7 +351,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     const reason = active?.settings ? 'CAPTURE_SETTINGS' : active?.desktop ? 'CAPTURE_DESKTOP' : active?.error ? 'CAPTURE_CRASHED' : active?.loading ? 'CAPTURE_LOADING' : !/^https?:/.test(activeUrl) ? 'CAPTURE_UNAVAILABLE' : null;
     if (reason) { setDesktopNotice({ message: text(reason, language) }); return; }
     capturePending.current = true;
-    closeFind(); closeContextMenu(); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
+    closeFind(); closeContextMenu(); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null);
     const overlay = { scope: desktopScope, mode: 'capture' as const };
     setCaptureShot(null); setDesktopOverlay(overlay); setDesktopNotice(null);
     try {
@@ -371,7 +374,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
   };
   const openHub = (page: NonNullable<typeof hubPage>) => {
     closeFind(); dismissUndo(); closeContextMenu();
-    setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(false); setHubPage(page);
+    setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(false); setHubPage(page);
   };
   const navigate = (input: string) => {
     setDirty(false);
@@ -379,7 +382,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     if (/^\?\s/.test(input)) { const query = input.slice(2).trim(); if (!query) return; input = SEARCH_ENGINES[state?.searchEngine ?? 'duckduckgo'].searchPrefix + encodeURIComponent(query); }
     dismissUndo();
     closeContextMenu();
-    setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setSuggestionsOpen(false); setMenuOpen(false); setPanel(null); setStartSearch('');
+    setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setSuggestionsOpen(false); setMenuOpen(false); setPanel(null); setStartSearch('');
     void run({ type: 'navigate', input }).then(success => { if (success) requestAnimationFrame(() => { void run({ type: 'focus-page' }); }); });
   };
 
@@ -500,7 +503,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     return () => document.removeEventListener('pointerdown', outside);
   }, [lyraOpen]);
   useEffect(() => { setHubPage(null); setLyraOpen(false); }, [state?.activeId, state?.activeProfileId]);
-  useEffect(() => { setShieldScope(null); }, [siteScope]);
+  useEffect(() => { setExtensionsOpen(false); setShieldScope(null); }, [siteScope]);
   useEffect(() => { setDesktopOverlay(null); }, [desktopScope]);
   useEffect(() => { setDesktopNotice(null); }, [state?.activeProfileId]);
   useEffect(() => {
@@ -561,7 +564,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
     }
     else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') void run({ type: 'zoom', delta: action === 'zoom-in' ? 1 : action === 'zoom-out' ? -1 : 0 });
     else if (action === 'stop') {
-      if (aboutOpen) setAboutOpen(false);
+      if (extensionsOpen) { setExtensionsOpen(false); extensionsButtonRef.current?.focus(); }
+      else if (aboutOpen) setAboutOpen(false);
       else if (desktopMode) closeCapture();
       else if (captureHint) setCaptureHint(false);
       else if (groupEditor) closeGroupEditor(true);
@@ -579,7 +583,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'reload-no-cache' || action === 'bookmark') {
       openPanel(null); setSuggestionsOpen(false); void run({ type: action });
     }
-  }, [aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, tabMenu, closeTabMenu, groupEditor, closeGroupEditor, finishTabDrag, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
+  }, [extensionsOpen, aboutOpen, hubPage, lyraOpen, state, active, activeUrl, closeFind, closeContextMenu, contextMenu, tabMenu, closeTabMenu, groupEditor, closeGroupEditor, finishTabDrag, findOpen, findText, focusAddress, menuOpen, profileOpen, openPanel, panel, run, suggestionsOpen, shieldOpen, closeShield, permissionOpen, answerPermission, desktopMode, closeCapture, openCapture]);
   useEffect(() => {
     const unsubscribe = window.horizon.onShortcut(shortcut);
     const keydown = (event: KeyboardEvent) => {
@@ -714,7 +718,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
             onFocus={event => { setAddressFocused(true); event.currentTarget.value = dirty ? address : activeUrl; event.currentTarget.select(); }}
             onMouseDown={event => { focusingClick.current = document.activeElement !== event.currentTarget; }}
             onMouseUp={event => { if (focusingClick.current) event.preventDefault(); focusingClick.current = false; }}
-            onChange={event => { setDesktopOverlay(null); setShieldScope(null); setAddress(event.target.value); setDirty(true); setSuggestionIndex(-1); setSuggestionsOpen(Boolean(event.target.value.trim())); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setPanel(null); }}
+            onChange={event => { setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setAddress(event.target.value); setDirty(true); setSuggestionIndex(-1); setSuggestionsOpen(Boolean(event.target.value.trim())); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setPanel(null); }}
             onBlur={event => { focusingClick.current = false; setAddressFocused(false); if (!dirty) setDirty(false); if (!event.relatedTarget || !(event.relatedTarget as HTMLElement).closest('.suggestions')) setSuggestionsOpen(false); }}
             onKeyDown={event => {
               if (event.key === 'Enter' && event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) { event.preventDefault(); navigate(completeAddress(dirty ? address : activeUrl)); return; }
@@ -727,13 +731,17 @@ export function App({ language: initialLanguage }: { language: Language }) {
         </form>
         <div className="tools">{state?.showCapture !== false && <button className="icon-button" ref={desktopButtonRef} type="button" aria-label={t('captureShortcut')} aria-describedby={showCaptureHint ? 'capture-shortcut' : undefined} aria-haspopup="dialog" aria-expanded={Boolean(desktopMode)} onMouseEnter={() => setCaptureHint(true)} onMouseLeave={() => setCaptureHint(false)} onFocus={event => { if (!restoringCaptureFocus.current && event.currentTarget.matches(':focus-visible')) setCaptureHint(true); }} onBlur={() => setCaptureHint(false)} onClick={() => { setCaptureHint(false); void openCapture(); }}><Scan aria-hidden="true" /></button>}
           {state?.quickAccess.filter(app => !state.privateWindow || app !== 'desktop').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={event => { if (app === 'desktop') void openDesktopPanel({ kind: 'home' }, event.currentTarget); else openHub(app); }}><Icon aria-hidden="true" /></button>; })}
+          {!state?.privateWindow && state?.extensions.filter(extension => extension.pinned).map(extension => <ExtensionAction key={`${state.activeProfileId}:${extension.id}`} extension={extension} language={language} run={run} onActivate={() => setExtensionsOpen(false)} />)}
+          {!state?.privateWindow && <button className="icon-button" ref={extensionsButtonRef} type="button" aria-label={t('extensions')} title={t('extensions')} aria-haspopup="dialog" aria-controls="extensions-popover" aria-expanded={extensionsOpen} onClick={() => {
+            setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); closeFind(); closeContextMenu(); setExtensionsOpen(previous => !previous);
+          }}><Puzzle aria-hidden="true" /></button>}
           <button className="icon-button" ref={hubButtonRef} type="button" aria-label={t('hub')} title={t('hub')} aria-haspopup="dialog" aria-expanded={Boolean(hubPage)} aria-controls="hub-popup" onClick={() => { if (hubPage) { setHubPage(null); hubButtonRef.current?.focus(); } else openHub('home'); }}><LayoutGrid aria-hidden="true" /></button>
-          <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} privateWindow={state?.privateWindow ?? false} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { setDesktopOverlay(null); setShieldScope(null); dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); setHubPage(null); setLyraOpen(false); setPanel(null); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
-          <button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-haspopup="menu" aria-expanded={menuOpen || Boolean(panel)} aria-controls={panel ? "browser-library-panel" : "browser-menu"} onClick={event => { setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); closeContextMenu(); menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setPanel(null); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button>
-          <button className="icon-button lyra-button" ref={lyraButtonRef} type="button" aria-label={t('lyra')} title={t('lyra')} aria-haspopup="dialog" aria-expanded={lyraOpen} aria-controls="lyra-preview" onClick={() => { closeFind(); dismissUndo(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(previous => !previous); }}><span><Sparkles aria-hidden="true" /></span></button>
+          <ProfileControl profile={state?.profiles.find(profile => profile.id === state.activeProfileId)} privateWindow={state?.privateWindow ?? false} language={language} open={profileOpen} opener={profileButtonRef} onClick={keyboard => { setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); dismissUndo(); closeContextMenu(); setMenuOpen(false); setSuggestionsOpen(false); setHubPage(null); setLyraOpen(false); setPanel(null); profileByKeyboard.current = keyboard; setProfileOpen(previous => previous ? null : 'menu'); }} />
+          <button className="icon-button" ref={menuButtonRef} type="button" aria-label={t('menu')} title={t('menu')} aria-haspopup="menu" aria-expanded={menuOpen || Boolean(panel)} aria-controls={panel ? "browser-library-panel" : "browser-menu"} onClick={event => { setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); closeContextMenu(); menuByKeyboard.current = event.detail === 0; setSuggestionsOpen(false); setPanel(null); setMenuOpen(previous => !previous); }}><Ellipsis aria-hidden="true" /></button>
+          <button className="icon-button lyra-button" ref={lyraButtonRef} type="button" aria-label={t('lyra')} title={t('lyra')} aria-haspopup="dialog" aria-expanded={lyraOpen} aria-controls="lyra-preview" onClick={() => { closeFind(); dismissUndo(); closeContextMenu(); setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); setLyraOpen(previous => !previous); }}><span><Sparkles aria-hidden="true" /></span></button>
         </div>
       </div>
-      {state && <FavoritesBar key={`${state.activeProfileId}:${state.activeId}`} state={state} language={language} run={run} onDelete={destructive} onOverlay={setFavoritesOpen} dismiss={Boolean(groupEditor || panel || menuOpen || profileOpen || hubPage || lyraOpen || desktopMode || suggestionsOpen || contextMenu || tabMenu || shieldOpen || aboutOpen || desktopModalOpen)} onActivate={() => { closeFind(); closeContextMenu(); setDesktopOverlay(null); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }} undo={panel === 'bookmarks' ? null : undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} />}
+      {state && <FavoritesBar key={`${state.activeProfileId}:${state.activeId}`} state={state} language={language} run={run} onDelete={destructive} onOverlay={setFavoritesOpen} dismiss={Boolean(extensionsOpen || state?.extensionWarning || groupEditor || panel || menuOpen || profileOpen || hubPage || lyraOpen || desktopMode || suggestionsOpen || contextMenu || tabMenu || shieldOpen || aboutOpen || desktopModalOpen)} onActivate={() => { closeFind(); closeContextMenu(); setDesktopOverlay(null); setExtensionsOpen(false); setShieldScope(null); setProfileOpen(null); setHubPage(null); setLyraOpen(false); setMenuOpen(false); setSuggestionsOpen(false); setPanel(null); }} undo={panel === 'bookmarks' ? null : undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} />}
       {findOpen && <div className="find-bar" role="search" aria-label={t('find')}>
         <Search aria-hidden="true" /><input ref={findRef} spellCheck={false} autoComplete="off" aria-label={t('find')} placeholder={t('find')} value={findText} maxLength={1024} onChange={event => { const value = event.target.value; setFindText(value); if (value) void run({ type: 'find', text: value, forward: true, next: false }); else void run({ type: 'stop-find' }); }}
           onKeyDown={event => { if (event.key === 'Enter' && findText) { event.preventDefault(); void run({ type: 'find', text: findText, forward: !event.shiftKey, next: true }); } }} />
@@ -749,6 +757,8 @@ export function App({ language: initialLanguage }: { language: Language }) {
       <TabGroupMenuItems tab={menuTab} groups={state?.groups ?? []} palette={groupPalette} language={language} close={closeTabMenu} focusTab={focusTab} run={run} />
     </Menu></ToolbarPopover>}
     {groupEditor && <GroupEditor key={`${state?.activeProfileId}:${groupEditor.id}`} group={groupEditor} language={language} palette={groupPalette} opener={groupOpener} run={run} onDismiss={closeGroupEditor} />}
+    {extensionsOpen && state && !state.privateWindow && <ExtensionsPopover key={state.activeProfileId} state={state} language={language} opener={extensionsButtonRef} onDismiss={focus => { setExtensionsOpen(false); if (focus) extensionsButtonRef.current?.focus(); }} onManage={() => { setExtensionsOpen(false); openSettings('extensions'); }} run={run} />}
+    {state?.extensionWarning && !state.privateWindow && <ExtensionInstallDialog key={state.extensionWarning.requestId} warning={state.extensionWarning} language={language} onAnswer={allow => run({ type: 'answer-extension-install', id: state.extensionWarning!.requestId, allow })} />}
     {showCaptureHint && <ToolbarPopover opener={desktopButtonRef}><span className="capture-shortcut-tooltip" id="capture-shortcut" role="tooltip">{t('captureShortcut')}</span></ToolbarPopover>}
     {desktopMode === 'capture' && state && <CapturePreview state={state} language={language} shot={captureShot} header={headerRef} opener={desktopButtonRef} onClose={closeCapture} onSave={saveDesktopCapture} onVisible={captureVisible} onShot={setCaptureShot} />}
     {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} privateWindow={state.privateWindow} counts={active.blocked} ready={state.blockingReady} blockAds={state.blockAds} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}
@@ -763,7 +773,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
       void run({ type: 'switch-profile', id: profile.id }).then(success => { if (success) { setAnnouncement(t('switchedProfile').replace('{name}', profile.name)); profileButtonRef.current?.focus(); } });
     }} onNew={() => setProfileOpen('new')} onManage={() => openSettings('profiles')} onPrivate={() => { setProfileOpen(null); profileButtonRef.current?.focus(); void run({ type: 'new-private-window' }); }} />}
     {profileOpen === 'new' && state && !state.privateWindow && <NewProfilePopover state={state} language={language} opener={profileButtonRef} onCancel={() => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus(); }} onSuccess={name => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); setAnnouncement(t('createdProfile').replace('{name}', name)); profileButtonRef.current?.focus(); }} />}
-    {menuOpen && <BrowserMenu privateWindow={state?.privateWindow ?? false} language={language} active={active} canReopen={state?.canReopenTab ?? false} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); if (action === 'new-window' || action === 'new-private-window') menuButtonRef.current?.focus(); shortcut(action); }} onPanel={openPanel} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
+    {menuOpen && <BrowserMenu privateWindow={state?.privateWindow ?? false} language={language} active={active} canReopen={state?.canReopenTab ?? false} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); if (action === 'new-window' || action === 'new-private-window') menuButtonRef.current?.focus(); shortcut(action); }} onPanel={openPanel} onExtensions={() => { setMenuOpen(false); setExtensionsOpen(true); }} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
     {panel === 'bookmarks' && state && <FavoritesPanel key={state.activeProfileId} state={state} language={language} opener={menuButtonRef} undo={undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} onDelete={destructive} run={run} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
     {panel && panel !== 'bookmarks' && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
     {state?.firstRun && <FirstRunImport state={state} language={language} returnFocus={addressRef} onOpen={setFirstRunOpen} />}
@@ -772,10 +782,11 @@ export function App({ language: initialLanguage }: { language: Language }) {
       {contextMenu.groups.flatMap((group, index) => [
         ...(index ? [<hr role="separator" key={`divider-${index}`} />] : []),
         ...group.map(item => {
-          const row = item.id.startsWith('spell:') ? null : pageMenuRows[item.id as keyof typeof pageMenuRows];
-          const Icon = row?.icon ?? SpellCheck;
-          const label = row ? t(row.label).replace('{query}', contextMenu.selection ?? '') : item.id.slice(6);
-          return <button type="button" role="menuitem" tabIndex={-1} key={item.id} disabled={!item.enabled} onClick={() => {
+          const extension = item.id.startsWith('extension:');
+          const row = item.id.startsWith('spell:') || extension ? null : pageMenuRows[item.id as keyof typeof pageMenuRows];
+          const Icon = row?.icon ?? (extension ? Puzzle : SpellCheck);
+          const label = item.label ?? (row ? t(row.label).replace('{query}', contextMenu.selection ?? '') : item.id.slice(6));
+          return <button type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked} tabIndex={-1} key={item.id} disabled={!item.enabled} onClick={() => {
             const menuId = contextMenu.id;
             contextMenuRef.current = null; setContextMenu(null);
             if (item.id === 'add-to-desktop') {

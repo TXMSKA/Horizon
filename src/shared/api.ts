@@ -10,7 +10,7 @@ export const SEARCH_ENGINES = {
   google: { displayName: 'Google', searchPrefix: 'https://www.google.com/search?q=' },
 } as const;
 export type SearchEngine = keyof typeof SEARCH_ENGINES;
-export type SettingsSection = 'general' | 'appearance' | 'privacy' | 'privacy/sites' | 'profiles';
+export type SettingsSection = 'general' | 'appearance' | 'privacy' | 'privacy/sites' | 'profiles' | 'extensions';
 export type DefaultBrowserStatus = 'default' | 'notDefault' | 'developmentBuild' | 'unsupported';
 export type UpdateState = { status: 'unavailable' | 'idle' | 'checking' | 'upToDate' | 'ready' | 'error' } | { status: 'downloading'; percent: number };
 export interface ClearedBrowsingData { history: boolean; cookies: boolean; cache: boolean }
@@ -59,9 +59,9 @@ export interface PermissionPrompt { id: string; origin: string; permissions: Sit
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 5; history: HistoryEntry[]; favorites: FavoritesTree; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { id: string; groupId: string | null; movable: boolean; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; update: UpdateState; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
-export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}`;
-export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean }
+export interface BrowserState { extensions: ExtensionState[]; extensionWarning: ExtensionWarning | null; extensionsUpdating: boolean; extensionsError: boolean; firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; update: UpdateState; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}` | `extension:${string}`;
+export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean; label?: string; checked?: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
 export type BrowserShortcut = 'new-window' | 'new-private-window' | 'reopen-tab' | 'focus-search' | 'home' | 'clear-browsing-data' | 'reload-no-cache' | 'find-next' | 'find-previous' | 'print' | 'menu' | 'capture' | 'focus-address' | 'new-tab' | 'close-tab' | 'next-tab' | 'previous-tab' | 'back' | 'forward' | 'reload' | 'stop' | 'history' | 'downloads' | 'favorites' | 'fullscreen' | 'bookmark' | 'find' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | `tab-${number}`;
 export type DesktopItemKind = 'note' | 'text' | 'area' | 'page' | 'link';
@@ -79,6 +79,12 @@ export type DesktopPanelPage = { kind: 'home' | 'captures' | 'new-project' } | {
 export interface DesktopPanelState { open: boolean; page: DesktopPanelPage }
 export type DesktopError = 'DESKTOP_COMMAND_INVALID' | 'DESKTOP_LOCKED' | 'FOLDER_NAME_INVALID' | 'FOLDER_NAME_EMPTY' | 'FOLDER_NAME_LONG' | 'FOLDER_NAME_DUPLICATE' | 'FOLDER_LIMIT' | 'FOLDER_NOT_FOUND' | 'CAPTURE_LIMIT' | 'LINK_INVALID' | 'TEXT_INVALID' | 'DESKTOP_NOT_FOUND' | 'PROJECT_NAME_INVALID' | 'PROJECT_NAME_EMPTY' | 'PROJECT_NAME_LONG' | 'PROJECT_NAME_DUPLICATE' | 'PROJECT_ADDRESS_CONFLICT' | 'PROJECT_LIMIT' | 'PROJECT_ITEM_LIMIT' | 'PROJECT_NOT_FOUND' | 'DESKTOP_ITEM_NOT_FOUND' | 'DESKTOP_ITEM_INVALID' | 'DESKTOP_STORAGE_FAILED' | 'DESKTOP_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'CAPTURE_LOADING' | 'CAPTURE_CRASHED' | 'CAPTURE_DESKTOP' | 'CAPTURE_SETTINGS';
 export type BrowserCommand =
+  | { type: 'set-extension-enabled'; id: string; enabled: boolean }
+  | { type: 'set-extension-pinned'; id: string; pinned: boolean }
+  | { type: 'remove-extension'; id: string }
+  | { type: 'open-extension'; id: string; anchor?: CaptureRect }
+  | { type: 'check-extension-updates' }
+  | { type: 'answer-extension-install'; id: string; allow: boolean }
   | { type: 'set-on-start'; value: OnStart }
   | { type: 'new-window' | 'new-private-window' | 'reopen-tab' | 'home' | 'reload-no-cache' | 'print' }
   | { type: 'pin-app' | 'unpin-app'; id: HubApp }
@@ -157,6 +163,8 @@ export type BrowserCommand =
   | { type: 'delete-bookmark'; url: string }
   | { type: 'cancel-download' | 'show-download' | 'remove-download' | 'retry-download'; id: string };
 export interface ContentArea { top: number; hidden: boolean }
+export interface ExtensionState { id: string; name: string; description: string; version: string; enabled: boolean; pinned: boolean; icon: number[] | null; action?: { title: string; badge: string; icon: number[] | null }; unsupported: string[]; permissions: string[]; failed: boolean }
+export interface ExtensionWarning { requestId: string; id: string; name: string; unsupported: string[]; permissions: string[] }
 
 export interface HorizonAPI {
   readonly initialTheme: Theme;

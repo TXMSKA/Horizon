@@ -11,6 +11,9 @@ import { readWindowSessions, writeWindowSessions } from './session-store';
 import { createSettings, resolveLanguage } from './settings';
 import { launchAddress } from './launch';
 import { darkPagesActive, setDarkPagesSwitch } from './dark-pages';
+import { existingExtensions, profileExtensions } from './extensions';
+import { isExtensionURL } from './extension-policy';
+import { isAllowedURL } from './browsing';
 import { createUpdates, localFeedURL } from './updates';
 
 // The approved design frame: the window and the interface scale are both sized against it.
@@ -60,7 +63,7 @@ if (instance) {
   ]);
 
   app.on('web-contents-created', (_event, contents) => {
-    hardenContents(contents, isProfileSession(contents.session), url => isLaunchNavigation(contents, url));
+    hardenContents(contents, isProfileSession(contents.session) || !!existingExtensions(contents.session), url => isLaunchNavigation(contents, url));
   });
 
   app.whenReady().then(async () => {
@@ -72,6 +75,8 @@ if (instance) {
     }, nativeTheme.shouldUseHighContrastColors);
     const language = resolveLanguage(settings.language, app.getLocale());
     const registry = cleanupPartitions(app.getPath('sessionData'), registryPath, readRegistry(registryPath, language), app.getPath('userData'));
+    const extensions = registry.profiles.map(profile => profileExtensions(app.getPath('userData'), profile, session.fromPartition(profile.partition), () => { for (const { browser } of windows.values()) browser.extensionsChanged(); }));
+    await Promise.all(extensions.map(manager => manager.ready));
     secureSession(session.defaultSession);
     const packageType = () => { try { return readFileSync(resolve(process.resourcesPath, 'package-type'), 'utf8').trim(); } catch { return null; } };
     const updates = createUpdates({
@@ -90,7 +95,7 @@ if (instance) {
       return page;
     };
     // A work area smaller than the design frame gets a window that still leaves room around it.
-    const createWindow = async (profileId?: string, privateWindow = false, origin?: BrowserWindow, id?: string, fresh = true, adoption?: { adopt(destinationId: string): void; point?: { x: number; y: number } }) => {
+    const createWindow = async (profileId?: string, privateWindow = false, origin?: BrowserWindow, id?: string, fresh = true, adoption?: { adopt(destinationId: string): void; point?: { x: number; y: number } }, extension?: chrome.windows.CreateData) => {
       const offset = origin && !origin.isDestroyed() ? origin.getBounds() : undefined;
       const bounds = adoption && origin && offset && (origin.isMaximized() || origin.isFullScreen()) ? origin.getNormalBounds() : offset;
       const display = adoption?.point ? screen.getDisplayNearestPoint(adoption.point) : offset ? screen.getDisplayMatching(offset) : screen.getPrimaryDisplay();
@@ -130,8 +135,16 @@ if (instance) {
       nativeTheme.on('updated', systemTheme);
       window.once('closed', () => nativeTheme.removeListener('updated', systemTheme));
       window.removeMenu();
-      const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry, undefined, { id, profileId, privateWindow, fresh, empty: Boolean(adoption), updates,
+      const browser = createBrowser(window, app.getPath('userData'), app.getPath('downloads'), settings, registry, undefined, { id, profileId, privateWindow, fresh, empty: Boolean(adoption), updates, extensionURLs: extension ? (typeof extension.url === 'string' ? [extension.url] : extension.url) : undefined,
         openWindow: (profileId, privateWindow, origin) => { void createWindow(profileId, privateWindow, origin).catch(() => console.error('Window creation failed')); },
+        extensionWindow: async (profileId, details, origin) => {
+          const profile = browser.registry().profiles.find(profile => profile.id === profileId);
+          if (!profile || details.incognito || details.tabId !== undefined || details.type && details.type !== 'normal') throw new Error('EXTENSIONS_UNAVAILABLE');
+          const urls = typeof details.url === 'string' ? [details.url] : details.url ?? [];
+          if (!Array.isArray(urls) || urls.length > 200 || urls.some(url => typeof url !== 'string' || !isAllowedURL(url) && !isExtensionURL(session.fromPartition(profile.partition), url))) throw new Error('Invalid extension window URL');
+          for (const value of [details.left, details.top, details.width, details.height]) if (value !== undefined && (!Number.isSafeInteger(value) || Math.abs(value) > 32768)) throw new Error('Invalid extension window bounds');
+          return createWindow(profileId, false, origin, undefined, true, undefined, details);
+        },
         moveWindow: async (profileId, privateWindow, origin, adopt, point) => { await createWindow(profileId, privateWindow, origin, undefined, true, { adopt, point }); } });
       // A destroyed window can no longer hand out its webContents, so the entry's key is kept from now.
       const chromeContents = window.webContents;
@@ -164,6 +177,12 @@ if (instance) {
         throw error;
       }
       entry.ready = true;
+      if (extension) {
+        const bounds = window.getBounds();
+        window.setBounds({ x: extension.left ?? bounds.x, y: extension.top ?? bounds.y, width: Math.max(640, extension.width ?? bounds.width), height: Math.max(480, extension.height ?? bounds.height) });
+        if (extension.state === 'maximized') window.maximize(); else if (extension.state === 'minimized') window.minimize(); else if (extension.state === 'fullscreen') window.setFullScreen(true);
+        if (extension.focused !== false) { window.show(); window.focus(); }
+      }
       if (launchWindow === window) launchReady = true;
       if (pendingLaunches.length) deliverLaunches();
       return window;
@@ -202,6 +221,8 @@ if (instance) {
     if (saved.length) for (const { id, profileId } of saved) await createWindow(profileId, false, undefined, id, false);
     else await createWindow(registry.activeId, false, undefined, undefined, false);
     updates.start();
+    const normalWindowOpen = () => [...windows.values()].some(({ window, browser }) => !browser.privateWindow && !window.isDestroyed());
+    for (const manager of extensions) void manager.startUpdates(normalWindowOpen).catch(() => {});
   }).catch((error: unknown) => {
     console.error(error);
     app.exit(1);
