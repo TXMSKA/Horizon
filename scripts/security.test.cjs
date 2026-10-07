@@ -3008,7 +3008,7 @@ test('main paints the resolved palette and passes both settings before loading c
     nativeTheme.shouldUseHighContrastColors = true;
     const app = new EventEmitter();
     const switchCalls = [];
-    app.commandLine = { appendSwitch(...args) { switchCalls.push(['append', ...args]); }, removeSwitch(...args) { switchCalls.push(['remove', ...args]); } };
+    app.commandLine = { appendSwitch(...args) { switchCalls.push(['append', ...args]); }, removeSwitch(...args) { switchCalls.push(['remove', ...args]); }, hasSwitch: () => false };
     app.isPackaged = true;
     app.requestSingleInstanceLock = () => true;
     app.enableSandbox = () => {};
@@ -4934,7 +4934,7 @@ test('browser panel routes are removed, panels use the menu anchor and all menu 
 test('About uses the app version, a labelled modal and Close focus with Escape restoration', () => {
   const hooks = notebookTestHooks(), { AboutHorizon } = interfaceModule('src/AboutHorizon.tsx', { react: hooks.react, './copy': interfaceModule('src/copy.ts'), './HorizonMark': { HorizonMark: 'mark' } });
   const focus = [], modal = [], opener = { current: { focus: () => focus.push('menu') } }; let dismissed = 0;
-  const tree = hooks.render(() => AboutHorizon({ language: 'en', version: '2.3.4', opener, onClose: () => dismissed++ }));
+  const tree = hooks.render(() => AboutHorizon({ language: 'en', version: '2.3.4', update: { status: 'idle' }, opener, onClose: () => dismissed++, onRestart() {} }));
   assert.equal(tree.type, 'dialog'); assert.equal(tree.props['aria-labelledby'], notebookNodes(tree, node => node.type === 'h2')[0].props.id);
   assert.equal(notebookNodes(tree, node => node.type === 'p')[0].props.children, 'Version 2.3.4');
   tree.props.ref.current = { showModal: () => modal.push('open'), close: () => modal.push('close') };
@@ -4942,6 +4942,69 @@ test('About uses the app version, a labelled modal and Close focus with Escape r
   assert.deepEqual(modal, ['open']); assert.deepEqual(focus, ['close']); button.props.onClick(); assert.equal(dismissed, 1);
   tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); assert.equal(dismissed, 2);
   hooks.dispose(); assert.deepEqual(modal, ['open', 'close']); assert.deepEqual(focus, ['close', 'menu']);
+});
+
+test('About shows one polite update line that stays empty while idle and restarts only from the ready line', () => {
+  const { copy } = interfaceModule('src/copy.ts');
+  for (const key of ['updateUpToDate', 'updateChecking', 'updateDownloading', 'updateReady', 'updateRestart', 'updateUnavailable', 'updateError']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim());
+  assert.ok(copy.updateDownloading.en.includes('{percent}') && copy.updateDownloading.es.includes('{percent}'));
+  const render = (language, update, onRestart = () => {}) => {
+    const hooks = notebookTestHooks(), { AboutHorizon } = interfaceModule('src/AboutHorizon.tsx', { react: hooks.react, './copy': interfaceModule('src/copy.ts'), './HorizonMark': { HorizonMark: 'mark' } });
+    return hooks.render(() => AboutHorizon({ language, version: '1.0.0', update, opener: { current: null }, onClose() {}, onRestart }));
+  };
+  const line = tree => { const nodes = notebookNodes(tree, node => node.props.className === 'settings-feedback'); assert.equal(nodes.length, 1); assert.equal(nodes[0].props.role, 'status'); assert.equal(nodes[0].props['aria-live'], 'polite'); return nodes[0]; };
+  assert.equal(line(render('en', { status: 'idle' })).props.children, null);
+  for (const [update, expected] of [[{ status: 'upToDate' }, 'Horizon is up to date'], [{ status: 'checking' }, 'Checking for updates'], [{ status: 'downloading', percent: 42 }, 'Downloading update (42%)'], [{ status: 'unavailable' }, 'Updates are not available in this build'], [{ status: 'error' }, 'Could not check for updates']]) {
+    const tree = render('en', update); assert.equal(line(tree).props.children, expected); assert.equal(notebookNodes(tree, node => node.type === 'button').length, 1);
+  }
+  assert.equal(line(render('es', { status: 'downloading', percent: 7 })).props.children, 'Descargando la actualización (7%)');
+  let restarts = 0; const ready = render('es', { status: 'ready' }, () => restarts++), buttons = notebookNodes(ready, node => node.type === 'button');
+  assert.equal(buttons.length, 2); assert.equal(buttons[0].props.children, 'Reiniciar'); assert.equal(notebookNodes(ready, node => node.type === 'span')[0].props.children, 'Reiniciá Horizon para terminar de actualizar');
+  buttons[0].props.onClick(); assert.equal(restarts, 1);
+});
+
+test('restart-to-update is a bare settings command', () => {
+  assert.deepEqual(validateCommand({ type: 'restart-to-update' }), { type: 'restart-to-update' });
+  assert.throws(() => validateCommand({ type: 'restart-to-update', force: true }), /SETTINGS_COMMAND_INVALID/);
+});
+
+test('updates stay unavailable outside packaged Windows, AppImage and deb installs and accept only loopback feeds', async () => {
+  const { createUpdates, localFeedURL } = require('../dist/electron/updates.js');
+  for (const [value, expected] of [['http://127.0.0.1:8123/feed', 'http://127.0.0.1:8123/feed'], ['http://localhost/', 'http://localhost/'], ['https://127.0.0.1/', undefined], ['http://example.com/', undefined], ['http://127.0.0.1.example.com/', undefined], ['http://user:pass@127.0.0.1/', undefined], ['file:///feed', undefined], ['not a url', undefined], ['', undefined], [undefined, undefined]]) assert.equal(localFeedURL(value), expected, String(value));
+  let loads = 0; const load = async () => { loads++; throw new Error('The updater must not load'); };
+  for (const options of [{ platform: 'win32', packaged: false }, { platform: 'darwin', packaged: true }, { platform: 'linux', packaged: true }, { platform: 'linux', packaged: true, packageType: 'rpm' }]) {
+    const updates = createUpdates({ appImage: false, packageType: null, ...options, load });
+    assert.deepEqual(updates.state, { status: 'unavailable' }); await updates.check(); updates.start(); assert.throws(() => updates.restart());
+  }
+  assert.equal(loads, 0);
+  for (const options of [{ platform: 'win32', packaged: true, appImage: false, packageType: null }, { platform: 'linux', packaged: true, appImage: true, packageType: null }, { platform: 'linux', packaged: true, appImage: false, packageType: 'deb' }]) assert.deepEqual(createUpdates({ ...options, load }).state, { status: 'idle' });
+});
+
+test('updates follow the updater events, log failures without dialogs and restart only a downloaded update', async t => {
+  const { EventEmitter } = require('node:events'), { createUpdates } = require('../dist/electron/updates.js');
+  const feeds = [], installs = [], errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args));
+  const updater = Object.assign(new EventEmitter(), { setFeedURL: value => feeds.push(value), quitAndInstall: (...args) => installs.push(args), checkForUpdates: async () => ({}) });
+  const updates = createUpdates({ platform: 'win32', packaged: true, appImage: false, packageType: null, feed: 'http://127.0.0.1:1/', load: async () => updater }), seen = [];
+  updates.subscribe(() => seen.push(updates.state.status));
+  assert.throws(() => updates.restart(), /No update is ready/);
+  updater.checkForUpdates = async () => { updater.emit('update-not-available'); return {}; };
+  await updates.check(); assert.deepEqual(seen, ['checking', 'upToDate']);
+  assert.deepEqual([updater.autoDownload, updater.autoInstallOnAppQuit, updater.allowPrerelease, updater.allowDowngrade], [true, true, false, false]);
+  assert.deepEqual(feeds, [{ provider: 'generic', url: 'http://127.0.0.1:1/' }]);
+  updater.checkForUpdates = async () => { throw new Error('offline'); };
+  await updates.check(); assert.equal(updates.state.status, 'error'); assert.equal(errors.length, 1);
+  updater.checkForUpdates = async () => { updater.emit('update-available'); updater.emit('download-progress', { percent: 41.6 }); return {}; };
+  await updates.check(); assert.deepEqual(updates.state, { status: 'downloading', percent: 42 });
+  let checks = 0; updater.checkForUpdates = async () => { checks++; return {}; };
+  await updates.check(); assert.equal(checks, 0); assert.throws(() => updates.restart()); assert.deepEqual(installs, []);
+  updater.emit('update-downloaded'); assert.deepEqual(updates.state, { status: 'ready' });
+  await updates.check(); assert.equal(checks, 0);
+  updates.restart(); assert.deepEqual(installs, [[true, true]]); assert.equal(feeds.length, 1);
+  const inactive = createUpdates({ platform: 'win32', packaged: true, appImage: false, packageType: null, load: async () => Object.assign(new EventEmitter(), { checkForUpdates: async () => null }) });
+  await inactive.check(); assert.equal(inactive.state.status, 'unavailable');
+  const timed = createUpdates({ platform: 'win32', packaged: true, appImage: false, packageType: null, firstCheckDelay: 1, checkInterval: 20, load: async () => Object.assign(new EventEmitter(), { checkForUpdates: async () => { checks++; return {}; } }) });
+  timed.start(); timed.start(); await new Promise(done => setTimeout(done, 100)); assert.ok(checks >= 2, String(checks));
 });
 
 test('preview starts with the kept screenshot and crop handles use one or ten pixels within image bounds', () => {
@@ -5904,8 +5967,8 @@ test('local HTML launch authorizes only its exact tab main-frame URL and survive
 });
 
 function settingsMain(t, options) {
-  const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm'), filename = resolve('dist/electron/main.js'), localRequire = require('node:module').createRequire(filename), directory = temporaryDirectory(t, 'settings-main'), windows = [], launches = [], handlers = new Map();
-  const app = Object.assign(new EventEmitter(), { isPackaged: true, requestSingleInstanceLock: () => options.lock !== false, getLocale: () => 'es-AR', getVersion: () => '0.1.0-test', getPath: () => directory, enableSandbox() {}, whenReady: async () => {}, commandLine: { appendSwitch() {}, removeSwitch() {} }, quit() { this.quits = (this.quits || 0) + 1; }, exit() { assert.fail('Mock main failed'); } });
+  const { EventEmitter } = require('node:events'), { compileFunction } = require('node:vm'), filename = resolve('dist/electron/main.js'), localRequire = require('node:module').createRequire(filename), directory = temporaryDirectory(t, 'settings-main'), windows = [], launches = [], handlers = new Map(), updated = { options: undefined, started: 0 };
+  const app = Object.assign(new EventEmitter(), { isPackaged: true, requestSingleInstanceLock: () => options.lock !== false, getLocale: () => 'es-AR', getVersion: () => '0.1.0-test', getPath: () => directory, enableSandbox() {}, whenReady: async () => {}, commandLine: { appendSwitch() {}, removeSwitch() {}, hasSwitch: name => (options.switches ?? []).includes(name) }, quit() { this.quits = (this.quits || 0) + 1; }, exit(code) { if (!options.switches) assert.fail('Mock main failed'); this.exitCode = code; } });
   const settings = { theme: 'system', contrast: 'standard', darkPages: 'off', darkStrength: 'standard', darkTone: 'neutral', migrationAllowed: false, language: 'en', onStart: options.onStart ?? 'restore' };
   const primary = { workAreaSize: { width: 1440, height: 900 }, workArea: { x: 0, y: 0, width: 1440, height: 900 } }, secondary = options.display ?? primary;
   class Window extends EventEmitter {
@@ -5927,11 +5990,21 @@ function settingsMain(t, options) {
       return { windowId: randomUUID(), privateWindow: browserOptions.privateWindow, activeProfile: () => browserOptions.profileId, registry: () => registry, layout() {}, openLaunch(url) { if (options.launchFail) throw new Error('Tab limit reached'); launches.push(url); } };
     }, isProfileSession: () => false, isLaunchNavigation: () => false };
     if (name === './protocol') return { serveHorizon: async () => {} };
+    if (name === './updates') return { createUpdates: updatesOptions => { updated.options = updatesOptions; return { state: { status: 'idle' }, start() { updated.started++; }, subscribe() { return () => {}; }, restart() {} }; }, localFeedURL: value => value };
     if (name === './security') return { ...localRequire(name), secureSession() {}, validateSender() {} };
     return localRequire(name);
-  }, require('node:path').dirname(filename), { argv: options.args ?? ['Horizon.exe'] });
-  return { app, settings, windows, launches, handlers, directory };
+  }, require('node:path').dirname(filename), { argv: options.args ?? ['Horizon.exe'], env: options.env ?? {}, platform: 'win32', resourcesPath: directory });
+  return { app, settings, windows, launches, handlers, directory, updated };
 }
+
+test('a packaged main refuses remote debugging switches before taking the instance lock or creating a window', async t => {
+  for (const name of ['remote-debugging-port', 'remote-debugging-pipe']) {
+    const main = settingsMain(t, { switches: [name], lock: false }); await new Promise(done => setImmediate(done));
+    assert.equal(main.app.exitCode, 1); assert.equal(main.app.quits, undefined); assert.deepEqual(main.windows, []); assert.equal(main.updated.options, undefined);
+  }
+  const main = settingsMain(t, { switches: [] }); await new Promise(done => setImmediate(done));
+  assert.equal(main.app.exitCode, undefined); assert.equal(main.windows.length, 1);
+});
 
 test('main holds startup and second-instance URLs until chrome loads, restores and focuses; no lock creates no window', async t => {
   const rejected = settingsMain(t, { lock: false }); await new Promise(done => setImmediate(done)); assert.equal(rejected.app.quits, 1); assert.deepEqual(rejected.windows, []);
@@ -5947,6 +6020,12 @@ test('main holds startup and second-instance URLs until chrome loads, restores a
   options.launchFail = true; main.windows[0].focused = false; assert.doesNotThrow(() => main.app.emit('second-instance', {}, ['https://capped.example/'], main.directory)); assert.equal(main.windows[0].focused, true);
   const event = { sender: main.windows[0].webContents, senderFrame: main.windows[0].webContents.mainFrame };
   assert.equal(main.handlers.get('horizon:language')(event), 'en'); main.settings.language = 'system'; assert.equal(main.handlers.get('horizon:language')(event), 'es');
+});
+test('main starts the updater once after the first window and hands every window the same updater', async t => {
+  const main = settingsMain(t, { env: { HORIZON_UPDATE_URL: 'http://127.0.0.1:9/' } }); await new Promise(setImmediate);
+  assert.equal(main.updated.started, 1); assert.equal(main.updated.options.feed, 'http://127.0.0.1:9/'); assert.equal(main.updated.options.packaged, true);
+  main.windows[0].browserOptions.openWindow(main.windows[0].browserOptions.profileId, false, main.windows[0]); await new Promise(setImmediate);
+  assert.equal(main.windows[1].browserOptions.updates, main.windows[0].browserOptions.updates); assert.equal(main.updated.started, 1);
 });
 test('main creates default-sized offset normal and private windows, routes chrome and restores every normal owner', async t => {
   const main = settingsMain(t, {}); await new Promise(setImmediate);
