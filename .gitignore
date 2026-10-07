@@ -8,3 +8,5 @@ dist/
 coverage/
 *.log
 release/
+docs/flows/comments/
+horizon-scope.md
