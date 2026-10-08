@@ -509,7 +509,7 @@ const themesPopup = () => popover({ shadow: false, w: HUB_W, h: HUB_H, pad: 16, 
       row({ gap: 12 }, smallTheme("High contrast", CONTRAST_DARK, { installed: true }))),
     col({ gap: 8 }, label("Marketplace"),
       ...[0, 2].map((start) => row({ gap: 12 }, ...["Fjord", "Dune", "Graphite", "Moss"].slice(start, start + 2).map((title, i) =>
-        smallTheme(title, title === "Fjord" ? FJORD : (start + i) % 2 ? DAYLIGHT : AMBER, { variant: title === "Fjord" ? -1 : start + i })))))));
+        smallTheme(title, { Fjord: FJORD, Dune: DUNE, Graphite: GRAPHITE, Moss: MOSS }[title])))))));
 const themes = () => horizonWindow(AMBER, [routesSite()], { tabs: SITE_TABS, active: 1, bar: SITE_BAR, activeButton: "hub", overlays: [themesPopup()], label: "Site" });
 
 
@@ -644,6 +644,55 @@ export const FJORD = {
   overlay: "rgba(8,20,25,0.65)", shadow: "#10191d", "cover-from": "#2d424a", "cover-to": "#142127",
   white: "#eef5f6", chrome: "#142127", page: "#18252b", sky: "#18252b", ground: "#142127",
   horizon: "#a4d1da", sun: "#a4d1da", field: "#24353c", "field-line": "#819da7",
+};
+
+// Graphite uses Amber's roles on near-neutral greys with a calm periwinkle accent.
+export const GRAPHITE = {
+  ...AMBER,
+  canvas: "#0e0f11", surface: "#1b1c1f", "surface-2": "#222327", "surface-3": "#2b2d31",
+  glass: "rgba(20, 21, 24, 0.9)", hover: "#1d1e22",
+  "border-subtle": "#26272b", line: "#313338", "line-strong": "#484a50", frame: "#7f828a",
+  title: "#e8e9ec", text: "#cfd1d6", soft: "#a3a6ad", dim: "#989ba3",
+  primary: "#aab6e0", "primary-hover": "#bdc7e8", "on-primary": "#141826",
+  wash: "#22263a", "on-wash": "#c9d2f0", "primary-border": "rgba(170, 182, 224, 0.4)",
+  error: "#e5958f", "error-wash": "#2b1b1c", success: "#93c6a4", warning: "#d6bb7a", info: "#9fc0d8",
+  purple: "#bfa8d6", cyan: "#8fc3c4",
+  overlay: "rgba(0, 0, 0, 0.6)", shadow: "#000000", "cover-from": "#484a50", "cover-to": "#131416", white: "#e8e9ec",
+  chrome: "#131416", page: "#18191b", sky: "#18191b", ground: "#121315", horizon: "#aab6e0", sun: "#aab6e0",
+  field: "#202125", "field-line": "#34363b",
+};
+
+// Dune is a light theme made by hand like Daylight: a dim sand floor, a raised layer one step lighter,
+// shadows in the floor's hue, and a deep clay accent kept to small marks.
+export const DUNE = {
+  ...DAYLIGHT,
+  canvas: "#efe8dd", surface: "#f6f1ea", "surface-2": "#e5ddd0", "surface-3": "#ded5c7",
+  glass: "rgba(236, 228, 216, 0.9)", hover: "#e8e0d4",
+  "border-subtle": "#e0d8cb", line: "#d9d0c2", "line-strong": "#c5baa9", frame: "#80766a",
+  title: "#3d3328", text: "#4a4035", soft: "#5d5246", dim: "#62574b",
+  primary: "#7a4527", "primary-hover": "#6b3c21", "on-primary": "#f6f1ea",
+  wash: "#eadccd", "on-wash": "#6b3c21", "primary-border": "rgba(122, 69, 39, 0.3)",
+  error: "#8a3833", "error-wash": "#f1e0d9", success: "#3c5d3a", warning: "#6d4c1f", info: "#3f527a",
+  purple: "#674a7a", cyan: "#2f5f63",
+  overlay: "rgba(61, 51, 40, 0.24)", shadow: "#d2c6b5", "cover-from": "#e5ddd0", "cover-to": "#f6f1ea", white: "#f6f1ea",
+  chrome: "#e9e1d5", page: "#efe8dd", sky: "#efe8dd", ground: "#ebe3d7", horizon: "#a99d8b", sun: "#7a4527",
+  field: "#f6f1ea", "field-line": "#d9d0c2",
+};
+
+// Moss is a light theme on a sage-grey floor with a deep moss accent, made by the same recipe as Dune.
+export const MOSS = {
+  ...DAYLIGHT,
+  canvas: "#eaede6", surface: "#f2f4ef", "surface-2": "#dfe3da", "surface-3": "#d9ddd3",
+  glass: "rgba(229, 233, 224, 0.9)", hover: "#e2e6dd",
+  "border-subtle": "#dbdfd5", line: "#d3d8cd", "line-strong": "#bdc3b5", frame: "#737a6d",
+  title: "#2f382b", text: "#3c4637", soft: "#4f5949", dim: "#545e4e",
+  primary: "#3f5b2e", "primary-hover": "#354f26", "on-primary": "#f2f4ef",
+  wash: "#dce5d3", "on-wash": "#354f26", "primary-border": "rgba(63, 91, 46, 0.3)",
+  error: "#8a3a36", "error-wash": "#efe1de", success: "#2f5d47", warning: "#6a4d1f", info: "#3c5180",
+  purple: "#654a78", cyan: "#2d5e60",
+  overlay: "rgba(47, 56, 43, 0.24)", shadow: "#c7cdbf", "cover-from": "#dfe3da", "cover-to": "#f2f4ef", white: "#f2f4ef",
+  chrome: "#e3e7de", page: "#eaede6", sky: "#eaede6", ground: "#e6e9e2", horizon: "#9aa290", sun: "#3f5b2e",
+  field: "#f2f4ef", "field-line": "#d3d8cd",
 };
 
 export function scaled(node, factor, prefix) {
