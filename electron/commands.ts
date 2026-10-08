@@ -1,4 +1,4 @@
-import { IMPORT_BROWSERS } from '../src/shared/api';
+import { IMPORT_BROWSERS, SYNC_ITEMS } from '../src/shared/api';
 import { validateLyraCommand } from '../src/shared/lyra';
 import { validateTranslateCommand } from '../src/shared/translate';
 import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
@@ -42,6 +42,19 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
 function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
   const command = object(value);
   const type = command.type;
+  if (typeof type === 'string' && type.startsWith('sync-')) {
+    let fields: string[] = [], valid = false;
+    switch (type) {
+      case 'sync-create': fields = ['accepted']; valid = command.accepted === true; break;
+      case 'sync-join': fields = ['accepted', 'key']; valid = command.accepted === true && string(command.key, 128); break;
+      case 'sync-set-item': fields = ['item', 'enabled']; valid = SYNC_ITEMS.includes(command.item as typeof SYNC_ITEMS[number]) && typeof command.enabled === 'boolean'; break;
+      case 'sync-now': case 'sync-reveal-key': case 'sync-save-key': valid = true; break;
+      case 'sync-leave': fields = ['removeOwnFiles']; valid = typeof command.removeOwnFiles === 'boolean'; break;
+      case 'sync-restore-conflict': case 'sync-dismiss-conflict': fields = ['id']; valid = isProfileId(command.id); break;
+    }
+    if (!valid || Object.keys(command).length !== fields.length + 1 || !fields.every(key => Object.hasOwn(command, key))) throw new Error('SYNC_INVALID');
+    return value as BrowserCommand;
+  }
   if (typeof type === 'string' && type.startsWith('translate-')) return validateTranslateCommand(value);
   if (typeof type === 'string' && type.startsWith('lyra-')) return validateLyraCommand(value);
   if (typeof type === 'string' && (type.startsWith('vault-') || type === 'set-vault-timeout')) {
@@ -63,7 +76,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     let valid = false;
     switch (type) {
       case 'set-on-start': allowed.push('value'); valid = isOnStart(command.value); break;
-      case 'open-settings': allowed.push('section'); valid = ['general', 'appearance', 'privacy', 'privacy/sites', 'profiles', 'extensions'].includes(command.section as string); break;
+      case 'open-settings': allowed.push('section'); valid = ['general', 'appearance', 'privacy', 'privacy/sites', 'profiles', 'extensions', 'sync'].includes(command.section as string); break;
       case 'set-search-engine': allowed.push('value'); valid = isSearchEngine(command.value); break;
       case 'set-language': allowed.push('value'); valid = isLanguageSetting(command.value); break;
       case 'set-show-capture': case 'set-ask-where-to-save': case 'set-block-ads': case 'set-block-third-party-cookies': case 'set-clear-history-on-close': case 'set-clear-cache-on-close': allowed.push('value'); valid = typeof command.value === 'boolean'; break;

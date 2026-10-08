@@ -599,7 +599,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .browser-history-days { display: flex; flex-direction: column; gap: var(--space-12); }
 .browser-history-day { display: flex; flex-direction: column; gap: var(--space-4); }
 .browser-history-day + .browser-history-day { border-top: var(--border-width) solid var(--divider); padding-top: var(--space-12); }
-.browser-history-day h3 { margin: 0; font-size: var(--type-caption); line-height: var(--line-caption); font-weight: var(--weight-emphasis); color: var(--text-secondary); }
+.browser-history-day h3, .browser-history-label { margin: 0; font-size: var(--type-caption); line-height: var(--line-caption); font-weight: var(--weight-emphasis); color: var(--text-secondary); }
 .browser-history-day .browser-library-list { gap: var(--space-4); }
 .browser-library-row { position: relative; display: flex; flex-wrap: wrap; align-items: center; border-radius: var(--radius-small); }
 .browser-library-link { display: flex; flex: 1; align-items: center; gap: var(--space-10); min-width: 0; color: var(--text-title); font-size: var(--type-label); line-height: var(--line-label); text-decoration: none; border-radius: var(--radius-small); }

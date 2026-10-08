@@ -49,6 +49,9 @@ import { emptySession, lazySession, LEGACY_WINDOW_ID, migrateSession, readWindow
 import type { SessionTab, WindowSessions } from './session-store';
 import { existingExtensions, profileExtensions } from './extensions';
 import { isExtensionURL } from './extension-policy';
+import { emptySyncState, SyncEngine } from './sync-engine';
+import { browserSyncHost } from './sync-browser';
+import { syncFailure } from './sync-format';
 
 interface TabHost { translation(tab: Tab): TranslateHost; alive(tab: Tab): boolean; update(): void; publish(): void; fail(tab: Tab, description: string): void; close(tab: Tab): void; count(): number }
 interface Tab { translation?: ReturnType<typeof createTranslation>; contentLanguage?: string | null; host: TabHost; unbind?: () => void; viewNavigation?: { pending?: number; entries: { generation: number; urls: Set<string> }[] }; restore?: SessionTab; restoring?: SessionTab; state: TabState; view?: WebContentsView; retryDownload?: string; findRequest?: number; navigation?: number; committed?: boolean; committedURL?: string; faviconBytes?: Buffer; faviconSite?: string; faviconRequest?: AbortController; topURL?: string; pageLoad: number; refusedCookies: Set<string>; cosmeticPending?: boolean; navigating?: boolean; darkCSS?: { contents: WebContents; key: string }; darkCSSWork?: Promise<void> }
@@ -107,9 +110,10 @@ function attachSession(target: Session, owner: SessionOwner) {
   return () => { owners!.delete(owner); if (!owners!.size) { sessionOwners.delete(target); profileSessions.delete(target); } };
 }
 
-type BrowserOwner = { window: BrowserWindow; privateWindow: boolean; activeProfile(): string; publish(): void; flush(): void; stop(): void; releasePrivate(): void; persistSessions(): void; settingsChanged(): void; closeVault(): Promise<void>; disposeProfile(id: string): void; registryChanged(): void; runtime(id: string): unknown };
+type BrowserOwner = { window: BrowserWindow; privateWindow: boolean; activeProfile(): string; publish(): void; flush(): void; stop(): void; releasePrivate(): void; persistSessions(): void; settingsChanged(): void; syncApplied(): void; syncReady(): boolean; closeVault(): Promise<void>; disposeProfile(id: string): void; registryChanged(): void; runtime(id: string): unknown };
 interface ProfileData { store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number; importProgress: ImportProgress | null }
 export interface BrowserGroup {
+  sync?: SyncEngine;
   registry: ProfileRegistry; owners: Map<string, BrowserOwner>; profiles: Map<string, ProfileData>;
   privatePartition?: string; privateCount: number; privateCleanup: Set<Promise<unknown>>; quitting?: Promise<void>; quitCleared: boolean; quitRequested?: boolean;
 }
@@ -182,6 +186,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   };
   const current = () => runtimes.get(selectedProfile)!;
   const state = (): BrowserState => ({
+    sync: privateWindow ? emptySyncState() : shared.sync?.state() ?? emptySyncState(),
     ...current().state(), firstRun: !settings.onboarded && !privateWindow, version: app.getVersion(), update: options.updates?.state ?? { status: 'unavailable' }, activeProfileId: selectedProfile, privateWindow,
     extensionWarning: extensionDecision?.warning ?? null,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
@@ -210,11 +215,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   });
   const blocker = createBlockingEngine(userData, publish);
   const defaultBrowser = defaultBrowserOverride ?? createDefaultBrowser({ platform: process.platform, isPackaged: app.isPackaged, execPath: process.execPath, openExternal: url => shell.openExternal(url), changed: publish });
-  const refreshDefaultBrowser = () => { void defaultBrowser.refresh().then(publish); };
+  const refreshDefaultBrowser = () => { void defaultBrowser.refresh().then(publish); if (!privateWindow) shared.sync?.focus(); };
   window.on('focus', refreshDefaultBrowser);
   const unsubscribeUpdates = options.updates?.subscribe(publish);
   const layout = () => { for (const runtime of runtimes.values()) runtime.layout(); };
-  const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); shared.registry = next; registry = next; for (const owner of shared.owners.values()) owner.registryChanged(); };
+  const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); shared.registry = next; registry = next; shared.sync?.markDirty('profiles'); for (const owner of shared.owners.values()) owner.registryChanged(); };
   const runtimeFor = (profile: Profile) => {
     let runtime = runtimes.get(profile.id);
     if (!runtime) { runtime = createRuntime(profile); runtimes.set(profile.id, runtime); }
@@ -250,6 +255,36 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (command.type.startsWith('vault-') || command.type === 'set-vault-timeout') return vault.run(command as VaultCommand);
     if (['navigate', 'activate-tab', 'close-tab', 'switch-profile', 'home', 'back', 'forward', 'reload', 'new-tab', 'open-settings', 'zoom', 'fullscreen', 'move-tab-to-window'].includes(command.type)) vault.invalidate();
     if (privateWindow) assertPrivateCommand(command);
+    if (command.type.startsWith('sync-')) {
+      const sync = shared.sync!;
+      switch (command.type) {
+        case 'sync-create': case 'sync-join': return (async () => {
+          let choice: Electron.OpenDialogReturnValue;
+          try { choice = await dialog.showOpenDialog(window, { properties: ['openDirectory'] }); } catch { throw new Error('SYNC_FOLDER'); }
+          if (choice.canceled) throw new Error('SYNC_CANCELLED');
+          try {
+            if (command.type === 'sync-create') await sync.create(choice.filePaths[0] ?? '', command.accepted);
+            else await sync.join(choice.filePaths[0] ?? '', command.key, command.accepted);
+            await sync.pulse(true);
+          } catch (error) { throw new Error(syncFailure(error)); }
+        })();
+        case 'sync-set-item': return sync.setItem(command.item, command.enabled);
+        case 'sync-now': return sync.pulse(true);
+        case 'sync-leave': return sync.leave(command.removeOwnFiles);
+        case 'sync-reveal-key': return sync.revealKey();
+        case 'sync-save-key': return (async () => {
+          const key = sync.revealKey();
+          try {
+            const choice = await dialog.showSaveDialog(window, { defaultPath: 'Horizon Sync code.txt', filters: [{ name: 'TXT', extensions: ['txt'] }] });
+            if (choice.canceled || !choice.filePath) return false;
+            // The chosen export is the only plaintext file; IPC never accepts a key or a destination path.
+            writeFileSync(/\.txt$/i.test(choice.filePath) ? choice.filePath : `${choice.filePath}.txt`, `${key}\n`, { mode: 0o600 }); return true;
+          } catch { throw new Error('SYNC_SAVE_FAILED'); }
+        })();
+        case 'sync-restore-conflict': return sync.restoreConflict(command.id);
+        case 'sync-dismiss-conflict': return sync.dismissConflict(command.id);
+      }
+    }
     if (privateWindow && ['switch-profile', 'create-profile', 'update-profile', 'delete-profile', 'set-blocking', 'set-site-permission', 'answer-permission', 'reset-site', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].includes(command.type)) throw new Error('Private window settings are fixed');
     switch (command.type) {
       case 'answer-extension-install':
@@ -384,7 +419,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!data) {
       const status = { readError: false, memoryOnly: false }, sessionStatus = { readError: false, memoryOnly: false };
       const store = readStore(storePath, safeStorage, status);
-      const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { for (const owner of shared.owners.values()) { owner.persistSessions(); owner.publish(); } });
+      const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { shared.sync?.markDirty('desktop'); for (const owner of shared.owners.values()) { owner.persistSessions(); owner.publish(); } });
       const own = (url: string) => url === LYRA_ADDRESS || url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
       data = { store, status, desktop, sessions: readWindowSessions(resolve(dirname(storePath), 'session.json'), safeStorage, own, sessionStatus), sessionStatus, favoritesVersion: 0, importProgress: null };
       shared.profiles.set(profile.id, data);
@@ -572,11 +607,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const saved = { id: windowId, selected: isCurrent(), session: next };
         const index = profileData.sessions.windows.findIndex(saved => saved.id === windowId);
         if (index < 0) profileData.sessions.windows.push(saved); else profileData.sessions.windows[index] = saved;
-        writeWindowSessions(sessionPath, profileData.sessions, safeStorage); sessionError = false;
+        writeWindowSessions(sessionPath, profileData.sessions, safeStorage); sessionError = false; shared.sync?.markDirty('tabs');
       } catch { sessionError = true; }
     };
     const persistSession = () => {
       if (!recordsBrowsing(privateWindow) || disposed || closing || sessionStatus.memoryOnly) return;
+      shared.sync?.markDirty('tabs');
       clearTimeout(sessionWrite); sessionWrite = setTimeout(() => { flushSession(); publish(); }, 500);
     };
     const flush = () => {
@@ -588,10 +624,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       publish();
     };
     const persist = () => {
+      if (recordsBrowsing(privateWindow)) for (const item of ['favorites', 'history', 'siteSettings'] as const) shared.sync?.markDirty(item);
       if (recordsBrowsing(privateWindow) && !disposed && !readStatus.memoryOnly && pendingWrite === undefined) pendingWrite = setTimeout(flush, 500);
     };
     const saveNow = () => {
       if (privateWindow) return;
+      for (const item of ['favorites', 'history', 'siteSettings'] as const) shared.sync?.markDirty(item);
       clearTimeout(pendingWrite); pendingWrite = undefined;
       if (readStatus.memoryOnly) { storageError = true; throw new Error('PROFILE_SETTINGS_SAVE_FAILED'); }
       try { writeStore(storePath, store, safeStorage); storageError = false; }
@@ -619,6 +657,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       }
       clearTimeout(pendingWrite); pendingWrite = undefined;
       storageError = false; profileData.favoritesVersion++;
+      for (const item of ['favorites', 'history'] as const) shared.sync?.markDirty(item);
       for (const owner of shared.owners.values()) owner.publish();
     };
     const editFavorites = (edit: () => void) => editStore(edit, 'FAVORITE_STORAGE_FAILED');
@@ -1866,6 +1905,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         try { clearStoredHistoryOnClose(storePath, store, safeStorage, writeStore); } catch { storageFailure(new Error('History clearing failed')); }
         if (store.clearCacheOnClose) try { await session.fromPartition(profile.partition).clearCache(); } catch { storageFailure(new Error('Cache clearing failed')); }
       })).then(async () => {
+        await shared.sync?.pulse(true).catch(() => undefined); shared.sync?.stop();
         await Promise.allSettled([...shared.owners.values()].map(owner => owner.closeVault()));
         await Promise.allSettled([...shared.privateCleanup]);
         shared.quitCleared = true;
@@ -1882,8 +1922,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     }
   };
   let vaultClosed = false, vaultClosing: Promise<void> | undefined;
+  let syncClosed = false, syncClosing: Promise<void> | undefined;
   window.on('close', (event: Electron.Event) => {
     flush();
+    if (!syncClosed && !privateWindow && shared.owners.size === 1 && !shared.quitting && shared.sync?.state().configured) {
+      event.preventDefault();
+      syncClosing ??= shared.sync.pulse(true).catch(() => undefined).then(() => { syncClosed = true; window.close(); });
+      return;
+    }
     if (!vaultClosed && vault.hasSession()) {
       event.preventDefault();
       vaultClosing ??= vault.close().catch(() => undefined).then(() => { vaultClosed = true; window.close(); });
@@ -1910,10 +1956,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const saved = data?.sessions ?? readWindowSessions(path, safeStorage, url => url.startsWith('horizon://desktop/'), status);
       if (!saved.windows.some(window => window.id === windowId)) continue;
       saved.windows = saved.windows.filter(window => window.id !== windowId);
-      if (!status.memoryOnly) try { writeWindowSessions(path, saved, safeStorage); } catch { registryError = true; }
+      if (!status.memoryOnly) try { writeWindowSessions(path, saved, safeStorage); shared.sync?.markDirty('tabs'); } catch { registryError = true; }
     }
     if (privateWindow) cleanupPrivate();
-    if (!shared.owners.size) { for (const data of shared.profiles.values()) data.desktop.dispose(); groups.delete(userData); }
+    if (!shared.owners.size) { shared.sync?.stop(); for (const data of shared.profiles.values()) data.desktop.dispose(); groups.delete(userData); }
     app.removeListener('before-quit', beforeQuit);
     window.removeListener('focus', refreshDefaultBrowser);
     unsubscribeUpdates?.();
@@ -1937,8 +1983,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   };
   const owner: BrowserOwner = { window, privateWindow, activeProfile: () => selectedProfile, publish, flush, stop: () => { closing = true; blocker.stop(); for (const runtime of runtimes.values()) runtime.stopForClear(); },
     releasePrivate: cleanupPrivate, closeVault: () => vault.close(),
+    syncReady: () => [...runtimes.values()].every(runtime => !runtime.state().storageError && !runtime.desktop.state().desktopStorageError),
+    syncApplied: () => { for (const runtime of runtimes.values()) { runtime.permissions.reconcile(); for (const tab of runtime.tabs) runtime.applyDarkCSS(tab); } },
     persistSessions: () => { for (const runtime of runtimes.values()) runtime.persistSession(); },
     settingsChanged: () => {
+      shared.sync?.markDirty('settings');
       updateDarkPages();
       for (const runtime of runtimes.values()) {
         if (blockingEnabled !== settings.blockAds) runtime.resetCounts();
@@ -1958,6 +2007,15 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       layout(); publish();
     }, runtime: id => runtimeFor(registry.profiles.find(profile => profile.id === id)!) };
   shared.owners.set(windowId, owner);
+  if (!privateWindow && !shared.sync) {
+    const changed = () => { for (const owner of shared.owners.values()) owner.publish(); };
+    const host = browserSyncHost(userData, safeStorage, settings, { profiles: shared.profiles, registry: () => shared.registry,
+      registryChanged: next => { shared.registry = next; for (const owner of shared.owners.values()) owner.registryChanged(); },
+      flush: () => { for (const owner of shared.owners.values()) if (!owner.privateWindow) { owner.flush(); if (!owner.syncReady()) throw new Error('SYNC_STORAGE'); } }, changed, dirty: () => shared.sync?.markDirty('desktop'), applied: () => { for (const owner of shared.owners.values()) if (!owner.privateWindow) owner.syncApplied(); } });
+    const override = app.isPackaged ? undefined : Number(process.env.HORIZON_SYNC_PULSE_MS);
+    shared.sync = new SyncEngine(userData, safeStorage, host, { pulseMs: typeof override === 'number' && Number.isSafeInteger(override) && override >= 50 && override <= 60000 ? override : undefined });
+    shared.sync.start();
+  }
   app.on('before-quit', beforeQuit);
   const initial = runtimeFor(registry.profiles.find(profile => profile.id === selectedProfile)!);
   // Electron runs menu accelerators only after Chromium returns an unhandled page key.

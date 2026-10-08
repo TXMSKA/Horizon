@@ -1422,7 +1422,7 @@ test('settings sections and their public addresses map one to one', () => {
   const source = ts.createSourceFile('api.ts', readFileSync('src/shared/api.ts', 'utf8'), ts.ScriptTarget.Latest, true);
   const type = source.statements.find(node => ts.isTypeAliasDeclaration(node) && node.name.text === 'SettingsSection');
   const sections = type.type.types.map(node => node.literal.text);
-  const expected = { general: 'horizon://settings', appearance: 'horizon://settings/appearance', privacy: 'horizon://settings/privacy', 'privacy/sites': 'horizon://settings/privacy/sites', profiles: 'horizon://settings/profiles', extensions: 'horizon://settings/extensions' };
+  const expected = { general: 'horizon://settings', appearance: 'horizon://settings/appearance', privacy: 'horizon://settings/privacy', 'privacy/sites': 'horizon://settings/privacy/sites', profiles: 'horizon://settings/profiles', extensions: 'horizon://settings/extensions', sync: 'horizon://settings/sync' };
   assert.deepEqual(sections.sort(), Object.keys(expected).sort());
   assert.equal(new Set(sections.map(settingsAddress)).size, sections.length);
   for (const [section, address] of Object.entries(expected)) {
@@ -1434,7 +1434,7 @@ test('settings sections and their public addresses map one to one', () => {
   const rail = page.statements.filter(ts.isVariableStatement).flatMap(node => [...node.declarationList.declarations]).find(node => node.name.getText(page) === 'SETTINGS_SECTIONS');
   const entries = rail.initializer.expression.elements;
   const destinations = entries.map(entry => entry.properties.find(property => property.name.getText(page) === 'section').initializer.text);
-  assert.deepEqual(destinations, ['general', 'appearance', 'privacy', 'profiles', 'extensions']);
+  assert.deepEqual(destinations, ['general', 'appearance', 'privacy', 'profiles', 'extensions', 'sync']);
   for (const section of destinations) assert.equal(settingsSection(settingsAddress(section)), section);
 });
 
@@ -1448,7 +1448,9 @@ test('profiles are managed in settings and the profiles panel route is removed',
 });
 
 function settingsInterface(react = {}) {
-  return interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './HorizonMark': {}, './Import': {}, './Menu': {}, './PopupAnchor': {}, './Extensions': { ExtensionsSettings: 'extension-settings' }, './Profiles': {}, './Switch': {} });
+  const exported = interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './shared/sync-display': require('../dist/src/shared/sync-display.js'), './sync.css': {}, './HorizonMark': {}, './Import': {}, './Menu': {}, './PopupAnchor': {}, './Extensions': { ExtensionsSettings: 'extension-settings' }, './Profiles': {}, './Switch': {} });
+  const Settings = exported.Settings;
+  return { ...exported, Settings: props => Settings({ ...props, state: { ...props.state, sync: props.state.sync ?? { conflicts: [] } } }) };
 }
 
 test('settings failures use the complete named code and never expose command messages', () => {
@@ -5051,7 +5053,7 @@ test('private settings and site controls offer no profile changes or weaker bloc
 });
 
 function browserPanelInterface(hooks, document = {}) {
-  return interfaceModule('src/BrowserPanel.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './EmptyState': { EmptyDownloads: 'empty-downloads', EmptyHistory: 'empty-history', NoResults: 'no-results' }, './ToolbarPopover': { ToolbarPopover: 'popover' } }, { document });
+  return interfaceModule('src/BrowserPanel.tsx', { react: hooks.react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './RemoteTabs': { RemoteTabs: 'remote-tabs' }, './EmptyState': { EmptyDownloads: 'empty-downloads', EmptyHistory: 'empty-history', NoResults: 'no-results' }, './ToolbarPopover': { ToolbarPopover: 'popover' } }, { document });
 }
 
 function favoritesInterface(hooks, commands = [], document = { activeElement: null, addEventListener() {}, removeEventListener() {} }) {
@@ -7127,3 +7129,28 @@ test('Lyra command schemas reject extra fields, oversize requests and sparse tab
 });
 require('./group-search-colors.test.cjs');
 require('./translate.test.cjs');
+
+require('./sync.test.cjs');
+require('./sync-ui.test.cjs');
+
+test('sync save uses the native destination and writes only the explicitly exported code', async t => {
+  const folder = temporaryDirectory(t, 'sync-save-cloud'), destination = join(temporaryDirectory(t, 'sync-save-export'), 'code.txt');
+  const options = { folderChoice: { canceled: false, filePaths: [folder] }, captureSaveChoice: { canceled: false, filePath: destination } };
+  const browser = notebookBrowser(t, authenticatedCipher(), options);
+  await browser.command({ type: 'sync-create', accepted: true });
+  const code = await browser.command({ type: 'sync-reveal-key' });
+  assert.equal(await browser.command({ type: 'sync-save-key' }), true);
+  assert.equal(readFileSync(destination, 'utf8') === code + '\n', true);
+  assert.equal(options.captureSaveArgs[0] === browser.window, true);
+  assert.deepEqual(options.captureSaveArgs[1].filters, [{ name: 'TXT', extensions: ['txt'] }]);
+  options.captureSaveChoice = { canceled: true }; assert.equal(await browser.command({ type: 'sync-save-key' }), false);
+  options.saveError = true; await assert.rejects(browser.command({ type: 'sync-save-key' }), /SYNC_SAVE_FAILED/);
+  const privateWindow = browser.addWindow({ privateWindow: true }); assert.throws(() => privateWindow.command({ type: 'sync-save-key' }), /SYNC_PRIVATE/);
+});
+
+test('sync cancelled folder selection reports its cause without creating sync state', async t => {
+  const browser = notebookBrowser(t, authenticatedCipher());
+  await assert.rejects(browser.command({ type: 'sync-create', accepted: true }), /SYNC_CANCELLED/);
+  assert.equal(browser.state().sync.configured, false);
+  assert.equal(existsSync(join(browser.directory, 'sync', 'state.sealed')), false);
+});

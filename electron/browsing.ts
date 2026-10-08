@@ -3,7 +3,7 @@ import type { SearchEngine, SettingsSection } from '../src/shared/api';
 const URL_LIMIT = 8192;
 export function settingsAddress(section: SettingsSection): string { return section === 'general' ? 'horizon://settings' : `horizon://settings/${section}`; }
 export function settingsSection(value: string): SettingsSection | null {
-  return (['general', 'appearance', 'privacy', 'privacy/sites', 'profiles', 'extensions'] as const).find(section => settingsAddress(section) === value) ?? null;
+  return (['general', 'appearance', 'privacy', 'privacy/sites', 'profiles', 'extensions', 'sync'] as const).find(section => settingsAddress(section) === value) ?? null;
 }
 
 export function isAllowedURL(value: unknown): value is string {

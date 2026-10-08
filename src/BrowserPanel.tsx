@@ -7,6 +7,7 @@ import { PROFILE_COLORS } from './shared/api';
 import type { BrowserCommand, BrowserState, HistoryEntry, Language } from './shared/api';
 import { EmptyDownloads, EmptyHistory, NoResults } from './EmptyState';
 import { ToolbarPopover } from './ToolbarPopover';
+import { RemoteTabs } from './RemoteTabs';
 
 export type LibraryPanel = 'history' | 'bookmarks' | 'downloads';
 
@@ -142,6 +143,6 @@ export function BrowserPanel({ panel, state, language, opener, favicons, undo, o
           {download.status !== 'progressing' && <button type="button" disabled={pending} data-row-control="delete" onClick={event => remove(event.currentTarget, { type: 'remove-download', id: download.id }, 'downloadRemoved')}><Trash2 aria-hidden="true" />{t('downloadRemove')}</button>}
         </div></div>
     </li>)}</ul> : !filtered.length ? empty : panel === 'history' ? <div className="browser-history-days">{historyDays(filtered as HistoryEntry[], language).map(group => <section className="browser-history-day" key={group.label}><h3>{group.label}</h3><ul className="browser-library-list">{group.entries.map(row)}</ul></section>)}</div> : <ul className="browser-library-list">{filtered.map(row)}</ul>}
-    {panel === 'history' && <><hr /><button className="browser-panel-foot" type="button" onClick={onClear}><span><Trash2 aria-hidden="true" /></span>{t('clearBrowsingData')}</button></>}
+    {panel === 'history' && <><RemoteTabs state={state} language={language} onAnnounce={onAnnounce} renderSiteBadge={(url, title) => <SiteBadge url={url} title={title} state={state} favicons={favicons} />} /><hr /><button className="browser-panel-foot" type="button" onClick={onClear}><span><Trash2 aria-hidden="true" /></span>{t('clearBrowsingData')}</button></>}
   </section></ToolbarPopover>;
 }

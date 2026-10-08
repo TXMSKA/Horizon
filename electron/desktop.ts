@@ -321,6 +321,26 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
   const contentItem = ({ image, ...entry }: DesktopItem): DesktopItemContent => ({ ...entry,
     image: image ? { width: image.width, height: image.height, bytes: image.bytes, cut: image.cut } : null });
   return {
+    syncSnapshot: () => { assertUnlocked(); flush(); if (storageError) throw new Error('SYNC_STORAGE'); return structuredClone(store); },
+    applySync: (next: DesktopStore, incoming: Map<string, Buffer>) => {
+      assertUnlocked(); if (ephemeral || !validateDesktopStore(next) || next.key !== store.key) throw new Error('SYNC_INVALID');
+      const previous = structuredClone(store), written: string[] = [], replacement = structuredClone(next);
+      const existing = [...store.projects.flatMap(project => project.items), ...store.captures];
+      try {
+        for (const entry of [...replacement.projects.flatMap(project => project.items), ...replacement.captures]) if (entry.image) {
+          const bytes = incoming.get(entry.image.filename), old = existing.find(item => item.id === entry.id);
+          // Capture replacements always get a new filename, so metadata edits can retain the existing encrypted image.
+          if (!bytes && old?.image?.filename === entry.image.filename && old.image.bytes === entry.image.bytes) continue;
+          if (!bytes) { if (!readCaptureFile(directory, store.key, entry)) throw new Error('SYNC_BLOB_PENDING'); continue; }
+          if (bytes.length !== entry.image.bytes) throw new Error('SYNC_INVALID');
+          const oldBytes = old && readCaptureFile(directory, store.key, old);
+          if (old?.image && oldBytes?.equals(bytes)) entry.image.filename = old.image.filename;
+          else { const name = saveImage(entry.id, bytes); written.push(name); entry.image.filename = name; }
+        }
+        writeDesktopStore(path, replacement, cipher); Object.assign(store, replacement); clearTimeout(pendingWrite); pendingWrite = undefined; version++; changed();
+      } catch (error) { for (const name of written) removeImage(name); throw error; }
+      return () => { writeDesktopStore(path, previous, cipher); Object.assign(store, previous); for (const name of written) removeImage(name); version++; changed(); };
+    },
     get, item, folder, use, forget, flush, assertUnlocked, list: () => store.projects, captureList: () => store.captures,
     retry: () => {
       if (status.unread) {

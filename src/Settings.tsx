@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
-import { Check, ChevronDown, ChevronLeft, Folder, LoaderCircle, Palette, Puzzle, Settings2, ShieldCheck, Users } from 'lucide-react';
+import { Check, ChevronDown, ChevronLeft, Folder, LoaderCircle, Palette, Puzzle, RefreshCw, Settings2, ShieldCheck, Users } from 'lucide-react';
 import { copy, text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS, SEARCH_ENGINES, SITE_PERMISSIONS } from './shared/api';
@@ -12,6 +12,8 @@ import { PopupAnchor } from './PopupAnchor';
 import { ProfilesSettings } from './Profiles';
 import { Switch } from './Switch';
 import { ExtensionsSettings } from './Extensions';
+import { syncConflictTitle, syncErrorKey, syncFocusTarget, syncItemHints, syncItemLabels, syncRelativeTime } from './shared/sync-display';
+import './sync.css';
 
 export const SETTINGS_SECTIONS = [
   { section: 'general', label: 'general', icon: Settings2 },
@@ -19,6 +21,7 @@ export const SETTINGS_SECTIONS = [
   { section: 'privacy', label: 'privacy', icon: ShieldCheck },
   { section: 'profiles', label: 'profiles', icon: Users },
   { section: 'extensions', label: 'extensions', icon: Puzzle },
+  { section: 'sync', label: 'sync', icon: RefreshCw },
 ] as const;
 
 export function settingsError(reason: unknown, language: Language): string {
@@ -257,14 +260,133 @@ function SitesSettings({ state, language }: { state: BrowserState; language: Lan
   return <><div className="settings-card">{state.sites.length ? <ul className="settings-sites">{groupSiteSettings(state.sites).map(sites => <SettingsSite key={sites[0]!.host} sites={sites} language={language} onReset={host => setResult(t('siteReset').replace('{host}', host))} />)}</ul> : <div className="settings-empty"><strong>{t('noSiteSettings')}</strong><p>{t('noSiteSettingsHint')}</p></div>}</div>{state.sites.length > 0 && <p className="settings-note">{t('resetSiteNote')}</p>}<div className="settings-feedback" role="status" aria-live="polite">{result}</div></>;
 }
 
+function SyncDialog({ title, hint, language, pending, onClose, children }: {
+  title: CopyKey; hint: CopyKey; language: Language; pending: boolean; onClose: () => void; children: ReactNode;
+}) {
+  const id = useId(), dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const modal = dialog.current; modal?.showModal(); modal?.querySelector<HTMLElement>('[data-safe-action]')?.focus();
+    return () => { if (modal?.open) modal.close(); };
+  }, []);
+  return <dialog className="settings-dialog sync-dialog" ref={dialog} aria-labelledby={`${id}-title`} aria-describedby={`${id}-hint`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!pending) onClose(); }} onKeyDown={event => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (!pending) onClose(); }
+  }}><div className="settings-dialog-heading"><h2 id={`${id}-title`}>{text(title, language)}</h2><p className="setting-hint" id={`${id}-hint`}>{text(hint, language)}</p></div>{children}</dialog>;
+}
+
+function SyncSettings({ state, language }: { state: BrowserState; language: Language }) {
+  const t = (key: CopyKey) => text(key, language), id = useId(), sync = state.sync;
+  const [modal, setModal] = useState<'create' | 'noticeJoin' | 'join' | 'reveal' | 'leave' | 'key' | null>(null);
+  const [code, setCode] = useState(''), [joinCode, setJoinCode] = useState(''), [removeOwnFiles, setRemoveOwnFiles] = useState(false);
+  const [pending, setPending] = useState(false), [error, setError] = useState<CopyKey | null>(null), [result, setResult] = useState<CopyKey | null>(null);
+  const [now, setNow] = useState(Date.now);
+  const running = useRef(false), opener = useRef<HTMLElement | null>(null), focused = useRef<HTMLElement | null>(null), section = useRef<HTMLDivElement>(null);
+  const restoredFocus = useRef<HTMLElement | null>(null);
+  const codeField = useRef<HTMLInputElement>(null), joinField = useRef<HTMLInputElement>(null), restoreOpener = useRef(false);
+  const retry = useRef<{ work: () => Promise<void>; success?: CopyKey } | null>(null);
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 30000); return () => window.clearInterval(timer); }, []);
+  useEffect(() => {
+    if (pending) return;
+    // Restore after the modal leaves the DOM, when the section is no longer inert and its replacement controls exist.
+    if (!modal && restoreOpener.current) {
+      if (section.current?.closest('[inert]')) return;
+      const target = syncFocusTarget(opener.current, [...(section.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]);
+      target?.focus();
+      // Keep the request until native focus succeeds; a disabled opener can survive reconciliation.
+      if (target && document.activeElement === target) { restoreOpener.current = false; focused.current = null; restoredFocus.current = target; }
+      return;
+    }
+    if (!modal && restoredFocus.current) {
+      const previous = restoredFocus.current;
+      if (document.activeElement !== document.body && document.activeElement !== previous) restoredFocus.current = null;
+      else if (!previous.isConnected || previous.matches(':disabled')) {
+        // A pulse can start after restoration and disable Sync now. Keep the fallback when it ends.
+        const target = syncFocusTarget(null, [...(section.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]);
+        target?.focus(); if (target && document.activeElement === target) restoredFocus.current = target;
+      }
+    }
+    if (modal === 'join' && error) { focused.current = null; joinField.current?.focus(); return; }
+    if (focused.current) {
+      const target = focused.current; focused.current = null;
+      if (target.isConnected && (document.activeElement === document.body || document.activeElement === target)) target.focus();
+      else if (!modal && !target.isConnected && document.activeElement === document.body) section.current?.querySelector<HTMLElement>('button:not(:disabled)')?.focus();
+    }
+  }, [pending, modal, error, sync.configured, sync.syncing]);
+  const close = () => { restoreOpener.current = true; setModal(null); setCode(''); setJoinCode(''); setError(null); retry.current = null; };
+  const open = (kind: NonNullable<typeof modal>, button: HTMLButtonElement) => {
+    restoredFocus.current = null;
+    opener.current = button; setError(null); setResult(null); retry.current = null; setRemoveOwnFiles(false); setModal(kind);
+  };
+  const perform = async (work: () => Promise<void>, success?: CopyKey) => {
+    if (running.current) return;
+    focused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    running.current = true; setPending(true); setError(null); setResult(null); retry.current = { work, success };
+    try { await work(); if (success) setResult(success); retry.current = null; }
+    catch (reason) { setError(syncErrorKey(reason)); }
+    finally { running.current = false; setPending(false); }
+  };
+  const reveal = async () => { setCode(await window.horizon.command({ type: 'sync-reveal-key' })); setModal('key'); };
+  const copyCode = async () => {
+    // Chrome's session denies clipboard permissions; copy from the field within the person's click gesture.
+    try {
+      if (!codeField.current) throw new Error();
+      codeField.current.focus(); codeField.current.select();
+      if (!document.execCommand('copy')) throw new Error();
+    } catch { throw new Error('syncCopyFailed'); }
+  };
+  const setup = async (join: boolean) => {
+    try { await window.horizon.command(join ? { type: 'sync-join', accepted: true, key: joinCode.trim() } : { type: 'sync-create', accepted: true }); }
+    finally {
+      // Setup may finish before the first pulse fails; still give the person the newly created code.
+      const current = await window.horizon.getState();
+      if (current.sync.configured) {
+        setJoinCode(''); if (join) { restoreOpener.current = true; setModal(null); } else { retry.current = { work: reveal }; await reveal(); }
+        if (current.sync.failure) { retry.current = { work: syncNow, success: 'syncSuccess' }; throw new Error(current.sync.failure); }
+      }
+    }
+  };
+  const syncNow = async () => {
+    await window.horizon.command({ type: 'sync-now' });
+    const current = await window.horizon.getState(); if (current.sync.failure) throw new Error(current.sync.failure);
+  };
+  const failure = error ?? sync.failure, busy = pending || sync.syncing;
+  const feedback = <>{failure && <div className="settings-feedback error" role="alert"><span>{t(failure)}</span><button className="settings-button quiet" type="button" disabled={busy} onClick={event => {
+    if (retry.current) void perform(retry.current.work, retry.current.success);
+    else if (sync.configured) void perform(syncNow, 'syncSuccess');
+    else open('create', event.currentTarget);
+  }}>{t('retry')}</button></div>}<div className="settings-feedback" role="status" aria-live="polite">{result && t(result)}</div></>;
+  const actions = (safe: CopyKey, action: CopyKey, onAction: () => void) => <div className="settings-dialog-actions"><button className="settings-button" type="button" data-safe-action disabled={pending} onClick={close}>{t(safe)}</button><button className="settings-button primary" type="button" disabled={pending} onClick={onAction}>{pending && <LoaderCircle className="spinner" aria-hidden="true" />}{t(action)}</button></div>;
+  return <div className="sync-settings" ref={section} tabIndex={-1}>
+    {!sync.configured ? <div className="settings-card"><div className="setting-row"><div className="setting-copy"><p className="setting-hint">{t('syncIntro')}</p><p className="setting-hint">{t('syncVault')}</p></div><div className="setting-controls">
+      <button className="settings-button primary" type="button" disabled={pending} onClick={event => open('create', event.currentTarget)}>{pending && <LoaderCircle className="spinner" aria-hidden="true" />}{t(pending ? 'syncSettingUp' : 'syncSetup')}</button>
+      <button className="settings-button" type="button" disabled={pending} onClick={event => open('noticeJoin', event.currentTarget)}>{t('syncJoin')}</button>
+    </div></div></div> : <>
+      <div className="settings-card"><SettingRow title="syncFolder" hint={<>{sync.folderName}<br />{syncRelativeTime(sync.lastSynced, language, now)}</>} language={language}>{() => <button className="settings-button" type="button" disabled={busy} onClick={() => { void perform(syncNow, 'syncSuccess'); }}>{busy && <LoaderCircle className="spinner" aria-hidden="true" />}{t(busy ? 'syncWorking' : 'syncNow')}</button>}</SettingRow>
+      <SettingRow title="syncCode" hint={t('syncCodeUseHint')} language={language}>{() => <button className="settings-button" type="button" disabled={pending} onClick={event => open('reveal', event.currentTarget)}>{t('syncShowCode')}</button>}</SettingRow>
+      </div>
+      <SettingsGroup title="syncItems" language={language}>{(['favorites', 'history', 'tabs', 'desktop', 'siteSettings', 'settings', 'profiles'] as const).map(item => <SettingRow key={item} title={syncItemLabels[item]} hint={t(syncItemHints[item])} language={language}>{(id, apply, rowPending) => <Switch checked={sync.switches[item]} labelledBy={`${id}-title`} describedBy={`${id}-hint`} disabled={busy || rowPending} onChange={enabled => { void apply({ type: 'sync-set-item', item, enabled }, t('settingSaved').replace('{setting}', t(syncItemLabels[item])).replace('{value}', t(enabled ? 'on' : 'off'))); }} />}</SettingRow>)}</SettingsGroup>
+      {sync.conflicts.length > 0 && <SettingsGroup title="syncConflicts" language={language}><p className="settings-note sync-conflict-note">{t('syncConflictsHint')}</p><ul className="settings-sites">{sync.conflicts.map(conflict => <li className="setting-row sync-conflict" key={conflict.id}><div className="setting-copy"><strong>{syncConflictTitle(conflict, language)}</strong><p className="setting-hint">{t('syncConflictDetails').replace('{computer}', conflict.computer.name).replace('{time}', new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(conflict.time))}</p>{conflict.deleted && <p className="setting-hint">{t('syncDeletedVersion')}</p>}{!sync.switches[conflict.item] && <p className="setting-hint">{t('syncRestoreOff').replace('{item}', t(syncItemLabels[conflict.item]))}</p>}</div><div className="setting-controls"><button className="settings-button" type="button" disabled={busy || !sync.switches[conflict.item]} onClick={() => { void perform(async () => { await window.horizon.command({ type: 'sync-restore-conflict', id: conflict.id }); const current = await window.horizon.getState(); if (current.sync.failure) throw new Error(current.sync.failure); }, 'syncRestored'); }}>{t('syncRestore')}</button><button className="settings-button quiet" type="button" disabled={busy} onClick={() => { void perform(async () => { await window.horizon.command({ type: 'sync-dismiss-conflict', id: conflict.id }); }, 'syncDismissed'); }}>{t('syncDismiss')}</button></div></li>)}</ul></SettingsGroup>}
+      <div className="settings-card"><SettingRow title="syncLeave" hint={t('syncLeaveHint')} language={language}>{() => <button className="settings-button" type="button" disabled={busy} onClick={event => open('leave', event.currentTarget)}>{t('syncLeave')}</button>}</SettingRow></div>
+    </>}
+    {sync.configured && <p className="settings-note">{t('syncVault')}</p>}
+    {!modal && feedback}
+    {modal && <SyncDialog key={modal} title={modal === 'create' || modal === 'noticeJoin' ? 'syncNoticeTitle' : modal === 'join' ? 'syncJoin' : modal === 'reveal' ? 'syncRevealTitle' : modal === 'leave' ? 'syncLeaveTitle' : 'syncCodeTitle'} hint={modal === 'create' || modal === 'noticeJoin' ? 'syncNotice' : modal === 'join' ? 'syncJoinHint' : modal === 'reveal' ? 'syncRevealHint' : modal === 'leave' ? 'syncLeaveHint' : 'syncCodeHint'} language={language} pending={pending} onClose={close}>
+      {modal === 'join' && <><label className="sync-code-label">{t('syncCode')}<input ref={joinField} className="sync-code" value={joinCode} maxLength={128} spellCheck={false} autoComplete="off" autoCapitalize="none" disabled={pending} aria-invalid={failure ? true : undefined} aria-describedby={failure ? `${id}-join-error` : undefined} onChange={event => { setJoinCode(event.target.value); setError(null); retry.current = null; }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void perform(() => setup(true), 'syncJoined'); } }} /></label>{failure && <p className="settings-feedback error" id={`${id}-join-error`} role="alert">{t(failure)}</p>}</>}
+      {modal === 'key' && <><label className="sync-code-label">{t('syncCode')}<input ref={codeField} className="sync-code" readOnly value={code} spellCheck={false} autoComplete="off" onFocus={event => event.currentTarget.select()} /></label><div className="setting-controls sync-code-actions"><button className="settings-button" type="button" disabled={pending} onClick={() => { void perform(copyCode, 'syncCodeCopied'); }}>{t('copy')}</button><button className="settings-button" type="button" disabled={pending} onClick={() => { void perform(async () => { if (!await window.horizon.command({ type: 'sync-save-key' })) throw new Error('syncSaveCancelled'); }, 'syncCodeSaved'); }}>{t('syncSaveCode')}</button></div></>}
+      {modal === 'leave' && <label className="settings-checkbox"><input type="checkbox" checked={removeOwnFiles} disabled={pending} onChange={event => setRemoveOwnFiles(event.target.checked)} /><span aria-hidden="true"><Check /></span><span>{t('syncRemoveFiles')}</span></label>}
+      {modal !== 'join' && feedback}
+      {modal === 'create' || modal === 'noticeJoin' ? actions('cancel', 'syncContinue', () => { if (modal === 'noticeJoin') setModal('join'); else { restoreOpener.current = true; setModal(null); void perform(() => setup(false)); } }) : modal === 'join' ? actions('cancel', pending ? 'syncJoining' : 'syncContinue', () => { void perform(() => setup(true), 'syncJoined'); }) : modal === 'reveal' ? actions('cancel', 'syncShowCode', () => { void perform(reveal); }) : modal === 'leave' ? actions('syncKeep', 'syncLeave', () => { void perform(async () => { await window.horizon.command({ type: 'sync-leave', removeOwnFiles }); close(); }, 'syncLeft'); }) : <div className="settings-dialog-actions"><button className="settings-button primary" type="button" data-safe-action disabled={pending} onClick={close}>{t('syncDone')}</button></div>}
+    </SyncDialog>}
+  </div>;
+}
+
 export function Settings({ state, section, language, onOpen, openClearDialog, onClearDialogOpened }: {
   state: BrowserState; section: SettingsSection; language: Language; onOpen: (section: SettingsSection) => void; openClearDialog?: boolean; onClearDialogOpened?: () => void;
 }) {
   const t = (key: CopyKey) => text(key, language);
-  if (state.privateWindow && (section === 'profiles' || section === 'extensions' || section === 'privacy/sites')) section = section === 'privacy/sites' ? 'privacy' : 'general';
+  if (state.privateWindow && (section === 'profiles' || section === 'extensions' || section === 'sync' || section === 'privacy/sites')) section = section === 'privacy/sites' ? 'privacy' : 'general';
   const current = section === 'privacy/sites' ? 'privacy' : section;
   return <section className="settings-page" aria-label={t('settings')}><nav className="settings-rail" aria-label={t('settingsSections')}><div className="settings-rail-heading"><HorizonMark /><span>{t('settings')}</span></div>
-    {SETTINGS_SECTIONS.filter(({ section }) => !state.privateWindow || section !== 'profiles' && section !== 'extensions').map(({ section: target, label, icon: Icon }) => <button className={`settings-rail-row${target === current ? ' selected' : ''}`} type="button" key={target} aria-label={t(label)} title={t(label)} aria-current={target === current ? 'page' : undefined} onClick={() => onOpen(target)}><Icon aria-hidden="true" /><span>{t(label)}</span></button>)}
+    {SETTINGS_SECTIONS.filter(({ section }) => !state.privateWindow || section !== 'profiles' && section !== 'extensions' && section !== 'sync').map(({ section: target, label, icon: Icon }) => <button className={`settings-rail-row${target === current ? ' selected' : ''}`} type="button" key={target} aria-label={target === 'sync' && state.sync.conflicts.length ? `${t(label)}. ${t('syncConflictNotice')}` : t(label)} title={t(label)} aria-current={target === current ? 'page' : undefined} onClick={() => onOpen(target)}><Icon aria-hidden="true" /><span>{t(label)}</span>{target === 'sync' && state.sync.conflicts.length > 0 && <i className="sync-notice-dot" aria-hidden="true" />}</button>)}
   </nav><div className="settings-content"><div className="settings-column"><div className="settings-page-heading">{section === 'privacy/sites' && <button className="settings-back" type="button" onClick={() => onOpen('privacy')}><ChevronLeft aria-hidden="true" />{t('privacy')}</button>}<h1 id="settings-title" tabIndex={-1}>{t(section === 'privacy/sites' ? 'sitesOwnSettings' : current)}</h1></div>
     {section === 'general' && <GeneralSettings state={state} language={language} />}
     {section === 'appearance' && <AppearanceSettings state={state} language={language} />}
@@ -272,5 +394,6 @@ export function Settings({ state, section, language, onOpen, openClearDialog, on
     {section === 'privacy/sites' && <SitesSettings state={state} language={language} />}
     {section === 'profiles' && <ProfilesSettings state={state} language={language} />}
     {section === 'extensions' && !state.privateWindow && <ExtensionsSettings state={state} language={language} />}
+    {section === 'sync' && !state.privateWindow && <SyncSettings state={state} language={language} />}
   </div></div></section>;
 }
