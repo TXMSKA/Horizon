@@ -4,9 +4,9 @@ import { Check, ChevronDown, ChevronLeft, Folder, LoaderCircle, Palette, Puzzle,
 import { copy, text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS, SEARCH_ENGINES, SITE_PERMISSIONS } from './shared/api';
-import type { BrowserCommand, BrowserState, ClearedBrowsingData, ImportResult, ImportSource, Language, SettingsSection, SitePermission, SiteSettingsEntry } from './shared/api';
+import type { BrowserCommand, BrowserState, ClearedBrowsingData, ImportSource, Language, SettingsSection, SitePermission, SiteSettingsEntry } from './shared/api';
 import { HorizonMark } from './HorizonMark';
-import { ImportDialog, importProgressLabel, importResultText } from './Import';
+import { ImportDialog, importProgressLabel } from './Import';
 import { Menu } from './Menu';
 import { PopupAnchor } from './PopupAnchor';
 import { ProfilesSettings } from './Profiles';
@@ -122,10 +122,10 @@ function ImportSettings({ state, language }: { state: BrowserState; language: La
     window.horizon.command({ type: 'list-import-sources' }).then(found => { if (current) setSources(found); }, () => { if (current) setSources([]); });
     return () => { current = false; };
   }, []);
-  return <SettingRow title="importFrom" hint={t(sources === null ? 'importLooking' : sources.length ? 'importHint' : 'importNoBrowser')} language={language}>{(id, apply, pending) => <>
-    {sources !== null && sources.length > 0 && <button className="settings-button" ref={opener} type="button" disabled={pending || state.importProgress !== null} aria-describedby={`${id}-hint`} onClick={() => setOpen(true)}>{(pending || state.importProgress !== null) && <LoaderCircle className="spinner" aria-hidden="true" />}{pending || state.importProgress !== null ? importProgressLabel(state.importProgress, language) : t('importButton')}</button>}
-    {open && sources && <ImportDialog sources={sources} language={language} profileName={state.profiles.find(profile => profile.id === state.activeProfileId)?.name ?? ''} firstRun={false} status={{ kind: 'idle' }} progress={null} opener={opener} onClose={() => setOpen(false)}
-      onImport={choice => { setOpen(false); void apply({ type: 'import-browser-data', ...choice }, outcome => importResultText(outcome as ImportResult, language)).then(() => opener.current?.focus()); }} />}
+  const importing = state.importProgress !== null;
+  return <SettingRow title="importFrom" hint={t(sources === null ? 'importLooking' : sources.length ? 'importHint' : 'importNoBrowser')} language={language}>{id => <>
+    {sources !== null && sources.length > 0 && <button className="settings-button" ref={opener} type="button" disabled={importing} aria-describedby={`${id}-hint`} onClick={() => setOpen(true)}>{importing && <LoaderCircle className="spinner" aria-hidden="true" />}{importing ? importProgressLabel(state.importProgress, language) : t('importButton')}</button>}
+    {open && sources && <ImportDialog sources={sources} language={language} profileName={state.profiles.find(profile => profile.id === state.activeProfileId)?.name ?? ''} firstRun={false} vault={state.vault} progress={state.importProgress} opener={opener} describe={reason => settingsError(reason, language)} onClose={() => setOpen(false)} />}
   </>}</SettingRow>;
 }
 

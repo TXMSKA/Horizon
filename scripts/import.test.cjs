@@ -110,29 +110,29 @@ const favoriteLink = (url, title = url) => ({ kind: 'link', id: randomUUID(), ur
 const favoriteFolder = (name, children = []) => ({ kind: 'folder', id: randomUUID(), name, createdAt: 1, children });
 const imported = (title, url = `https://${title.toLowerCase().replace(/\W+/g, '-')}.example/`) => ({ kind: 'link', url, title, createdAt: 5 });
 const importedFolder = (name, children) => ({ kind: 'folder', name, createdAt: 5, children });
-const selection = (browser, profile, what = {}) => ({ browser, profile, favorites: true, history: true, searchEngine: true, ...what });
+const selection = (browser, profile, what = {}) => ({ browser, profile, favorites: true, history: true, searchEngine: true, settings: true, ...what });
 const everything = (fixture, choice) => readImport(fixture.environment, choice, labels, fixture.scratch, () => {}, NOW);
 const treeDepth = items => Math.max(0, ...items.filter(item => item.kind === 'folder').map(item => 1 + treeDepth(item.children)));
 const removeDatabase = path => { for (const file of [path, `${path}-wal`, `${path}-shm`]) rmSync(file, { force: true }); };
 
 module.exports = ({ temporaryDirectory, authenticatedCipher }) => {
-  test('import sources come from the browsers own profile lists and accept only plain child folders', t => {
+  test('import sources come from the browsers own profile lists and accept only plain child folders', async t => {
     const fixture = profileFixture(temporaryDirectory(t, 'import-sources'));
-    const sources = discoverImportSources(fixture.environment);
+    const sources = await discoverImportSources(fixture.environment, fixture.scratch);
     assert.deepEqual(sources.map(source => source.browser), ['edge', 'chrome', 'opera', 'firefox']);
     assert.deepEqual(sources[0].profiles, [
-      { id: 'Default', name: 'Personal', favorites: true, history: true, searchEngine: 'bing' },
-      { id: 'Profile 1', name: 'Work', favorites: true, history: false, searchEngine: null },
+      { id: 'Default', name: 'Personal', favorites: true, history: true, searchEngine: 'bing', settings: null },
+      { id: 'Profile 1', name: 'Work', favorites: true, history: false, searchEngine: null, settings: null },
     ]);
-    assert.deepEqual(sources[1].profiles, [{ id: 'Default', name: 'Person 1', favorites: true, history: false, searchEngine: 'google' }]);
-    assert.deepEqual(sources[2].profiles, [{ id: 'default', name: 'Opera', favorites: true, history: false, searchEngine: null }]);
-    assert.deepEqual(sources[3].profiles, [{ id: 'abc.default-release', name: 'Main', favorites: true, history: true, searchEngine: 'duckduckgo' }]);
-    assert.deepEqual(discoverImportSources({ local: undefined, roaming: join(fixture.local, 'missing') }), []);
-    assert.deepEqual(discoverImportSources({ local: join(fixture.local, 'Microsoft'), roaming: undefined }), []);
+    assert.deepEqual(sources[1].profiles, [{ id: 'Default', name: 'Person 1', favorites: true, history: false, searchEngine: 'google', settings: null }]);
+    assert.deepEqual(sources[2].profiles, [{ id: 'default', name: 'Opera', favorites: true, history: false, searchEngine: null, settings: null }]);
+    assert.deepEqual(sources[3].profiles, [{ id: 'abc.default-release', name: 'Main', favorites: true, history: true, searchEngine: 'duckduckgo', settings: null }]);
+    assert.deepEqual(await discoverImportSources({ local: undefined, roaming: join(fixture.local, 'missing') }, fixture.scratch), []);
+    assert.deepEqual(await discoverImportSources({ local: join(fixture.local, 'Microsoft'), roaming: undefined }, fixture.scratch), []);
     try {
       symlinkSync(join(fixture.edge, 'Profile 1'), join(fixture.edge, 'Linked'), 'junction');
       writeFileSync(join(fixture.edge, 'Local State'), JSON.stringify({ profile: { info_cache: { Linked: { name: 'Linked' }, Default: { name: 'Personal' } } } }));
-      assert.deepEqual(discoverImportSources(fixture.environment)[0].profiles.map(profile => profile.id), ['Default']);
+      assert.deepEqual((await discoverImportSources(fixture.environment, fixture.scratch))[0].profiles.map(profile => profile.id), ['Default']);
     } catch (error) { if (error.code !== 'EPERM' && error.code !== 'EACCES') throw error; }
   });
 
@@ -324,10 +324,12 @@ module.exports = ({ temporaryDirectory, authenticatedCipher }) => {
   });
 
   test('import commands are exact, bounded and refused in private windows', () => {
-    const valid = { type: 'import-browser-data', browser: 'edge', profile: 'Profile 1', favorites: true, history: false, searchEngine: true };
+    const valid = { type: 'import-browser-data', browser: 'edge', profile: 'Profile 1', favorites: true, history: false, searchEngine: true, settings: false };
     for (const command of [{ type: 'list-import-sources' }, { type: 'finish-first-run' }, valid]) { assert.deepEqual(validateCommand(command), command); assert.throws(() => validateCommand({ ...command, extra: 1 })); }
-    for (const change of [{ browser: 'safari' }, { browser: 7 }, { profile: '' }, { profile: 'x'.repeat(256) }, { profile: 'a\0b' }, { profile: null }, { favorites: 1 }, { history: 'yes' }, { searchEngine: undefined }]) assert.throws(() => validateCommand({ ...valid, ...change }), /IMPORT_COMMAND_INVALID/);
+    for (const change of [{ browser: 'safari' }, { browser: 7 }, { profile: '' }, { profile: 'x'.repeat(256) }, { profile: 'a\0b' }, { profile: null }, { favorites: 1 }, { history: 'yes' }, { searchEngine: undefined }, { settings: undefined }, { settings: 'yes' }, { settings: 1 }]) assert.throws(() => validateCommand({ ...valid, ...change }), /IMPORT_COMMAND_INVALID/);
     assert.throws(() => validateCommand({ ...valid, favorites: false, searchEngine: false }), /IMPORT_NO_CHOICE/);
+    assert.deepEqual(validateCommand({ ...valid, favorites: false, searchEngine: false, settings: true }).settings, true);
+    const { settings, ...withoutSettings } = valid; assert.throws(() => validateCommand(withoutSettings), /IMPORT_COMMAND_INVALID/); assert.equal(settings, false);
     assert.throws(() => validateCommand({ type: 'import-browser-data', browser: 'edge' }), /IMPORT_COMMAND_INVALID/);
     assert.throws(() => validateCommand({ type: 'list-import-sources', browser: 'edge' }), /IMPORT_COMMAND_INVALID/);
     assert.throws(() => assertPrivateCommand(valid), /Private window import is unavailable/);

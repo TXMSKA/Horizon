@@ -25,7 +25,7 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected browser argument');
 }
 const desktopCommands = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'open-desktop', 'open-desktop-panel', 'close-desktop-panel', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'delete-capture', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'take-capture', 'capture-full-page', 'capture-screen', 'edit-capture', 'copy-capture']);
-const importCommands = new Set(['list-import-sources', 'import-browser-data']);
+const importCommands = new Set(['list-import-sources', 'import-browser-data', 'choose-import-passwords-file', 'import-passwords', 'delete-import-passwords-file']);
 const favoriteCommands = new Set(['add-favorite', 'create-favorite-folder', 'rename-favorite', 'move-favorite', 'delete-favorite', 'open-favorite', 'open-favorite-new-tab', 'open-all-favorites']);
 export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
   try { return validatedCommand(value, profileIds, projects, captures, favorites); }
@@ -60,9 +60,9 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
   if (typeof type === 'string' && (type.startsWith('vault-') || type === 'set-vault-timeout')) {
     let fields: string[] = [], valid = false;
     switch (type) {
-      case 'vault-refresh': case 'vault-lock': case 'vault-hello': case 'vault-dismiss': valid = true; break;
+      case 'vault-refresh': case 'vault-lock': case 'vault-hello': case 'vault-dismiss': case 'vault-import-permission-hello': valid = true; break;
       case 'set-vault-timeout': fields = ['value']; valid = isVaultTimeout(command.value); break;
-      case 'vault-unlock': fields = ['password']; valid = string(command.password, 128); break;
+      case 'vault-unlock': case 'vault-import-permission': fields = ['password']; valid = string(command.password, 128); break;
       case 'vault-fill': fields = ['suggestion', 'id']; valid = string(command.suggestion, 128) && string(command.id, 128); break;
       case 'vault-copy': fields = ['id', 'origin']; valid = string(command.id, 128) && isWebURL(command.origin) && new URL(command.origin).origin === command.origin; break;
       case 'vault-add': fields = ['title', 'website', 'username', 'password']; valid = string(command.title, 500) && isWebURL(command.website) && string(command.username, 32000, true) && string(command.password, 32000); break;
@@ -241,12 +241,14 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
       if (!favoriteParent(command.id)) throw new Error('FAVORITE_COMMAND_INVALID');
       favoriteDestination(favorites, command.id);
       valid = Object.keys(command).length === 2; break;
-    case 'list-import-sources': case 'finish-first-run': valid = exact([]); break;
+    case 'list-import-sources': case 'finish-first-run': case 'choose-import-passwords-file': valid = exact([]); break;
     case 'import-browser-data':
-      valid = exact(['browser', 'profile', 'favorites', 'history', 'searchEngine']) && IMPORT_BROWSERS.includes(command.browser as typeof IMPORT_BROWSERS[number]) && string(command.profile, 255)
-        && ['favorites', 'history', 'searchEngine'].every(key => typeof command[key] === 'boolean');
-      if (valid && !command.favorites && !command.history && !command.searchEngine) throw new Error('IMPORT_NO_CHOICE');
+      valid = exact(['browser', 'profile', 'favorites', 'history', 'searchEngine', 'settings']) && IMPORT_BROWSERS.includes(command.browser as typeof IMPORT_BROWSERS[number]) && string(command.profile, 255)
+        && ['favorites', 'history', 'searchEngine', 'settings'].every(key => typeof command[key] === 'boolean');
+      if (valid && !command.favorites && !command.history && !command.searchEngine && !command.settings) throw new Error('IMPORT_NO_CHOICE');
       break;
+    case 'import-passwords': valid = exact(['browser', 'file']) && IMPORT_BROWSERS.includes(command.browser as typeof IMPORT_BROWSERS[number]) && isProfileId(command.file); break;
+    case 'delete-import-passwords-file': valid = exact(['file']) && isProfileId(command.file); break;
     case 'zoom': keys(command, ['type', 'delta']); valid = command.delta === -1 || command.delta === 0 || command.delta === 1; break;
     case 'find':
       keys(command, ['type', 'text', 'forward', 'next']);

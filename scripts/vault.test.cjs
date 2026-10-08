@@ -5,7 +5,7 @@ const { resolve, join } = require('node:path');
 const { randomBytes, createCipheriv, createDecipheriv } = require('node:crypto');
 const { loginFields, inspectLogin, fillLogin } = require('../dist/electron/vault-page.js');
 const { vaultTokenStore, readVaultFile, vaultClipboard } = require('../dist/electron/vault-storage.js');
-const { createVault, loginMetadata } = require('../dist/electron/vault.js');
+const { createVault, loginMetadata, loginSummaries } = require('../dist/electron/vault.js');
 const { vaultLogFields } = require('../dist/electron/vault-log.js');
 const { validateCommand } = require('../dist/electron/commands.js');
 const { createSettings } = require('../dist/electron/settings.js');
@@ -62,6 +62,8 @@ function controller(t, privateWindow = false, policy = 'close') {
   const service = {
     async status() { return { created: true, unlocked }; }, async unlock() { unlocked = true; }, async lock() { unlocked = false; }, async close() { closed++; },
     async logins(site) { reads.push(site); return [row(), row('https://synthetic.example.evil', 'evil-id')]; },
+    apps: { async self() { return { id: 'horizon', name: 'Horizon', kind: 'cosmic', status: 'granted', kinds: ['login'], permissions: ['import'] }; } },
+    async listLogins() { return [{ id: 'synthetic-id', version: 1, title: 'Synthetic site', username: 'synthetic-user', website: origin }]; },
     hello: { async unlock(handle) { hwnd = handle; unlocked = true; } }, entries: { async save() {} },
   };
   const folder = directory(t), protection = cipher();
@@ -204,4 +206,84 @@ test('Vault lock interrupts a pending fill and clipboard disposal awaits an OS w
   const writing = new Promise(done => { started = done; });
   const clipboard = vaultClipboard({ async writeText(text) { started(); await new Promise(done => { finishWrite = done; }); value = text; }, async readText() { return value; }, async clear() { value = ''; } });
   const copy = clipboard.copy(secret); await writing; const disposed = clipboard.clear(); finishWrite(); await copy; await disposed; assert.equal(value, '');
+});
+
+test('Vault lists every saved sign-in from one request as display metadata and keeps the sealed index bounded', async t => {
+  const fixture = controller(t);
+  const summary = (id, website, extra = {}) => ({ id, version: 1, title: 'Site ' + id, username: 'user-' + id, website, ...extra });
+  fixture.service.listLogins = async () => [summary('one', 'https://one.example/login'), summary('two', 'https://two.example'), summary('one', 'https://dup.example'), summary('bad', 'javascript:alert(1)'), summary('none', ''), { id: 7, title: 1, username: 2, website: 3 }, summary('long', 'https://long.example', { title: 'x'.repeat(900), username: 'y'.repeat(900) })];
+  await fixture.vault.run({ type: 'vault-unlock', password: 'Synthetic master password' });
+  assert.deepEqual(fixture.reads, []);
+  const logins = fixture.vault.state().logins;
+  assert.deepEqual(logins.map(item => [item.id, item.origin]), [['one', 'https://one.example'], ['two', 'https://two.example'], ['long', 'https://long.example']]);
+  assert.equal(logins[2].title.length, 500); assert.equal(logins[2].username.length, 512);
+  assert.equal(fixture.events.some(state => JSON.stringify(state).includes(secret)), false);
+  const bytes = readFileSync(join(fixture.folder, 'vault-sites.sealed'));
+  assert.equal(bytes.includes(Buffer.from('user-one')), false); assert.equal(bytes.includes(Buffer.from('one.example')), false);
+  assert.deepEqual(readVaultFile(join(fixture.folder, 'vault-sites.sealed'), fixture.protection).map(item => item.id), ['one', 'two', 'long']);
+  fixture.service.listLogins = async () => Array.from({ length: 5000 }, (_, index) => summary('bulk-' + index, 'https://bulk' + index + '.example'));
+  await fixture.vault.run({ type: 'vault-refresh' });
+  assert.equal(fixture.vault.state().logins.length, 4096);
+  fixture.service.listLogins = async () => ({ not: 'a list' });
+  await assert.rejects(fixture.vault.run({ type: 'vault-refresh' }), /VAULT_UNAVAILABLE/);
+  assert.deepEqual(fixture.vault.state().logins, []);
+  assert.deepEqual(loginSummaries([]), []);
+  assert.throws(() => loginSummaries(null), /VAULT_UNAVAILABLE/);
+});
+function interfaceModule(filename, dependencies) {
+  const { compileFunction } = require('node:vm');
+  const { transpileModule, ModuleKind, JsxEmit } = require('typescript');
+  const source = transpileModule(readFileSync(filename, 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS, jsx: JsxEmit.ReactJSX } }).outputText;
+  const exported = {}, jsx = (type, props) => ({ type, props });
+  compileFunction(source, ['exports', 'require'])(exported, name => {
+    if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
+    assert.ok(Object.hasOwn(dependencies, name), `Unexpected interface import: ${name}`);
+    return dependencies[name];
+  });
+  return exported;
+}
+
+test('a refused master password or Hello is its own answer, sets no error and never takes the Passwords choice away', async t => {
+  const copy = interfaceModule('src/copy.ts', {}), api = require('../dist/src/shared/api.js');
+  const { passwordsReason } = interfaceModule('src/Import.tsx', { react: {}, 'lucide-react': {}, './copy': copy, './shared/api': api, './Vault': {} });
+  const fixture = controller(t), { vault, service } = fixture, unlock = service.unlock, hello = service.hello.unlock;
+  await vault.run({ type: 'vault-refresh' });
+  const refuse = (code, way = 'password') => {
+    const failure = async () => { throw Object.assign(new Error('service said ' + secret), { code }); };
+    service.unlock = way === 'password' ? failure : unlock; service.hello.unlock = way === 'hello' ? failure : hello;
+  };
+  const command = way => way === 'password' ? { type: 'vault-unlock', password: secret } : { type: 'vault-hello' };
+  const cases = [['password', 'locked', 'VAULT_PERMISSION_PASSWORD'], ['password', 'limited', 'VAULT_PERMISSION_LIMITED'], ['password', 'forbidden', 'VAULT_PERMISSION_FORBIDDEN'],
+    ...(process.platform === 'win32' ? [['hello', 'not_found', 'VAULT_HELLO_NOT_SET_UP'], ['hello', 'unavailable', 'VAULT_HELLO_UNAVAILABLE'], ['hello', 'locked', 'VAULT_HELLO_FAILED']] : [])];
+  for (const [way, code, expected] of cases) {
+    refuse(code, way);
+    const sent = command(way);
+    await assert.rejects(vault.run(sent), error => error.message === expected && !error.message.includes(secret), `${way} ${code}`);
+    assert.equal(vault.state().error, null, `${way} ${code}`); assert.equal(vault.state().unlocked, false);
+    assert.equal(passwordsReason(vault.state(), false), null, `${way} ${code}`); assert.equal(passwordsReason(vault.state(), true), null, `${way} ${code}`);
+    if (sent.password !== undefined) assert.equal(sent.password, '');
+  }
+  refuse('locked', 'none'); await vault.run({ type: 'vault-unlock', password: 'Synthetic master password' }); assert.equal(vault.state().unlocked, true);
+  refuse('locked'); await assert.rejects(vault.run(command('password')), error => error.message === 'VAULT_PERMISSION_PASSWORD');
+  assert.equal(vault.state().unlocked, true); assert.equal(vault.state().error, null);
+  // Not reaching Vault at all, or a Vault that is not created, is still a failure to unlock.
+  for (const code of ['not_found', 'unavailable', 'surprise']) {
+    refuse(code); await assert.rejects(vault.run(command('password')), error => error.message === 'VAULT_UNAVAILABLE', code);
+    assert.equal(vault.state().error, 'VAULT_UNAVAILABLE'); assert.equal(vault.state().unlocked, false);
+    assert.equal(passwordsReason(vault.state(), true), null, code);
+    refuse(code, 'none'); await vault.run({ type: 'vault-refresh' }); assert.equal(vault.state().error, null);
+  }
+  const named = (available, created, probed) => passwordsReason({ available, created }, probed);
+  assert.equal(named(false, false, false), null); assert.equal(named(false, false, true), 'importPasswordsNoVault');
+  assert.equal(named(true, false, false), 'importPasswordsNoVaultCreated'); assert.equal(named(true, true, true), null);
+});
+
+test('a sign-in titled with its address, or with nothing, is shown by its host', () => {
+  const copy = interfaceModule('src/copy.ts', {});
+  const { loginTitle } = interfaceModule('src/Vault.tsx', { react: {}, 'lucide-react': {}, './copy': copy, './ToolbarPopover': {} });
+  const login = title => ({ id: 'synthetic-id', origin: 'https://mail.synthetic.test', title, username: 'synthetic-user' });
+  for (const title of ['https://mail.synthetic.test', 'http://mail.synthetic.test/login?next=1', 'HTTPS://MAIL.SYNTHETIC.TEST', '', '   ']) assert.equal(loginTitle(login(title)), 'mail.synthetic.test', title);
+  for (const title of ['Synthetic mail', 'httpsmail', 'Mail at https://mail.synthetic.test']) assert.equal(loginTitle(login(title)), title);
+  assert.equal(loginTitle({ ...login(''), origin: 'https://mail.synthetic.test:8443' }), 'mail.synthetic.test:8443');
+  assert.equal(loginTitle(login('https://mail.synthetic.test')).slice(0, 1).toUpperCase(), 'M');
 });

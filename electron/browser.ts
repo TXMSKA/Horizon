@@ -15,8 +15,8 @@ import type { TranslateCommand } from '../src/shared/translate';
 import { sealedLyraTokens } from './lyra-token';
 import type { LyraCommand } from '../src/shared/lyra';
 import { LYRA_ADDRESS } from '../src/shared/lyra';
-import { GROUP_COLORS, IPC, SEARCH_ENGINES } from '../src/shared/api';
-import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, ExtensionWarning, ImportProgress, ImportResult, Profile, SettingsSection, TabState } from '../src/shared/api';
+import { GROUP_COLORS, IMPORT_SETTINGS, IPC, SEARCH_ENGINES } from '../src/shared/api';
+import type { BrowserCommand, BrowserShortcut, BrowserState, BrowserStore, ClearedBrowsingData, ContentArea, DesktopItem, DesktopPanelState, ExtensionWarning, ImportProgress, ImportResult, ImportSettingName, Profile, SettingsSection, TabState } from '../src/shared/api';
 import { browserReservedShortcut, browserShortcut, browserShortcutAccelerators } from '../src/shared/shortcuts';
 import { groupBoundaryIndex, moveGroupedTab, nearestVisibleTab, retainedTabGroups } from '../src/shared/tab-groups';
 import { classifyInput, isAllowedSubframeURL, isAllowedURL, isWebURL, parseErrorName, settingsAddress, settingsSection } from './browsing';
@@ -43,7 +43,8 @@ import { validCaptureRect } from '../src/shared/capture';
 import { addFavorite, createFavoriteFolder, deletedFavorite, favoriteDestination, favoriteLinks, favoriteLocation, favoriteName, favoriteTitle, moveFavorite, restoreFavorite } from './favorites';
 import type { DeletedFavorite } from './favorites';
 import { discoverImportSources, readImport } from './import';
-import { HISTORY_LIMIT, mergeFavorites, mergeHistory } from './import-merge';
+import { appSettingsSnapshot, applyAppSettings, HISTORY_LIMIT, mergeFavorites, mergeHistory, mergeProfileSettings, restoreAppSettings } from './import-merge';
+import { deletePasswordsFile, passwordsFileName, passwordsFormat, readPasswordsFile } from './import-passwords';
 import { emptySession, lazySession, LEGACY_WINDOW_ID, migrateSession, readWindowSessions, rememberClosed, restoreSession, restorableTab, sessionAddress, takeClosed, writeWindowSessions } from './session-store';
 import type { SessionTab, WindowSessions } from './session-store';
 import { existingExtensions, profileExtensions } from './extensions';
@@ -166,6 +167,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   let closing = false;
   let deleting = false;
   let extensionDecision: { warning: ExtensionWarning; answer(allow: boolean): void } | null = null;
+  // The exported passwords file is kept by its path in this process only; the page knows an opaque id and the file name.
+  let passwordsFile: { id: string; path: string; name: string } | null = null;
   const cancelExtensionDecision = () => { extensionDecision?.answer(false); };
   const askExtension = (profileId: string, warning: Omit<ExtensionWarning, 'requestId'>) => {
     if (privateWindow || closing || extensionDecision || selectedProfile !== profileId || window.isDestroyed()) return Promise.resolve(false);
@@ -337,8 +340,26 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const target = current(); clearingBrowsingData = true; publish();
         return target.clearData(command).finally(() => { clearingBrowsingData = false; publish(); });
       }
-      case 'list-import-sources': return discoverImportSources(importEnvironment());
+      case 'list-import-sources': return discoverImportSources(importEnvironment(), resolve(userData, 'import'));
       case 'import-browser-data': return current().importBrowserData(command);
+      case 'choose-import-passwords-file': return (async () => {
+        let choice: Electron.OpenDialogReturnValue;
+        try { choice = await dialog.showOpenDialog(window, { properties: ['openFile'], filters: [{ name: 'CSV', extensions: ['csv'] }], defaultPath: resolvedDownloadsFolder(settings, downloads).downloadsFolder }); }
+        catch { throw new Error('IMPORT_PASSWORDS_FILE_INVALID'); }
+        const path = choice.filePaths[0];
+        if (choice.canceled || !path) return null;
+        passwordsFile = { id: randomUUID(), path, name: passwordsFileName(path) };
+        return { id: passwordsFile.id, name: passwordsFile.name };
+      })();
+      case 'import-passwords': {
+        const file = passwordsFile;
+        if (!file || file.id !== command.file) throw new Error('IMPORT_PASSWORDS_NO_FILE');
+        return vault.importPasswords(passwordsFormat(command.browser), () => readPasswordsFile(file.path));
+      }
+      case 'delete-import-passwords-file': {
+        if (!passwordsFile || passwordsFile.id !== command.file) throw new Error('IMPORT_PASSWORDS_NO_FILE');
+        deletePasswordsFile(passwordsFile.path); passwordsFile = null; return;
+      }
       case 'finish-first-run': settings.finishFirstRun(); publish(); return;
       case 'dark-pages': settings.setDarkPages(command.value); updateDarkPages(); return;
       case 'dark-strength': settings.setDarkStrength(command.value); updateDarkPages(); return;
@@ -616,7 +637,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const editStore = (edit: () => void, failure: string) => {
       if (privateWindow) throw new Error('Private window favorites are read-only');
-      const previous = { favorites: structuredClone(store.favorites), history: store.history };
+      const previous = { favorites: structuredClone(store.favorites), history: store.history, siteSettings: structuredClone(store.siteSettings), clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose };
       try {
         edit();
         try {
@@ -626,7 +647,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           storageError = true;
           throw new Error(failure);
         }
-      } catch (error) { store.favorites = previous.favorites; store.history = previous.history; publish(); throw error; }
+      } catch (error) {
+        store.favorites = previous.favorites; store.history = previous.history;
+        // The site settings object stays the same one, because the permission queue holds it.
+        Object.assign(store.siteSettings, { blocking: previous.siteSettings.blocking, dark: previous.siteSettings.dark, permissions: previous.siteSettings.permissions });
+        if (previous.siteSettings.translation) store.siteSettings.translation = previous.siteSettings.translation; else delete store.siteSettings.translation;
+        store.clearHistoryOnClose = previous.clearHistoryOnClose; store.clearCacheOnClose = previous.clearCacheOnClose;
+        publish(); throw error;
+      }
       clearTimeout(pendingWrite); pendingWrite = undefined;
       storageError = false; profileData.favoritesVersion++;
       for (const item of ['favorites', 'history'] as const) shared.sync?.markDirty(item);
@@ -641,18 +669,26 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const language = resolveLanguage(settings.language, app.getLocale());
         const data = await readImport(importEnvironment(), command, { mobile: text('importMobileFavorites', language), menu: text('importMenuFavorites', language) }, resolve(userData, 'import'), (current, total) => announce({ current, total }));
         if (disposed || closing) throw new Error('IMPORT_STORAGE_FAILED');
-        const result: ImportResult = { favorites: 0, history: 0, skipped: (data.favorites?.skipped ?? 0) + (data.history?.skipped ?? 0), searchEngine: data.searchEngine !== settings.searchEngine ? data.searchEngine : null };
-        const previousEngine = settings.searchEngine;
+        const result: ImportResult = { favorites: 0, history: 0, skipped: (data.favorites?.skipped ?? 0) + (data.history?.skipped ?? 0), searchEngine: data.searchEngine !== settings.searchEngine ? data.searchEngine : null, settings: { names: [], sitePermissions: 0, translations: 0 } };
+        const previousEngine = settings.searchEngine, previousSettings = appSettingsSnapshot(settings);
         try {
           if (result.searchEngine) settings.setSearchEngine(result.searchEngine);
+          const changed: ImportSettingName[] = data.settings ? applyAppSettings(settings, data.settings, app.getLocale()) : [];
           editStore(() => {
             if (data.favorites) { const merged = mergeFavorites(store.favorites, data.favorites); result.favorites = merged.links; result.skipped += merged.skipped; }
             if (data.history) { const merged = mergeHistory(store.history, data.history.entries); store.history = merged.history; result.history = merged.imported; }
+            if (data.settings) {
+              const merged = mergeProfileSettings(store, data.settings, resolveLanguage(settings.language, app.getLocale()));
+              result.settings = { names: IMPORT_SETTINGS.filter(name => changed.includes(name) || merged.names.includes(name)), sitePermissions: merged.sitePermissions, translations: merged.translations };
+              result.skipped += merged.skipped;
+            }
           }, 'IMPORT_STORAGE_FAILED');
         } catch (error) {
+          restoreAppSettings(settings, previousSettings);
           if (result.searchEngine) try { settings.setSearchEngine(previousEngine); } catch { /* The saved engine stays as it was written. */ }
           throw error;
         }
+        if (result.settings.sitePermissions) permissions.reconcile();
         return result;
       } finally { announce(null); }
     };

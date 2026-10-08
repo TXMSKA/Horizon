@@ -2,7 +2,7 @@
   "name": "vault-client",
   "version": "0.1.0",
   "private": true,
-  "description": "Horizon's copy of the Vault client (TXMSKA/Vault packages/client at c73c859): how Horizon finds, unlocks and reads the local Vault service. Update it when Vault's client changes.",
+  "description": "Horizon's copy of the Vault client (TXMSKA/Vault packages/client at 3858d03, branch feat/006-horizon-import): how Horizon finds, unlocks and reads the local Vault service and asks its import permission. Update it when Vault's client changes.",
   "type": "module",
   "exports": {
     ".": {
