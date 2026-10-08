@@ -53,9 +53,11 @@ export interface ImportPasswordsResult { imported: number; duplicates: number; s
 export interface ImportProgress { current: number; total: number }
 export type SettingsError = 'SETTINGS_COMMAND_INVALID' | 'SETTINGS_TAB_LIMIT' | 'SITE_SETTINGS_SAVE_FAILED' | 'SETTINGS_SAVE_FAILED' | 'SEARCH_ENGINE_INVALID' | 'LANGUAGE_INVALID' | 'DOWNLOADS_FOLDER_INVALID' | 'DOWNLOADS_FOLDER_PICK_FAILED' | 'ASK_WHERE_TO_SAVE_INVALID' | 'BLOCK_ADS_INVALID' | 'BLOCK_THIRD_PARTY_COOKIES_INVALID' | 'PROFILE_SETTINGS_SAVE_FAILED' | 'CLEAR_IN_PROGRESS' | 'CLEAR_HISTORY_FAILED' | 'CLEAR_SITE_DATA_FAILED' | 'CLEAR_CACHE_FAILED' | 'DEFAULT_BROWSER_UNSUPPORTED' | 'DEFAULT_BROWSER_DEVELOPMENT_BUILD' | 'DEFAULT_BROWSER_REGISTRATION_FAILED' | 'DEFAULT_BROWSER_SETTINGS_FAILED' | 'IMPORT_COMMAND_INVALID' | 'IMPORT_IN_PROGRESS' | 'IMPORT_SOURCE_NOT_FOUND' | 'IMPORT_NO_CHOICE' | 'IMPORT_FILE_LOCKED' | 'IMPORT_FILE_TOO_LARGE' | 'IMPORT_FILE_INVALID' | 'IMPORT_HISTORY_FAILED' | 'IMPORT_SETTINGS_FAILED' | 'IMPORT_STORAGE_FAILED' | 'IMPORT_PASSWORDS_NO_FILE' | 'IMPORT_PASSWORDS_FILE_INVALID' | 'IMPORT_PASSWORDS_FILE_TOO_LARGE' | 'IMPORT_PASSWORDS_FAILED' | 'IMPORT_PASSWORDS_DELETE_FAILED';
 export type BuiltInTheme = 'system' | 'amber' | 'daylight';
-export const MARKETPLACE_THEMES = ['fjord'] as const;
+export const MARKETPLACE_THEMES = ['fjord', 'dune', 'graphite', 'moss'] as const;
 export type MarketplaceTheme = typeof MARKETPLACE_THEMES[number];
 export type Theme = BuiltInTheme | MarketplaceTheme;
+// Themes whose surfaces are light; every other theme is dark.
+export const LIGHT_THEMES: readonly string[] = ['daylight', 'dune', 'moss'];
 export type Contrast = 'standard' | 'high';
 export const HUB_APPS = ['desktop', 'translate', 'themes'] as const;
 export type HubApp = typeof HUB_APPS[number];

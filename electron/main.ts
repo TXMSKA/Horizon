@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, nativeTheme, protocol, safeStorage, screen
 import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { IPC } from '../src/shared/api';
+import { IPC, LIGHT_THEMES } from '../src/shared/api';
 import { hardenContents, secureSession, START_URL, validateSender } from './security';
 import { serveHorizon } from './protocol';
 import { createBrowser, isLaunchNavigation, isProfileSession, restoredWindows } from './browser';
@@ -91,7 +91,7 @@ if (instance) {
     if (darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors)) setDarkPagesSwitch(app.commandLine, true);
     const background = () => {
       const resolved = settings.theme === 'system' ? nativeTheme.shouldUseDarkColors ? 'amber' : 'daylight' : settings.theme;
-      const palette = settings.contrast === 'high' || nativeTheme.shouldUseHighContrastColors ? resolved !== 'daylight' ? 'contrast-dark' : 'contrast-light' : resolved;
+      const palette = settings.contrast === 'high' || nativeTheme.shouldUseHighContrastColors ? LIGHT_THEMES.includes(resolved) ? 'contrast-light' : 'contrast-dark' : resolved;
       const page = tokens.match(new RegExp(`--palette-${palette}-page:\\s*(#[a-fA-F0-9]{6})`))?.[1];
       if (!page) throw new Error('Missing theme background');
       return page;

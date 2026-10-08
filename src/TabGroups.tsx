@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowRight, CircleHelp, Plus, Search, SearchX, Ungroup } fro
 import type { LucideIcon } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
-import { GROUP_COLORS } from './shared/api';
+import { GROUP_COLORS, LIGHT_THEMES, MARKETPLACE_THEMES } from './shared/api';
 import type { BrowserCommand, GroupColor, Language, TabGroup, TabState } from './shared/api';
 import { groupPaint, hexToHSV, hsvToHex } from './shared/group-colors';
 import type { GroupPalette, HSV } from './shared/group-colors';
@@ -23,8 +23,10 @@ export function groupDisplayName(group: TabGroup, language: Language): string {
 }
 export function useGroupPalette(): GroupPalette {
   const read = (): GroupPalette => {
-    const root = document.documentElement, style = getComputedStyle(root), light = root.dataset.theme === 'daylight';
-    const theme = root.dataset.contrast === 'high' ? light ? 'contrast-light' : 'contrast-dark' : light ? 'daylight' : 'amber';
+    const root = document.documentElement, style = getComputedStyle(root), id = root.dataset.theme ?? '', light = LIGHT_THEMES.includes(id);
+    // Fjord shipped with Amber's group colours and keeps them; the later marketplace themes use their own.
+    const own = id !== 'fjord' && (MARKETPLACE_THEMES as readonly string[]).includes(id);
+    const theme = root.dataset.contrast === 'high' ? light ? 'contrast-light' : 'contrast-dark' : own ? id : light ? 'daylight' : 'amber';
     const value = (role: string) => style.getPropertyValue(`--palette-${theme}-${role}`).trim();
     return { chrome: value('chrome'), wash: value('wash'), colors: Object.fromEntries(GROUP_COLORS.map(color => [color, value(color)])) };
   };

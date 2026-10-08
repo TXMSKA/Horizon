@@ -4,7 +4,7 @@ import { validateStore } from './store';
 import { validateDesktopStore } from './desktop';
 import type { DesktopStore } from './desktop';
 import { isProfileColor, profileName } from './profiles';
-import { validateSettings } from './settings';
+import { isMarketplaceTheme, validateSettings } from './settings';
 import type { Settings } from './settings';
 import { integer, recordId, requireSync, shape, uuid } from './sync-format';
 import type { SyncOperation, SyncRecord } from './sync-format';
@@ -95,7 +95,7 @@ export function validateRecord(record: SyncRecord): void {
   if (item === 'tabs') { validateRemoteWindows(value); requireSync(value.every(window => window.profile === profile)); return; }
   if (item === 'settings') {
     const fields = { ...defaults(), [key]: value };
-    if (key === 'theme' && value === 'fjord') fields.marketplace = { installed: ['fjord'], builtIn: 'system', contrast: 'standard' };
+    if (key === 'theme' && isMarketplaceTheme(value)) fields.marketplace = { installed: [value], builtIn: 'system', contrast: 'standard' };
     requireSync(validateSettings(fields)); return;
   }
   if (item === 'history') { requireSync(shape(value, ['url', 'title', 'lastVisit', 'visitCount']) && value.url === key && validateStore({ ...emptySyncStore(), history: [value] })); return; }

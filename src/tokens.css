@@ -83,6 +83,132 @@
   --palette-fjord-sun: #a4d1da;
   --palette-fjord-field: #24353c;
   --palette-fjord-field-line: #819da7;
+  --palette-dune-canvas: #efe8dd;
+  --palette-dune-surface: #f6f1ea;
+  --palette-dune-surface-2: #e5ddd0;
+  --palette-dune-surface-3: #ded5c7;
+  --palette-dune-glass: rgba(236, 228, 216, 0.9);
+  --palette-dune-hover: #e8e0d4;
+  --palette-dune-border-subtle: #e0d8cb;
+  --palette-dune-line: #d9d0c2;
+  --palette-dune-line-strong: #c5baa9;
+  --palette-dune-frame: #80766a;
+  --palette-dune-title: #3d3328;
+  --palette-dune-text: #4a4035;
+  --palette-dune-soft: #5d5246;
+  --palette-dune-dim: #62574b;
+  --palette-dune-primary: #7a4527;
+  --palette-dune-primary-hover: #6b3c21;
+  --palette-dune-on-primary: #f6f1ea;
+  --palette-dune-wash: #eadccd;
+  --palette-dune-on-wash: #6b3c21;
+  --palette-dune-primary-border: rgba(122, 69, 39, 0.3);
+  --palette-dune-error: #8a3833;
+  --palette-dune-error-wash: #f1e0d9;
+  --palette-dune-success: #3c5d3a;
+  --palette-dune-warning: #6d4c1f;
+  --palette-dune-purple: #674a7a;
+  --palette-dune-cyan: #2f5f63;
+  --palette-dune-info: #3f527a;
+  --palette-dune-overlay: rgba(61, 51, 40, 0.24);
+  --palette-dune-capture-veil: rgba(59, 54, 49, 0.28);
+  --palette-dune-shadow: #d2c6b5;
+  --palette-dune-cover-from: #e5ddd0;
+  --palette-dune-cover-to: #f6f1ea;
+  --palette-dune-white: #f6f1ea;
+  --palette-dune-none: none;
+  --palette-dune-chrome: #e9e1d5;
+  --palette-dune-page: #efe8dd;
+  --palette-dune-sky: #efe8dd;
+  --palette-dune-ground: #ebe3d7;
+  --palette-dune-horizon: #a99d8b;
+  --palette-dune-sun: #7a4527;
+  --palette-dune-field: #f6f1ea;
+  --palette-dune-field-line: #d9d0c2;
+  --palette-graphite-canvas: #0e0f11;
+  --palette-graphite-surface: #1b1c1f;
+  --palette-graphite-surface-2: #222327;
+  --palette-graphite-surface-3: #2b2d31;
+  --palette-graphite-glass: rgba(20, 21, 24, 0.9);
+  --palette-graphite-hover: #1d1e22;
+  --palette-graphite-border-subtle: #26272b;
+  --palette-graphite-line: #313338;
+  --palette-graphite-line-strong: #484a50;
+  --palette-graphite-frame: #7f828a;
+  --palette-graphite-title: #e8e9ec;
+  --palette-graphite-text: #cfd1d6;
+  --palette-graphite-soft: #a3a6ad;
+  --palette-graphite-dim: #989ba3;
+  --palette-graphite-primary: #aab6e0;
+  --palette-graphite-primary-hover: #bdc7e8;
+  --palette-graphite-on-primary: #141826;
+  --palette-graphite-wash: #22263a;
+  --palette-graphite-on-wash: #c9d2f0;
+  --palette-graphite-primary-border: rgba(170, 182, 224, 0.4);
+  --palette-graphite-error: #e5958f;
+  --palette-graphite-error-wash: #2b1b1c;
+  --palette-graphite-success: #93c6a4;
+  --palette-graphite-warning: #d6bb7a;
+  --palette-graphite-purple: #bfa8d6;
+  --palette-graphite-cyan: #8fc3c4;
+  --palette-graphite-info: #9fc0d8;
+  --palette-graphite-overlay: rgba(0, 0, 0, 0.6);
+  --palette-graphite-capture-veil: rgba(0, 0, 0, 0.45);
+  --palette-graphite-shadow: #000000;
+  --palette-graphite-cover-from: #484a50;
+  --palette-graphite-cover-to: #131416;
+  --palette-graphite-white: #e8e9ec;
+  --palette-graphite-none: none;
+  --palette-graphite-chrome: #131416;
+  --palette-graphite-page: #18191b;
+  --palette-graphite-sky: #18191b;
+  --palette-graphite-ground: #121315;
+  --palette-graphite-horizon: #aab6e0;
+  --palette-graphite-sun: #aab6e0;
+  --palette-graphite-field: #202125;
+  --palette-graphite-field-line: #34363b;
+  --palette-moss-canvas: #eaede6;
+  --palette-moss-surface: #f2f4ef;
+  --palette-moss-surface-2: #dfe3da;
+  --palette-moss-surface-3: #d9ddd3;
+  --palette-moss-glass: rgba(229, 233, 224, 0.9);
+  --palette-moss-hover: #e2e6dd;
+  --palette-moss-border-subtle: #dbdfd5;
+  --palette-moss-line: #d3d8cd;
+  --palette-moss-line-strong: #bdc3b5;
+  --palette-moss-frame: #737a6d;
+  --palette-moss-title: #2f382b;
+  --palette-moss-text: #3c4637;
+  --palette-moss-soft: #4f5949;
+  --palette-moss-dim: #545e4e;
+  --palette-moss-primary: #3f5b2e;
+  --palette-moss-primary-hover: #354f26;
+  --palette-moss-on-primary: #f2f4ef;
+  --palette-moss-wash: #dce5d3;
+  --palette-moss-on-wash: #354f26;
+  --palette-moss-primary-border: rgba(63, 91, 46, 0.3);
+  --palette-moss-error: #8a3a36;
+  --palette-moss-error-wash: #efe1de;
+  --palette-moss-success: #2f5d47;
+  --palette-moss-warning: #6a4d1f;
+  --palette-moss-purple: #654a78;
+  --palette-moss-cyan: #2d5e60;
+  --palette-moss-info: #3c5180;
+  --palette-moss-overlay: rgba(47, 56, 43, 0.24);
+  --palette-moss-capture-veil: rgba(59, 54, 49, 0.28);
+  --palette-moss-shadow: #c7cdbf;
+  --palette-moss-cover-from: #dfe3da;
+  --palette-moss-cover-to: #f2f4ef;
+  --palette-moss-white: #f2f4ef;
+  --palette-moss-none: none;
+  --palette-moss-chrome: #e3e7de;
+  --palette-moss-page: #eaede6;
+  --palette-moss-sky: #eaede6;
+  --palette-moss-ground: #e6e9e2;
+  --palette-moss-horizon: #9aa290;
+  --palette-moss-sun: #3f5b2e;
+  --palette-moss-field: #f2f4ef;
+  --palette-moss-field-line: #d3d8cd;
   --palette-daylight-canvas: #eeebe9;
   --palette-daylight-surface: #f4f2f0;
   --palette-daylight-surface-2: #e1dedb;
@@ -272,8 +398,8 @@
 :root[data-theme="daylight"] { color-scheme: only light; }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="daylight"]):not([data-theme="amber"]) { color-scheme: dark; --surface-capture-veil: var(--palette-amber-capture-veil); }
-  :root[data-contrast="high"]:not([data-theme="daylight"]):not([data-theme="amber"]) { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }
+  :root:not([data-theme="daylight"]):not([data-theme="dune"]):not([data-theme="moss"]):not([data-theme="amber"]) { color-scheme: dark; --surface-capture-veil: var(--palette-amber-capture-veil); }
+  :root[data-contrast="high"]:not([data-theme="daylight"]):not([data-theme="dune"]):not([data-theme="moss"]):not([data-theme="amber"]) { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }
 }
 
 :root {
@@ -570,6 +696,135 @@
   --profile-cyan: var(--palette-fjord-cyan);
 }
 
+:root[data-theme="dune"] {
+  color-scheme: only light;
+  --surface-overlay: var(--palette-dune-overlay);
+  --surface-capture-veil: var(--palette-dune-capture-veil);
+  --surface-page: var(--palette-dune-page);
+  --surface-chrome: var(--palette-dune-chrome);
+  --surface-raised: var(--palette-dune-surface);
+  --surface-sunken: var(--palette-dune-surface-2);
+  --surface-field: var(--palette-dune-field);
+  --surface-hover: var(--palette-dune-hover);
+  --surface-pressed: var(--palette-dune-surface-3);
+  --surface-canvas: var(--palette-dune-canvas);
+  --surface-selected: var(--palette-dune-wash);
+  --border-popover: var(--palette-dune-line-strong);
+  --border-subtle: var(--palette-dune-border-subtle);
+  --surface-error: var(--palette-dune-error-wash);
+  --text-title: var(--palette-dune-title);
+  --text-primary: var(--palette-dune-text);
+  --text-secondary: var(--palette-dune-soft);
+  --text-placeholder: var(--palette-dune-dim);
+  --text-error: var(--palette-dune-error);
+  --border-control: var(--palette-dune-frame);
+  --divider: var(--palette-dune-line);
+  --focus: var(--palette-dune-primary);
+  --accent: var(--palette-dune-primary);
+  --accent-hover: var(--palette-dune-primary-hover);
+  --graphic-horizon: var(--palette-dune-horizon);
+  --surface-ground: var(--palette-dune-ground);
+  --surface-tab-active: var(--palette-dune-page);
+  --surface-address: var(--palette-dune-surface-2);
+  --graphic-sun: var(--palette-dune-sun);
+  --on-accent: var(--palette-dune-on-primary);
+  --switch-edge: var(--palette-dune-line-strong);
+  --profile-amber: var(--palette-dune-primary);
+  --profile-blue: var(--palette-dune-info);
+  --profile-green: var(--palette-dune-success);
+  --profile-red: var(--palette-dune-error);
+  --profile-yellow: var(--palette-dune-warning);
+  --profile-grey: var(--palette-dune-dim);
+  --profile-purple: var(--palette-dune-purple);
+  --profile-cyan: var(--palette-dune-cyan);
+}
+
+:root[data-theme="graphite"] {
+  color-scheme: dark;
+  --surface-overlay: var(--palette-graphite-overlay);
+  --surface-capture-veil: var(--palette-graphite-capture-veil);
+  --surface-page: var(--palette-graphite-page);
+  --surface-chrome: var(--palette-graphite-chrome);
+  --surface-raised: var(--palette-graphite-surface);
+  --surface-sunken: var(--palette-graphite-surface-2);
+  --surface-field: var(--palette-graphite-field);
+  --surface-hover: var(--palette-graphite-hover);
+  --surface-pressed: var(--palette-graphite-surface-3);
+  --surface-canvas: var(--palette-graphite-canvas);
+  --surface-selected: var(--palette-graphite-wash);
+  --border-popover: var(--palette-graphite-line-strong);
+  --border-subtle: var(--palette-graphite-border-subtle);
+  --surface-error: var(--palette-graphite-error-wash);
+  --text-title: var(--palette-graphite-title);
+  --text-primary: var(--palette-graphite-text);
+  --text-secondary: var(--palette-graphite-soft);
+  --text-placeholder: var(--palette-graphite-dim);
+  --text-error: var(--palette-graphite-error);
+  --border-control: var(--palette-graphite-frame);
+  --divider: var(--palette-graphite-line);
+  --focus: var(--palette-graphite-primary);
+  --accent: var(--palette-graphite-primary);
+  --accent-hover: var(--palette-graphite-primary-hover);
+  --graphic-horizon: var(--palette-graphite-horizon);
+  --surface-ground: var(--palette-graphite-ground);
+  --surface-tab-active: var(--palette-graphite-page);
+  --surface-address: var(--palette-graphite-surface-2);
+  --graphic-sun: var(--palette-graphite-sun);
+  --on-accent: var(--palette-graphite-on-primary);
+  --switch-edge: var(--palette-graphite-line-strong);
+  --profile-amber: var(--palette-graphite-primary);
+  --profile-blue: var(--palette-graphite-info);
+  --profile-green: var(--palette-graphite-success);
+  --profile-red: var(--palette-graphite-error);
+  --profile-yellow: var(--palette-graphite-warning);
+  --profile-grey: var(--palette-graphite-dim);
+  --profile-purple: var(--palette-graphite-purple);
+  --profile-cyan: var(--palette-graphite-cyan);
+}
+
+:root[data-theme="moss"] {
+  color-scheme: only light;
+  --surface-overlay: var(--palette-moss-overlay);
+  --surface-capture-veil: var(--palette-moss-capture-veil);
+  --surface-page: var(--palette-moss-page);
+  --surface-chrome: var(--palette-moss-chrome);
+  --surface-raised: var(--palette-moss-surface);
+  --surface-sunken: var(--palette-moss-surface-2);
+  --surface-field: var(--palette-moss-field);
+  --surface-hover: var(--palette-moss-hover);
+  --surface-pressed: var(--palette-moss-surface-3);
+  --surface-canvas: var(--palette-moss-canvas);
+  --surface-selected: var(--palette-moss-wash);
+  --border-popover: var(--palette-moss-line-strong);
+  --border-subtle: var(--palette-moss-border-subtle);
+  --surface-error: var(--palette-moss-error-wash);
+  --text-title: var(--palette-moss-title);
+  --text-primary: var(--palette-moss-text);
+  --text-secondary: var(--palette-moss-soft);
+  --text-placeholder: var(--palette-moss-dim);
+  --text-error: var(--palette-moss-error);
+  --border-control: var(--palette-moss-frame);
+  --divider: var(--palette-moss-line);
+  --focus: var(--palette-moss-primary);
+  --accent: var(--palette-moss-primary);
+  --accent-hover: var(--palette-moss-primary-hover);
+  --graphic-horizon: var(--palette-moss-horizon);
+  --surface-ground: var(--palette-moss-ground);
+  --surface-tab-active: var(--palette-moss-page);
+  --surface-address: var(--palette-moss-surface-2);
+  --graphic-sun: var(--palette-moss-sun);
+  --on-accent: var(--palette-moss-on-primary);
+  --switch-edge: var(--palette-moss-line-strong);
+  --profile-amber: var(--palette-moss-primary);
+  --profile-blue: var(--palette-moss-info);
+  --profile-green: var(--palette-moss-success);
+  --profile-red: var(--palette-moss-error);
+  --profile-yellow: var(--palette-moss-warning);
+  --profile-grey: var(--palette-moss-dim);
+  --profile-purple: var(--palette-moss-purple);
+  --profile-cyan: var(--palette-moss-cyan);
+}
+
 :root[data-contrast="high"] {
   --surface-capture-veil: var(--palette-contrast-light-capture-veil);
   --profile-amber: light-dark(var(--palette-contrast-light-primary), var(--palette-contrast-dark-primary));
@@ -614,7 +869,7 @@
   --switch-edge: light-dark(var(--palette-contrast-light-line-strong), var(--palette-contrast-dark-line-strong));
 }
 
-:root[data-contrast="high"][data-theme="amber"], :root[data-contrast="high"][data-theme="fjord"] { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }
+:root[data-contrast="high"][data-theme="amber"], :root[data-contrast="high"][data-theme="fjord"], :root[data-contrast="high"][data-theme="graphite"] { --surface-capture-veil: var(--palette-contrast-dark-capture-veil); }
 
 [data-preview-theme=amber] {
   --preview-sky: var(--palette-amber-sky);
@@ -664,4 +919,43 @@
   --preview-sun: var(--palette-fjord-sun);
   --preview-field: var(--palette-fjord-field);
   --preview-field-line: var(--palette-fjord-field-line);
+}
+
+[data-preview-theme=dune] {
+  --preview-sky: var(--palette-dune-sky);
+  --preview-chrome: var(--palette-dune-chrome);
+  --preview-accent: var(--palette-dune-primary);
+  --preview-tab: var(--palette-dune-surface-3);
+  --preview-toolbar: var(--palette-dune-surface-2);
+  --preview-ground: var(--palette-dune-ground);
+  --preview-horizon: var(--palette-dune-horizon);
+  --preview-sun: var(--palette-dune-sun);
+  --preview-field: var(--palette-dune-field);
+  --preview-field-line: var(--palette-dune-field-line);
+}
+
+[data-preview-theme=graphite] {
+  --preview-sky: var(--palette-graphite-sky);
+  --preview-chrome: var(--palette-graphite-chrome);
+  --preview-accent: var(--palette-graphite-primary);
+  --preview-tab: var(--palette-graphite-surface-3);
+  --preview-toolbar: var(--palette-graphite-surface-2);
+  --preview-ground: var(--palette-graphite-ground);
+  --preview-horizon: var(--palette-graphite-horizon);
+  --preview-sun: var(--palette-graphite-sun);
+  --preview-field: var(--palette-graphite-field);
+  --preview-field-line: var(--palette-graphite-field-line);
+}
+
+[data-preview-theme=moss] {
+  --preview-sky: var(--palette-moss-sky);
+  --preview-chrome: var(--palette-moss-chrome);
+  --preview-accent: var(--palette-moss-primary);
+  --preview-tab: var(--palette-moss-surface-3);
+  --preview-toolbar: var(--palette-moss-surface-2);
+  --preview-ground: var(--palette-moss-ground);
+  --preview-horizon: var(--palette-moss-horizon);
+  --preview-sun: var(--palette-moss-sun);
+  --preview-field: var(--palette-moss-field);
+  --preview-field-line: var(--palette-moss-field-line);
 }
