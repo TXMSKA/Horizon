@@ -4,10 +4,12 @@ export type Language = 'en' | 'es';
 export type VaultTimeout = 'close' | '5' | '15' | '60';
 export interface VaultLogin { id: string; origin: string; title: string; username: string }
 export interface VaultSuggestion { id: string; origin: string; x: number; y: number; width: number; logins: VaultLogin[] }
-export interface VaultState { available: boolean; created: boolean; unlocked: boolean; unlockMethod: 'hello' | 'master' | null; timeout: VaultTimeout; logins: VaultLogin[]; suggestion: VaultSuggestion | null; error: 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAILABLE' | null; windows: boolean }
+export interface VaultState { available: boolean; created: boolean; unlocked: boolean; importAllowed: boolean; unlockMethod: 'hello' | 'master' | null; timeout: VaultTimeout; logins: VaultLogin[]; suggestion: VaultSuggestion | null; error: 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAILABLE' | null; windows: boolean }
 export type VaultCommand =
   | { type: 'vault-refresh' | 'vault-lock' | 'vault-hello' | 'vault-dismiss' }
   | { type: 'vault-unlock'; password: string }
+  | { type: 'vault-import-permission'; password: string }
+  | { type: 'vault-import-permission-hello' }
   | { type: 'vault-fill'; suggestion: string; id: string }
   | { type: 'vault-copy'; id: string; origin: string }
   | { type: 'vault-add'; title: string; website: string; username: string; password: string }
@@ -29,11 +31,16 @@ export type UpdateState = { status: 'unavailable' | 'idle' | 'checking' | 'upToD
 export interface ClearedBrowsingData { history: boolean; cookies: boolean; cache: boolean }
 export const IMPORT_BROWSERS = ['edge', 'chrome', 'brave', 'vivaldi', 'chromium', 'opera', 'opera-gx', 'firefox'] as const;
 export type ImportBrowser = typeof IMPORT_BROWSERS[number];
-export interface ImportProfile { id: string; name: string; favorites: boolean; history: boolean; searchEngine: SearchEngine | null }
+export const IMPORT_SETTINGS = ['onStart', 'downloadsFolder', 'askWhereToSave', 'blockThirdPartyCookies', 'language', 'theme', 'darkPages', 'clearHistoryOnClose', 'clearCacheOnClose'] as const;
+export type ImportSettingName = typeof IMPORT_SETTINGS[number];
+export interface ImportSettingsSummary { names: ImportSettingName[]; sitePermissions: number; translations: number }
+export interface ImportProfile { id: string; name: string; favorites: boolean; history: boolean; searchEngine: SearchEngine | null; settings: ImportSettingsSummary | null }
 export interface ImportSource { browser: ImportBrowser; name: string; profiles: ImportProfile[] }
-export interface ImportResult { favorites: number; history: number; skipped: number; searchEngine: SearchEngine | null }
+export interface ImportResult { favorites: number; history: number; skipped: number; searchEngine: SearchEngine | null; settings: ImportSettingsSummary }
+export interface ImportPasswordsFile { id: string; name: string }
+export interface ImportPasswordsResult { imported: number; duplicates: number; skipped: number }
 export interface ImportProgress { current: number; total: number }
-export type SettingsError = 'SETTINGS_COMMAND_INVALID' | 'SETTINGS_TAB_LIMIT' | 'SITE_SETTINGS_SAVE_FAILED' | 'SETTINGS_SAVE_FAILED' | 'SEARCH_ENGINE_INVALID' | 'LANGUAGE_INVALID' | 'DOWNLOADS_FOLDER_INVALID' | 'DOWNLOADS_FOLDER_PICK_FAILED' | 'ASK_WHERE_TO_SAVE_INVALID' | 'BLOCK_ADS_INVALID' | 'BLOCK_THIRD_PARTY_COOKIES_INVALID' | 'PROFILE_SETTINGS_SAVE_FAILED' | 'CLEAR_IN_PROGRESS' | 'CLEAR_HISTORY_FAILED' | 'CLEAR_SITE_DATA_FAILED' | 'CLEAR_CACHE_FAILED' | 'DEFAULT_BROWSER_UNSUPPORTED' | 'DEFAULT_BROWSER_DEVELOPMENT_BUILD' | 'DEFAULT_BROWSER_REGISTRATION_FAILED' | 'DEFAULT_BROWSER_SETTINGS_FAILED' | 'IMPORT_COMMAND_INVALID' | 'IMPORT_IN_PROGRESS' | 'IMPORT_SOURCE_NOT_FOUND' | 'IMPORT_NO_CHOICE' | 'IMPORT_FILE_LOCKED' | 'IMPORT_FILE_TOO_LARGE' | 'IMPORT_FILE_INVALID' | 'IMPORT_HISTORY_FAILED' | 'IMPORT_STORAGE_FAILED';
+export type SettingsError = 'SETTINGS_COMMAND_INVALID' | 'SETTINGS_TAB_LIMIT' | 'SITE_SETTINGS_SAVE_FAILED' | 'SETTINGS_SAVE_FAILED' | 'SEARCH_ENGINE_INVALID' | 'LANGUAGE_INVALID' | 'DOWNLOADS_FOLDER_INVALID' | 'DOWNLOADS_FOLDER_PICK_FAILED' | 'ASK_WHERE_TO_SAVE_INVALID' | 'BLOCK_ADS_INVALID' | 'BLOCK_THIRD_PARTY_COOKIES_INVALID' | 'PROFILE_SETTINGS_SAVE_FAILED' | 'CLEAR_IN_PROGRESS' | 'CLEAR_HISTORY_FAILED' | 'CLEAR_SITE_DATA_FAILED' | 'CLEAR_CACHE_FAILED' | 'DEFAULT_BROWSER_UNSUPPORTED' | 'DEFAULT_BROWSER_DEVELOPMENT_BUILD' | 'DEFAULT_BROWSER_REGISTRATION_FAILED' | 'DEFAULT_BROWSER_SETTINGS_FAILED' | 'IMPORT_COMMAND_INVALID' | 'IMPORT_IN_PROGRESS' | 'IMPORT_SOURCE_NOT_FOUND' | 'IMPORT_NO_CHOICE' | 'IMPORT_FILE_LOCKED' | 'IMPORT_FILE_TOO_LARGE' | 'IMPORT_FILE_INVALID' | 'IMPORT_HISTORY_FAILED' | 'IMPORT_SETTINGS_FAILED' | 'IMPORT_STORAGE_FAILED' | 'IMPORT_PASSWORDS_NO_FILE' | 'IMPORT_PASSWORDS_FILE_INVALID' | 'IMPORT_PASSWORDS_FILE_TOO_LARGE' | 'IMPORT_PASSWORDS_FAILED' | 'IMPORT_PASSWORDS_DELETE_FAILED';
 export type BuiltInTheme = 'system' | 'amber' | 'daylight';
 export const MARKETPLACE_THEMES = ['fjord'] as const;
 export type MarketplaceTheme = typeof MARKETPLACE_THEMES[number];
@@ -113,7 +120,10 @@ export type BrowserCommand = VaultCommand
   | { type: 'choose-downloads-folder' | 'reset-downloads-folder' | 'register-default-browser' | 'restart-to-update' }
   | { type: 'clear-browsing-data'; history: boolean; cookies: boolean; cache: boolean }
   | { type: 'list-import-sources' }
-  | { type: 'import-browser-data'; browser: ImportBrowser; profile: string; favorites: boolean; history: boolean; searchEngine: boolean }
+  | { type: 'import-browser-data'; browser: ImportBrowser; profile: string; favorites: boolean; history: boolean; searchEngine: boolean; settings: boolean }
+  | { type: 'choose-import-passwords-file' }
+  | { type: 'import-passwords'; browser: ImportBrowser; file: string }
+  | { type: 'delete-import-passwords-file'; file: string }
   | { type: 'finish-first-run' }
   | { type: 'reset-site'; host: string }
   | { type: 'retry-desktop-storage' }
@@ -200,6 +210,8 @@ export interface HorizonAPI {
   command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
   command(command: Extract<BrowserCommand, { type: 'list-import-sources' }>): Promise<ImportSource[]>;
   command(command: Extract<BrowserCommand, { type: 'import-browser-data' }>): Promise<ImportResult>;
+  command(command: Extract<BrowserCommand, { type: 'choose-import-passwords-file' }>): Promise<ImportPasswordsFile | null>;
+  command(command: Extract<BrowserCommand, { type: 'import-passwords' }>): Promise<ImportPasswordsResult>;
   command(command: Extract<BrowserCommand, { type: 'save-capture-file' }>): Promise<boolean>;
   command(command: Extract<BrowserCommand, { type: 'take-capture' | 'capture-full-page' | 'capture-screen' | 'edit-capture' | 'copy-capture' }>): Promise<CaptureShot>;
   command(command: BrowserCommand): Promise<void>;

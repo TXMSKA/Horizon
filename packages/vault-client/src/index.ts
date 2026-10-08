@@ -6,7 +6,7 @@ import { resolveHome, appIdPattern, serviceEnv } from "./paths.ts";
 import { privateDirectory, privateFile } from "./private.ts";
 import { readCapped, FILE_CAP } from "./files.ts";
 import { VaultClientError } from "./errors.ts";
-import type { AppView, Backup, Client, ConnectOptions, EntryRow, ImportCount, InstallRecord, LoginSummary, ServiceRecord, Status, TokenStore } from "./types.ts";
+import type { AppView, Backup, Client, ConnectOptions, EntryRow, EnvImportCount, ImportCount, InstallRecord, LoginSummary, RunProgress, RunSummary, ServiceRecord, Status, TokenStore } from "./types.ts";
 export type * from "./types.ts";
 export { VaultClientError, resolveHome, readCapped, FILE_CAP };
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
@@ -80,30 +80,41 @@ export async function connect(options: ConnectOptions): Promise<Client> {
     const result = await request<{ token: string; app: AppView }>(record, "POST", "/v1/apps/register", `Bootstrap ${key}`, options.app);
     token = result.token; await tokens.set(token); granted = result.app.status === "granted";
   }
-  async function call<T>(method: string, route: string, body?: unknown): Promise<T> {
+  async function call<T>(method: string, route: string, body?: unknown, timeout?: number): Promise<T> {
     if (closed) throw new VaultClientError("closed");
     record ??= await ensureRunning(home, options.startTimeoutMs);
-    try { return await request<T>(record, method, route, `Bearer ${token}`, body); }
+    try { return await request<T>(record, method, route, `Bearer ${token}`, body, timeout); }
     catch (error) { if (error instanceof VaultClientError && error.code === "unavailable") record = undefined; throw error; }
   }
   const session = randomUUID();
   const present = () => call<{ ok: true }>("POST", "/v1/apps/present", { session });
-  if (granted) await present();
+  // An agent never keeps Vault open; it only proposes runs and reads their masked output.
+  const holds = options.app.kind !== "agent";
+  if (granted && holds) await present();
   const heartbeatMs = options.heartbeatMs ?? 20000;
   if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1 || heartbeatMs > 20000) throw new VaultClientError("invalid");
-  const timer = setInterval(() => { if (!closed) void present().catch(() => undefined); }, heartbeatMs); timer.unref();
+  const timer = holds ? setInterval(() => { if (!closed) void present().catch(() => undefined); }, heartbeatMs) : undefined; timer?.unref();
   const appPath = (id: string) => { if (!appIdPattern.test(id)) throw new VaultClientError("invalid"); return `/v1/apps/${id}`; };
   return {
     status: () => call<Status>("GET", "/v1/status"), create: password => call("POST", "/v1/create", { password }),
     unlock: password => call("POST", "/v1/unlock", { password }), recover: (recovery, password) => call("POST", "/v1/recover", { recovery, password }),
     hello: { enable: password => call("POST", "/v1/unlock/hello/enable", { password }), unlock: hwnd => call("POST", "/v1/unlock/hello", { hwnd }), disable: () => call("POST", "/v1/unlock/hello/disable", {}) },
     lock: () => call("POST", "/v1/lock", {}), present,
-    async close() { if (closed) return; clearInterval(timer); try { await call("POST", "/v1/apps/leave", { session }); } finally { closed = true; } },
+    async close() { if (closed) return; clearInterval(timer); try { if (holds) await call("POST", "/v1/apps/leave", { session }); } finally { closed = true; } },
     logins: origin => call<EntryRow[]>("GET", `/v1/logins?origin=${encodeURIComponent(origin)}`),
     listLogins: () => call<LoginSummary[]>("GET", "/v1/logins/all"), getLogin: id => call<EntryRow>("GET", `/v1/logins/get?id=${encodeURIComponent(id)}`),
     entries: { list: () => call<EntryRow[]>("GET", "/v1/entries"), get: id => call<EntryRow>("GET", `/v1/entries/get?id=${encodeURIComponent(id)}`), save: (entry, expected) => call("POST", "/v1/entries", { entry, expected }), remove: (id, expected) => call("POST", "/v1/entries/remove", { id, expected }) },
     environment: project => call("GET", `/v1/env?project=${encodeURIComponent(project)}`),
-    import: (format, text) => call<ImportCount>("POST", "/v1/import", { format, text }), export: password => call<Backup>("POST", "/v1/export", { password }), restore: (backup, password) => call<ImportCount>("POST", "/v1/restore", { backup, password }),
-    apps: { list: () => call<AppView[]>("GET", "/v1/apps"), allow: id => call("POST", `${appPath(id)}/allow`, {}), revoke: id => call("POST", `${appPath(id)}/revoke`, {}) },
+    import: (format, text) => call<ImportCount>("POST", "/v1/import", { format, text }), importEnv: (project, text) => call<EnvImportCount>("POST", "/v1/import/env", { project, text }), export: password => call<Backup>("POST", "/v1/export", { password }), restore: (backup, password) => call<ImportCount>("POST", "/v1/restore", { backup, password }),
+    runs: {
+      submit: value => call("POST", "/v1/runs", value), list: () => call<RunSummary[]>("GET", "/v1/runs"),
+      get(id, after = 0) { if (!Number.isSafeInteger(after) || after < 0) throw new VaultClientError("invalid"); return call<RunProgress>("GET", `/v1/runs/get?after=${after}&id=${encodeURIComponent(id)}`); },
+      approve: (id, password) => call("POST", "/v1/runs/approve", { id, password }),
+      // Windows Hello waits for the person, up to two minutes.
+      approveWithHello: (id, hwnd) => call("POST", "/v1/runs/approve/hello", { hwnd, id }, 130000), reject: id => call("POST", "/v1/runs/reject", { id }),
+    },
+    apps: { list: () => call<AppView[]>("GET", "/v1/apps"), self: () => call<AppView>("GET", "/v1/apps/self"), allow: id => call("POST", `${appPath(id)}/allow`, {}), revoke: id => call("POST", `${appPath(id)}/revoke`, {}) },
+    // Windows Hello waits for the person, up to two minutes.
+    permissions: { importWithPassword: password => call<AppView>("POST", "/v1/apps/permissions/import", { password }), importWithHello: hwnd => call<AppView>("POST", "/v1/apps/permissions/import/hello", { hwnd }, 130000) },
   };
 }

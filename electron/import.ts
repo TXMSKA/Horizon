@@ -1,10 +1,13 @@
 import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Worker } from 'node:worker_threads';
-import { SEARCH_ENGINES } from '../src/shared/api';
-import type { ImportBrowser, ImportProfile, ImportSource, SearchEngine } from '../src/shared/api';
+import { IMPORT_SETTINGS, SEARCH_ENGINES } from '../src/shared/api';
+import type { BuiltInTheme, ImportBrowser, ImportProfile, ImportSettingsSummary, ImportSource, Language, OnStart, SearchEngine, SitePermission } from '../src/shared/api';
+import { pageLanguage } from '../src/shared/translate';
 import { isWebURL } from './browsing';
-import type { HistoryRow, MarkRow, WorkerReply, WorkerRequest } from './import-worker';
+import { isDownloadsFolder } from './settings';
+import { SITE_SETTINGS_LIMIT, siteHost, validHost, validOrigin } from './site-settings';
+import type { HistoryRow, MarkRow, PermissionRow, WorkerReply, WorkerRequest } from './import-worker';
 
 export interface ImportedLink { kind: 'link'; url: string; title: string; createdAt: number }
 export interface ImportedFolder { kind: 'folder'; name: string; createdAt: number; children: ImportedItem[] }
@@ -12,9 +15,17 @@ export type ImportedItem = ImportedLink | ImportedFolder;
 export interface ImportedFavorites { bar: ImportedItem[]; other: ImportedItem[]; skipped: number }
 export interface ImportedHistoryEntry { url: string; title: string; lastVisit: number; visitCount: number }
 export interface ImportedHistory { entries: ImportedHistoryEntry[]; skipped: number }
-export interface ImportedData { favorites: ImportedFavorites | null; history: ImportedHistory | null; searchEngine: SearchEngine | null }
+export interface ImportedPermission { origin: string; permission: Exclude<SitePermission, 'lyra'>; decision: 'allow' | 'block' }
+// A target of null is the language Horizon runs in when the choices are merged, which is how Firefox keeps them.
+export interface ImportedTranslation { language: string; target: Language | null }
+export interface ImportedSettings {
+  onStart?: OnStart; downloadsFolder?: string; askWhereToSave?: boolean; blockThirdPartyCookies?: boolean; language?: Language; theme?: BuiltInTheme;
+  darkPages?: true; clearHistoryOnClose?: true; clearCacheOnClose?: true;
+  sitePermissions: ImportedPermission[]; translationAlways: ImportedTranslation[]; translationNever: string[];
+}
+export interface ImportedData { favorites: ImportedFavorites | null; history: ImportedHistory | null; searchEngine: SearchEngine | null; settings: ImportedSettings | null }
 export interface ImportEnvironment { local: string | undefined; roaming: string | undefined }
-export interface ImportSelection { browser: ImportBrowser; profile: string; favorites: boolean; history: boolean; searchEngine: boolean }
+export interface ImportSelection { browser: ImportBrowser; profile: string; favorites: boolean; history: boolean; searchEngine: boolean; settings: boolean }
 export interface ImportLabels { mobile: string; menu: string }
 
 export const BOOKMARKS_FILE_LIMIT = 20 * 1024 * 1024;
@@ -196,27 +207,156 @@ function sourceProfiles(definition: BrowserDefinition, root: string) {
   return definition.layout === 'firefox' ? firefoxProfiles(root) : chromiumProfiles(definition, root);
 }
 
-export function discoverImportSources(environment: ImportEnvironment): ImportSource[] {
-  return BROWSERS.flatMap(definition => {
-    const root = sourceRoot(definition, environment);
-    if (!root) return [];
-    const profiles = sourceProfiles(definition, root).flatMap((profile): ImportProfile[] => {
-      const firefox = definition.layout === 'firefox';
-      const favorites = realFile(join(profile.path, firefox ? 'places.sqlite' : 'Bookmarks'));
-      const history = realFile(join(profile.path, firefox ? 'places.sqlite' : 'History'));
-      return favorites || history ? [{ id: profile.id, name: profile.name, favorites, history, searchEngine: firefox ? firefoxSearchEngine(profile.path) : chromiumSearchEngine(profile.path) }] : [];
-    });
-    return profiles.length ? [{ browser: definition.id, name: definition.name, profiles }] : [];
-  });
+// What can be read is what the browser's own files hold: the settings of Chromium sit in Preferences and Local State, the ones of Firefox in prefs.js and permissions.sqlite.
+const emptySettings = (): ImportedSettings => ({ sitePermissions: [], translationAlways: [], translationNever: [] });
+const pick = (value: unknown, ...path: string[]): unknown => path.reduce<unknown>((node, key) => plain(node) && Object.hasOwn(node, key) ? node[key] : undefined, value);
+const optionalJSON = (path: string): unknown => realFile(path) ? readJSON(path, SMALL_FILE_LIMIT) : undefined;
+const spokenLanguage = (value: unknown): Language | undefined => { const language = pageLanguage(value); return language === 'en' || language === 'es' ? language : undefined; };
+const CHROMIUM_SITE_PERMISSIONS = { media_stream_camera: 'camera', media_stream_mic: 'microphone', geolocation: 'location', notifications: 'notifications' } as const;
+const FIREFOX_SITE_PERMISSIONS: Record<string, ImportedPermission['permission']> = { camera: 'camera', microphone: 'microphone', geo: 'location', 'desktop-notification': 'notifications' };
+const FIREFOX_PREFS = new Set(['browser.startup.page', 'browser.download.folderList', 'browser.download.dir', 'browser.download.useDownloadDir', 'network.cookie.cookieBehavior', 'intl.locale.requested',
+  'extensions.activeThemeID', 'browser.translations.alwaysTranslateLanguages', 'privacy.sanitize.sanitizeOnShutdown', 'privacy.clearOnShutdown_v2.browsingHistoryAndDownloads',
+  'privacy.clearOnShutdown_v2.historyFormDataAndDownloads', 'privacy.clearOnShutdown.history', 'privacy.clearOnShutdown_v2.cache', 'privacy.clearOnShutdown.cache']);
+const PREF_LINE = /^user_pref\("([A-Za-z0-9_.-]{1,128})", ?(.{1,4096})\);$/;
+
+// Only user_pref lines of known names are read, each value through JSON.parse; a line that does not fit is ignored and the last one of a name wins.
+export function parseFirefoxPrefs(source: string): Map<string, unknown> {
+  const prefs = new Map<string, unknown>();
+  for (const line of source.split(/\r?\n/)) {
+    const match = PREF_LINE.exec(line.trim());
+    if (!match || !FIREFOX_PREFS.has(match[1]!)) continue;
+    try { prefs.set(match[1]!, JSON.parse(match[2]!)); } catch { /* A value that is not plain JSON is not a setting Horizon reads. */ }
+  }
+  return prefs;
 }
 
-function profileFolder(environment: ImportEnvironment, selection: ImportSelection): { definition: BrowserDefinition; path: string; profile: ImportProfile } {
+// A pattern names one https origin only; wildcards, paths and a second pattern are other kinds of rule.
+function chromiumPatternOrigin(key: string): string | null {
+  const [primary, secondary, ...rest] = key.split(',');
+  if (!primary || secondary !== '*' || rest.length || primary.includes('*')) return null;
+  try {
+    const url = new URL(primary);
+    return url.protocol === 'https:' && !url.username && !url.password && url.pathname === '/' && !url.search && !url.hash && validOrigin(url.origin) ? url.origin : null;
+  } catch { return null; }
+}
+
+export function chromiumSettings(profile: string, state: string): ImportedSettings {
+  const preferences = optionalJSON(join(profile, 'Preferences')), local = optionalJSON(join(state, 'Local State'));
+  const found = emptySettings();
+  const startup = pick(preferences, 'session', 'restore_on_startup');
+  if (startup === 1) found.onStart = 'restore'; else if (startup === 5) found.onStart = 'new-page';
+  const folder = pick(preferences, 'download', 'default_directory');
+  if (isDownloadsFolder(folder)) found.downloadsFolder = folder;
+  const prompt = pick(preferences, 'download', 'prompt_for_download');
+  if (typeof prompt === 'boolean') found.askWhereToSave = prompt;
+  const cookies = pick(preferences, 'profile', 'cookie_controls_mode');
+  if (cookies === 1) found.blockThirdPartyCookies = true; else if (cookies === 0 || cookies === 2) found.blockThirdPartyCookies = false;
+  const language = spokenLanguage(pick(local, 'intl', 'app_locale'));
+  if (language) found.language = language;
+  const scheme = pick(preferences, 'browser', 'theme', 'color_scheme2');
+  if (scheme === 0) found.theme = 'system'; else if (scheme === 1) found.theme = 'daylight'; else if (scheme === 2) found.theme = 'amber';
+  const labs = pick(local, 'browser', 'enabled_labs_experiments');
+  if (Array.isArray(labs) && labs.includes('enable-force-dark@1')) found.darkPages = true;
+  const exceptions = pick(preferences, 'profile', 'content_settings', 'exceptions');
+  const decisions = new Map<string, ImportedPermission>();
+  for (const [name, permission] of Object.entries(CHROMIUM_SITE_PERMISSIONS)) {
+    const rules = pick(exceptions, name);
+    if (!plain(rules)) continue;
+    for (const [key, rule] of Object.entries(rules)) {
+      const origin = chromiumPatternOrigin(key), setting = pick(rule, 'setting'), expiration = pick(rule, 'expiration');
+      if (!origin || setting !== 1 && setting !== 2 || expiration !== undefined && expiration !== '0' && expiration !== 0 || decisions.size >= SITE_SETTINGS_LIMIT) continue;
+      decisions.set(`${origin}\n${permission}`, { origin, permission, decision: setting === 1 ? 'allow' : 'block' });
+    }
+  }
+  found.sitePermissions = [...decisions.values()];
+  const always = pick(preferences, 'translate_allowlists'), languages = new Map<string, ImportedTranslation>();
+  if (plain(always)) for (const [source, target] of Object.entries(always)) {
+    const language = pageLanguage(source), to = spokenLanguage(target);
+    if (language && to && language !== to && !languages.has(language)) languages.set(language, { language, target: to });
+  }
+  found.translationAlways = [...languages.values()].slice(0, 200);
+  const never = pick(preferences, 'translate_site_blocklist_with_time');
+  if (plain(never)) found.translationNever = Object.keys(never).filter(validHost).slice(0, SITE_SETTINGS_LIMIT);
+  return found;
+}
+
+export function firefoxSettings(prefs: Map<string, unknown>, rows: readonly PermissionRow[]): ImportedSettings {
+  const found = emptySettings();
+  const startup = prefs.get('browser.startup.page');
+  if (startup === 3) found.onStart = 'restore'; else if (startup === 0 || startup === 1) found.onStart = 'new-page';
+  const folder = prefs.get('browser.download.dir');
+  if (prefs.get('browser.download.folderList') === 2 && isDownloadsFolder(folder)) found.downloadsFolder = folder;
+  const useFolder = prefs.get('browser.download.useDownloadDir');
+  if (typeof useFolder === 'boolean') found.askWhereToSave = !useFolder;
+  const cookies = prefs.get('network.cookie.cookieBehavior');
+  if (cookies === 1) found.blockThirdPartyCookies = true; else if (cookies === 0) found.blockThirdPartyCookies = false;
+  const requested = prefs.get('intl.locale.requested');
+  const language = typeof requested === 'string' ? spokenLanguage(requested.split(',')[0]) : undefined;
+  if (language) found.language = language;
+  const theme = prefs.get('extensions.activeThemeID');
+  const kind = typeof theme === 'string' ? /^(default-theme|firefox-compact-light|firefox-compact-dark)(?:@mozilla\.org)?$/.exec(theme)?.[1] : undefined;
+  if (kind === 'default-theme') found.theme = 'system'; else if (kind === 'firefox-compact-light') found.theme = 'daylight'; else if (kind === 'firefox-compact-dark') found.theme = 'amber';
+  if (prefs.get('privacy.sanitize.sanitizeOnShutdown') === true) {
+    const flag = (...names: string[]) => names.map(name => prefs.get(name)).find((value): value is boolean => typeof value === 'boolean') ?? true;
+    if (flag('privacy.clearOnShutdown_v2.browsingHistoryAndDownloads', 'privacy.clearOnShutdown_v2.historyFormDataAndDownloads', 'privacy.clearOnShutdown.history')) found.clearHistoryOnClose = true;
+    if (flag('privacy.clearOnShutdown_v2.cache', 'privacy.clearOnShutdown.cache')) found.clearCacheOnClose = true;
+  }
+  const always = prefs.get('browser.translations.alwaysTranslateLanguages');
+  if (typeof always === 'string') found.translationAlways = [...new Set(always.split(',').map(value => pageLanguage(value)).filter((value): value is string => value !== null))].slice(0, 200).map(language => ({ language, target: null }));
+  const decisions = new Map<string, ImportedPermission>(), never = new Set<string>();
+  for (const row of rows) {
+    if (typeof row.origin !== 'string' || row.origin.includes('^') || !row.origin.startsWith('https://') || !validOrigin(row.origin)) continue;
+    if (row.type === 'translations') { const host = row.permission === 2 ? siteHost(row.origin) : null; if (host && validHost(host) && never.size < SITE_SETTINGS_LIMIT) never.add(host); continue; }
+    const permission = FIREFOX_SITE_PERMISSIONS[row.type];
+    if (permission && (row.permission === 1 || row.permission === 2) && decisions.size < SITE_SETTINGS_LIMIT) decisions.set(`${row.origin}\n${permission}`, { origin: row.origin, permission, decision: row.permission === 1 ? 'allow' : 'block' });
+  }
+  found.sitePermissions = [...decisions.values()]; found.translationNever = [...never];
+  return found;
+}
+
+export function summarizeSettings(found: ImportedSettings): ImportSettingsSummary | null {
+  const summary = { names: IMPORT_SETTINGS.filter(name => found[name] !== undefined), sitePermissions: found.sitePermissions.length, translations: found.translationAlways.length + found.translationNever.length };
+  return summary.names.length || summary.sitePermissions || summary.translations ? summary : null;
+}
+
+// Listing the profiles only counts what is there, so a permissions database that cannot be read then does not hide the rest; importing reads it strictly.
+async function readSourceSettings(definition: BrowserDefinition, path: string, root: string, scratch: string, listing = false): Promise<ImportedSettings> {
+  if (definition.layout !== 'firefox') return chromiumSettings(path, definition.layout === 'root' ? path : root);
+  const prefs = realFile(join(path, 'prefs.js')) ? parseFirefoxPrefs(readLimited(join(path, 'prefs.js'), SMALL_FILE_LIMIT).toString('utf8')) : new Map<string, unknown>();
+  const database = realFile(join(path, 'permissions.sqlite'))
+    ? await readDatabase(join(path, 'permissions.sqlite'), scratch, { kind: 'firefox', bookmarks: false, history: false, permissions: true, scan: HISTORY_SCAN_LIMIT, nodes: 0 }, ['-wal'], 'IMPORT_SETTINGS_FAILED').then(reply => reply.permissions, (error: unknown) => { if (listing) return []; throw error; })
+    : [];
+  return firefoxSettings(prefs, database);
+}
+
+async function describeProfile(definition: BrowserDefinition, root: string, profile: { id: string; name: string; path: string }, scratch: string): Promise<ImportProfile | undefined> {
+  const firefox = definition.layout === 'firefox';
+  const favorites = realFile(join(profile.path, firefox ? 'places.sqlite' : 'Bookmarks'));
+  const history = realFile(join(profile.path, firefox ? 'places.sqlite' : 'History'));
+  // Settings that cannot be read now are simply not offered.
+  const settings = await readSourceSettings(definition, profile.path, root, scratch, true).then(summarizeSettings, () => null);
+  return favorites || history || settings ? { id: profile.id, name: profile.name, favorites, history, searchEngine: firefox ? firefoxSearchEngine(profile.path) : chromiumSearchEngine(profile.path), settings } : undefined;
+}
+
+export async function discoverImportSources(environment: ImportEnvironment, scratch: string): Promise<ImportSource[]> {
+  const sources: ImportSource[] = [];
+  for (const definition of BROWSERS) {
+    const root = sourceRoot(definition, environment);
+    if (!root) continue;
+    const profiles: ImportProfile[] = [];
+    for (const profile of sourceProfiles(definition, root)) { const found = await describeProfile(definition, root, profile, scratch); if (found) profiles.push(found); }
+    if (profiles.length) sources.push({ browser: definition.id, name: definition.name, profiles });
+  }
+  return sources;
+}
+
+async function profileFolder(environment: ImportEnvironment, selection: ImportSelection, scratch: string): Promise<{ definition: BrowserDefinition; root: string; path: string; profile: ImportProfile }> {
   const definition = BROWSERS.find(entry => entry.id === selection.browser);
   const root = definition && sourceRoot(definition, environment);
   const profile = definition && root && sourceProfiles(definition, root).find(entry => entry.id === selection.profile);
-  const found = discoverImportSources(environment).find(source => source.browser === selection.browser)?.profiles.find(entry => entry.id === selection.profile);
-  if (!definition || !profile || !found) throw new Error('IMPORT_SOURCE_NOT_FOUND');
-  return { definition, path: profile.path, profile: found };
+  const found = definition && root && profile ? await describeProfile(definition, root, profile, scratch) : undefined;
+  if (!definition || !root || !profile || !found) throw new Error('IMPORT_SOURCE_NOT_FOUND');
+  return { definition, root, path: profile.path, profile: found };
 }
 
 function cleanText(value: unknown, limit: number): string {
@@ -295,20 +435,22 @@ function importedHistory(rows: readonly HistoryRow[], now: number): ImportedHist
   return { entries, skipped };
 }
 
-function sqliteRows(database: string, request: Omit<WorkerRequest, 'database'>): Promise<WorkerReply & { ok: true }> {
+type ReadFailure = 'IMPORT_HISTORY_FAILED' | 'IMPORT_SETTINGS_FAILED';
+
+function sqliteRows(database: string, request: Omit<WorkerRequest, 'database'>, failure: ReadFailure): Promise<WorkerReply & { ok: true }> {
   return new Promise((resolveRows, reject) => {
     const worker = new Worker(join(__dirname, 'import-worker.js'), { workerData: { ...request, database } satisfies WorkerRequest, resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32 } });
-    const timeout = setTimeout(() => { void worker.terminate(); reject(new Error('IMPORT_HISTORY_FAILED')); }, HISTORY_TIMEOUT);
+    const timeout = setTimeout(() => { void worker.terminate(); reject(new Error(failure)); }, HISTORY_TIMEOUT);
     let settled = false;
     const finish = (settle: () => void) => { if (settled) return; settled = true; clearTimeout(timeout); settle(); };
-    worker.once('message', (reply: WorkerReply) => finish(() => { if (reply.ok) resolveRows(reply); else reject(new Error('IMPORT_HISTORY_FAILED')); }));
-    worker.once('error', () => finish(() => reject(new Error('IMPORT_HISTORY_FAILED'))));
-    worker.once('exit', () => finish(() => reject(new Error('IMPORT_HISTORY_FAILED'))));
+    worker.once('message', (reply: WorkerReply) => finish(() => { if (reply.ok) resolveRows(reply); else reject(new Error(failure)); }));
+    worker.once('error', () => finish(() => reject(new Error(failure))));
+    worker.once('exit', () => finish(() => reject(new Error(failure))));
   });
 }
 
 // The browser may hold its database open, so the work happens on a private copy that is removed on every path.
-async function readDatabase(source: string, scratch: string, request: Omit<WorkerRequest, 'database'>, companions: readonly string[]): Promise<WorkerReply & { ok: true }> {
+async function readDatabase(source: string, scratch: string, request: Omit<WorkerRequest, 'database'>, companions: readonly string[], failure: ReadFailure = 'IMPORT_HISTORY_FAILED'): Promise<WorkerReply & { ok: true }> {
   const found = entry(source);
   if (!found || !found.isFile() || found.isSymbolicLink()) throw new Error('IMPORT_FILE_INVALID');
   if (found.size > HISTORY_FILE_LIMIT) throw new Error('IMPORT_FILE_TOO_LARGE');
@@ -320,23 +462,23 @@ async function readDatabase(source: string, scratch: string, request: Omit<Worke
       copyFileSync(source, copy);
       for (const suffix of companions) if (realFile(source + suffix)) copyFileSync(source + suffix, copy + suffix);
     } catch (error: unknown) { throw new Error(lockedFile(error) ? 'IMPORT_FILE_LOCKED' : 'IMPORT_FILE_INVALID'); }
-    return await sqliteRows(copy, request);
+    return await sqliteRows(copy, request, failure);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
 export async function readImport(environment: ImportEnvironment, selection: ImportSelection, labels: ImportLabels, scratch: string, progress: (current: number, total: number) => void, now = Date.now()): Promise<ImportedData> {
-  const { definition, path, profile } = profileFolder(environment, selection);
+  const { definition, root, path, profile } = await profileFolder(environment, selection, scratch);
   const firefox = definition.layout === 'firefox';
   const wantsFavorites = selection.favorites && profile.favorites, wantsHistory = selection.history && profile.history;
-  const engine = selection.searchEngine ? profile.searchEngine : null;
-  const total = Number(wantsFavorites) + Number(wantsHistory) + Number(engine !== null);
+  const wantsSettings = selection.settings && profile.settings !== null, engine = selection.searchEngine ? profile.searchEngine : null;
+  const total = Number(wantsFavorites) + Number(wantsHistory) + Number(wantsSettings) + Number(engine !== null);
   if (!total) throw new Error('IMPORT_NO_CHOICE');
   let step = 0;
-  const data: ImportedData = { favorites: null, history: null, searchEngine: null };
+  const data: ImportedData = { favorites: null, history: null, searchEngine: null, settings: null };
   if (firefox) {
     if (wantsFavorites || wantsHistory) {
       progress(++step, total);
-      const reply = await readDatabase(join(path, 'places.sqlite'), scratch, { kind: 'firefox', bookmarks: wantsFavorites, history: wantsHistory, scan: HISTORY_SCAN_LIMIT, nodes: BOOKMARK_NODE_LIMIT + 1 }, ['-wal']);
+      const reply = await readDatabase(join(path, 'places.sqlite'), scratch, { kind: 'firefox', bookmarks: wantsFavorites, history: wantsHistory, permissions: false, scan: HISTORY_SCAN_LIMIT, nodes: BOOKMARK_NODE_LIMIT + 1 }, ['-wal']);
       if (wantsFavorites) data.favorites = parseFirefoxBookmarks(reply.bookmarks, labels, now);
       if (wantsHistory) { if (wantsFavorites) progress(++step, total); data.history = importedHistory(reply.history, now); }
     }
@@ -344,9 +486,10 @@ export async function readImport(environment: ImportEnvironment, selection: Impo
     if (wantsFavorites) { progress(++step, total); data.favorites = parseChromiumBookmarks(readLimited(join(path, 'Bookmarks'), BOOKMARKS_FILE_LIMIT).toString('utf8'), labels, now); }
     if (wantsHistory) {
       progress(++step, total);
-      data.history = importedHistory((await readDatabase(join(path, 'History'), scratch, { kind: 'chromium', bookmarks: false, history: true, scan: HISTORY_SCAN_LIMIT, nodes: 0 }, [])).history, now);
+      data.history = importedHistory((await readDatabase(join(path, 'History'), scratch, { kind: 'chromium', bookmarks: false, history: true, permissions: false, scan: HISTORY_SCAN_LIMIT, nodes: 0 }, [])).history, now);
     }
   }
+  if (wantsSettings) { progress(++step, total); data.settings = await readSourceSettings(definition, path, root, scratch); }
   if (engine) { progress(++step, total); data.searchEngine = engine; }
   return data;
 }
