@@ -488,11 +488,12 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .lyra-content { display: flex; justify-content: center; min-height: 0; overflow: hidden; background: var(--surface-raised); }
 .lyra-tab-view { height: 100%; }
 .lyra-tab-view::before { display: none; }
-.hub-popup { position: relative; width: var(--width-hub); height: var(--height-hub); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow-y: auto; border-radius: var(--radius-sheet); background: var(--surface-page); color: var(--text-title); outline: none; }
+.hub-popup { position: relative; width: var(--width-hub); height: var(--height-hub); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow: hidden; border-radius: var(--radius-sheet); background: var(--surface-page); color: var(--text-title); outline: none; }
 .hub-popup::after { content: ''; position: absolute; inset: 0; border: var(--border-width) solid var(--border-popover); border-radius: inherit; pointer-events: none; }
 .hub-app-page { background: var(--surface-raised); }
 .hub-ground { position: absolute; top: var(--hub-ground-top); left: 0; right: 0; height: calc(var(--height-hub) - var(--hub-ground-top)); background: var(--surface-ground); pointer-events: none; }
-.hub-content { position: relative; display: flex; flex-direction: column; gap: var(--space-16); padding: var(--space-16); }
+/* The content scrolls inside the popup, so the popup's rim stays put and no scrollbar narrows the theme grid. */
+.hub-content { position: relative; display: flex; flex-direction: column; gap: var(--space-16); height: 100%; overflow-y: auto; scrollbar-width: none; padding: var(--space-16); }
 .hub-dock { display: flex; flex: none; align-items: center; gap: var(--space-8); height: var(--height-hub-dock); padding: var(--space-8); border-radius: var(--radius-panel); background: var(--surface-sunken); }
 .hub-dock .icon-button { width: var(--size-40); height: var(--size-40); }
 .hub-dock .icon-button svg { width: var(--size-18); height: var(--size-18); }

@@ -1,19 +1,27 @@
 import { readFileSync } from 'node:fs';
 
 // The suggested group colours are the roles named in the shared API; reading its source keeps this check free of a build.
-const GROUP_COLORS = [...(readFileSync('src/shared/api.ts', 'utf8').match(/GROUP_COLORS = \[([^\]]+)\]/)?.[1] ?? '').matchAll(/'(\w+)'/g)].map(match => match[1]);
+const apiSource = readFileSync('src/shared/api.ts', 'utf8');
+const GROUP_COLORS = [...(apiSource.match(/GROUP_COLORS = \[([^\]]+)\]/)?.[1] ?? '').matchAll(/'(\w+)'/g)].map(match => match[1]);
 if (!GROUP_COLORS.length) throw new Error('Missing group colours.');
+const MARKETPLACE_THEMES = [...(apiSource.match(/MARKETPLACE_THEMES = \[([^\]]+)\]/)?.[1] ?? '').matchAll(/'(\w+)'/g)].map(match => match[1]);
+if (!MARKETPLACE_THEMES.length) throw new Error('Missing marketplace themes.');
 
 const css = readFileSync('src/tokens.css', 'utf8');
 const high = css.match(/:root\[data-contrast="high"\]\s*\{([^}]+)\}/)?.[1];
 if (!high) throw new Error('Missing high-contrast semantic pair.');
 const declarations = source => Object.fromEntries([...source.matchAll(/--([\w-]+):\s*([^;]+);/g)].map(match => [match[1], match[2].trim()]));
-const fjord = css.match(/:root\[data-theme="fjord"\]\s*\{([^}]+)\}/)?.[1];
-if (!fjord) throw new Error('Missing Fjord semantic roles.');
-const standard = declarations(css.replace(high, '').replace(fjord, ''));
-const marketplace = { ...standard, ...declarations(fjord) };
+// Each marketplace theme owns one semantic block; its colour scheme says whether it is checked as a light or a dark palette.
+const blocks = Object.fromEntries(MARKETPLACE_THEMES.map(theme => {
+  const block = css.match(new RegExp(`:root\\[data-theme="${theme}"\\]\\s*\\{([^}]+)\\}`))?.[1];
+  if (!block) throw new Error(`Missing ${theme} semantic roles.`);
+  const scheme = /color-scheme:\s*(only light|dark);/.exec(block)?.[1];
+  if (!scheme) throw new Error(`Missing ${theme} colour scheme.`);
+  return [theme, { block, light: scheme === 'only light' }];
+}));
+const standard = declarations(Object.values(blocks).reduce((source, { block }) => source.replace(block, ''), css.replace(high, '')));
 const paletteRoles = Object.keys(standard).filter(key => key.startsWith('palette-amber-'));
-for (const key of paletteRoles) if (!Object.hasOwn(standard, key.replace('palette-amber-', 'palette-fjord-'))) throw new Error(`Missing Fjord role: ${key}`);
+for (const theme of MARKETPLACE_THEMES) for (const key of paletteRoles) if (!Object.hasOwn(standard, key.replace('palette-amber-', `palette-${theme}-`))) throw new Error(`Missing ${theme} role: ${key}`);
 const contrast = { ...standard, ...declarations(high) };
 const roles = Object.keys(contrast).filter(key => contrast[key].startsWith('light-dark('));
 const resolve = (key, variables, light) => {
@@ -40,7 +48,12 @@ const decoration = ['divider', 'border-popover', 'border-subtle', 'graphic-horiz
 const foregrounds = roles.filter(key => !key.startsWith('surface-') && !decoration.includes(key) && key !== 'on-accent');
 let failed = false;
 let checks = 0;
-for (const [theme, variables, light] of [['amber', standard, false], ['daylight', standard, true], ['fjord', marketplace, false], ['contrast-dark', contrast, false], ['contrast-light', contrast, true]]) {
+const palettes = [
+  ['amber', standard, false], ['daylight', standard, true],
+  ...MARKETPLACE_THEMES.map(theme => [theme, { ...standard, ...declarations(blocks[theme].block) }, blocks[theme].light]),
+  ['contrast-dark', contrast, false], ['contrast-light', contrast, true],
+];
+for (const [theme, variables, light] of palettes) {
   const check = (role, surface, threshold) => {
     const value = resolve(role, variables, light);
     if (value === undefined && role.startsWith('outline-') && !theme.startsWith('contrast-')) return Infinity;
@@ -72,4 +85,4 @@ for (const [theme, variables, light] of [['amber', standard, false], ['daylight'
   }
 }
 if (failed) process.exit(1);
-console.log(`${checks} contrast pairs passed across five palettes.`);
+console.log(`${checks} contrast pairs passed across ${palettes.length} palettes.`);

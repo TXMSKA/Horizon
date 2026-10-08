@@ -2,7 +2,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { BrowserCommand, BrowserShortcut, BrowserState, ContentArea, Contrast, HorizonAPI, DesktopItemContent, ProjectContent, PageContextMenu, Theme, WindowAction } from '../src/shared/api';
 
 const themeArgument = process.argv.find(argument => argument.startsWith('--horizon-theme='))?.slice('--horizon-theme='.length);
-const initialTheme: Theme = themeArgument === 'fjord' || themeArgument === 'amber' || themeArgument === 'daylight' || themeArgument === 'system' ? themeArgument : 'system';
+// Sandboxed preloads cannot require application modules, so the accepted themes stay literals here.
+const themes = ['system', 'amber', 'daylight', 'fjord', 'dune', 'graphite', 'moss'] as const satisfies readonly Theme[];
+const initialTheme: Theme = themes.find(theme => theme === themeArgument) ?? 'system';
 const contrastArgument = process.argv.find(argument => argument.startsWith('--horizon-contrast='))?.slice('--horizon-contrast='.length);
 const initialContrast: Contrast = contrastArgument === 'high' ? 'high' : 'standard';
 
