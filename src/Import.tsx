@@ -9,6 +9,8 @@ import { VaultImportPermission, VaultUnlock } from './Vault';
 
 export interface ImportChoice { browser: ImportBrowser; profile: string; favorites: boolean; history: boolean; searchEngine: boolean; settings: boolean }
 interface ImportOutcome { browser: ImportResult | null; passwords: ImportPasswordsResult | null }
+// What the person asked for at the moment they pressed Import; the steps that follow (permission, unlock) act on it, not on what the dialog shows by then.
+interface ImportRequest { choice: ImportChoice; file: ImportPasswordsFile | null }
 type ImportWanted = { favorites: boolean; history: boolean; searchEngine: boolean; settings: boolean; passwords: boolean };
 
 const SETTING_LABELS: Record<ImportSettingName, CopyKey> = {
@@ -22,6 +24,13 @@ export function importLabel(source: ImportSource, profile: ImportProfile): strin
 
 export function importProgressLabel(progress: ImportProgress | null, language: Language): string {
   return progress?.total ? text('importingProgress', language).replace('{current}', String(progress.current)).replace('{total}', String(progress.total)) : text('importingNow', language);
+}
+
+const wantsBrowserData = (choice: ImportChoice): boolean => choice.favorites || choice.history || choice.searchEngine || choice.settings;
+
+// Only a Vault that is missing or not created takes the choice away: a failed unlock or a refused permission says nothing about whether passwords can be imported.
+export function passwordsReason(vault: Pick<VaultState, 'available' | 'created'>, probed: boolean): CopyKey | null {
+  return !vault.available && !probed ? null : !vault.available ? 'importPasswordsNoVault' : !vault.created ? 'importPasswordsNoVaultCreated' : null;
 }
 
 const counted = (language: Language, count: number, one: CopyKey, many: CopyKey): string => text(count === 1 ? one : many, language).replace('{count}', new Intl.NumberFormat(language).format(count));
@@ -62,8 +71,8 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
 }) {
   const t = (key: CopyKey) => text(key, language), id = useId();
   const dialog = useRef<HTMLDialogElement>(null), first = useRef<HTMLInputElement>(null), importButton = useRef<HTMLButtonElement>(null);
-  const deleteButton = useRef<HTMLButtonElement>(null), keepButton = useRef<HTMLButtonElement>(null), doneButton = useRef<HTMLButtonElement>(null);
-  const busy = useRef(false), afterUnlock = useRef(false), confirming = useRef(false);
+  const deleteButton = useRef<HTMLButtonElement>(null), keepButton = useRef<HTMLButtonElement>(null), doneButton = useRef<HTMLButtonElement>(null), retryButton = useRef<HTMLButtonElement>(null);
+  const busy = useRef(false), afterUnlock = useRef(false), confirming = useRef(false), requested = useRef<ImportRequest | null>(null);
   // What the first step brought stays here, so a retry after a failed second step does not start the first one again.
   const partial = useRef<ImportOutcome>({ browser: null, passwords: null });
   const options = sources.flatMap(source => source.profiles.map(profile => ({ source, profile })));
@@ -73,16 +82,17 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
   const [phase, setPhase] = useState<'idle' | 'running' | 'error' | 'done'>('idle'), [failure, setFailure] = useState(''), [outcome, setOutcome] = useState<ImportOutcome | null>(null);
   const [removal, setRemoval] = useState<'idle' | 'confirm' | 'running' | 'done'>('idle'), [removalError, setRemovalError] = useState('');
   const { source, profile } = options[selected]!;
-  const vaultKnown = vault.available || probe === 'done';
-  const vaultReason: CopyKey | null = !vaultKnown ? null : vault.error !== null || !vault.available ? 'importPasswordsNoVault' : !vault.created ? 'importPasswordsNoVaultCreated' : null;
+  const vaultReason = passwordsReason(vault, probe === 'done');
   const passwords = wanted.passwords && vaultReason === null;
   const choice: ImportChoice = { browser: source.browser, profile: profile.id, favorites: wanted.favorites && profile.favorites, history: wanted.history && profile.history, searchEngine: wanted.searchEngine && profile.searchEngine !== null, settings: wanted.settings && profile.settings !== null };
-  const browserData = choice.favorites || choice.history || choice.searchEngine || choice.settings;
-  const running = phase === 'running', done = phase === 'done';
+  const browserData = wantsBrowserData(choice);
+  const running = phase === 'running', done = phase === 'done', asking = removal === 'confirm' || removal === 'running';
   useEffect(() => {
     const modal = dialog.current; modal?.showModal(); first.current?.focus();
     return () => { if (modal?.open) modal.close(); opener?.current?.focus(); };
   }, [opener]);
+  // The Import button is replaced by the result, or disabled while it ran, so focus moves to the first control of what followed.
+  useEffect(() => { if (phase === 'done') (deleteButton.current ?? doneButton.current)?.focus(); else if (phase === 'error') retryButton.current?.focus(); }, [phase]);
   // Focus follows the confirmation: into it when it opens, back to the control that opened it when it closes without deleting.
   useEffect(() => {
     if (removal === 'confirm') { confirming.current = true; keepButton.current?.focus(); }
@@ -91,16 +101,17 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
   }, [removal]);
   const dismiss = () => { if (!running) onClose(); };
   const changed = () => { setProblem(''); partial.current = { browser: null, passwords: null }; };
-  const run = async () => {
+  const run = async (request: ImportRequest) => {
     if (busy.current) return;
     busy.current = true; setProblem(''); setPhase('running');
     try {
-      if (browserData && !partial.current.browser) partial.current.browser = await window.horizon.command({ type: 'import-browser-data', ...choice });
-      if (passwords && file && !partial.current.passwords) partial.current.passwords = await window.horizon.command({ type: 'import-passwords', browser: choice.browser, file: file.id });
+      if (wantsBrowserData(request.choice) && !partial.current.browser) partial.current.browser = await window.horizon.command({ type: 'import-browser-data', ...request.choice });
+      if (request.file && !partial.current.passwords) partial.current.passwords = await window.horizon.command({ type: 'import-passwords', browser: request.choice.browser, file: request.file.id });
       setOutcome({ ...partial.current }); setPhase('done');
     } catch (reason) { setFailure(describe(reason)); setPhase('error'); }
     finally { busy.current = false; }
   };
+  const proceed = () => { if (requested.current) void run(requested.current); };
   const vaultAction = (command: VaultCommand) => window.horizon.command(command).then(() => true, () => false);
   // Windows Hello is tried first where it exists; the master password step opens in place when it is not available or does not answer.
   const requestUnlock = async () => {
@@ -108,16 +119,17 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
     busy.current = true; setPhase('running');
     const unlocked = vault.windows && await vaultAction({ type: 'vault-hello' });
     busy.current = false; setPhase('idle');
-    if (unlocked) void run(); else setUnlock(true);
+    if (unlocked) proceed(); else setUnlock(true);
   };
   const submit = () => {
     if (running) return;
     if (!browserData && !passwords) { setProblem(t('IMPORT_NO_CHOICE')); return; }
     if (passwords && !file) { setProblem(t('IMPORT_PASSWORDS_NO_FILE')); return; }
+    requested.current = { choice, file: passwords ? file : null };
     // Until Vault has given Horizon the permission the approval comes first, and it also unlocks Vault.
     if (passwords && !vault.importAllowed) { setPermission(true); return; }
     if (passwords && !vault.unlocked) { void requestUnlock(); return; }
-    void run();
+    proceed();
   };
   const choose = () => {
     if (running || choosing) return;
@@ -165,7 +177,7 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
     <div className="settings-feedback" role="status" aria-live="polite">{done && outcome ? importResultText(outcome.browser, outcome.passwords, language) : ''}</div>
     {done && outcome?.passwords && file && removal !== 'done' && <div className="import-confirm">
       <p className="setting-hint">{t('importPasswordsDeleteHint')}</p>
-      {removal === 'idle' ? <button className="settings-button" ref={deleteButton} type="button" onClick={() => setRemoval('confirm')}>{t('importPasswordsDelete')}</button> : <div role="group" aria-label={t('importPasswordsDelete')}>
+      {removal === 'idle' ? <button className="settings-button" ref={deleteButton} type="button" onClick={() => setRemoval('confirm')}>{t('importPasswordsDelete')}</button> : <div className="import-confirm-group" role="group" aria-label={t('importPasswordsDelete')}>
         <p>{t('importPasswordsDeleteConfirm').replace('{name}', file.name)}</p>
         <div className="settings-dialog-actions"><button className="settings-button" ref={keepButton} type="button" disabled={removal === 'running'} onClick={() => setRemoval('idle')}>{t('cancel')}</button>
           <button className="settings-button primary" type="button" disabled={removal === 'running'} onClick={removeFile}>{removal === 'running' && <LoaderCircle className="spinner" aria-hidden="true" />}{t(removal === 'running' ? 'importPasswordsDeleting' : 'importPasswordsDeleteNow')}</button></div></div>}
@@ -173,18 +185,18 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
     {removal === 'done' && <div className="settings-feedback" role="status" aria-live="polite">{t('importPasswordsDeleted')}</div>}
     {removalError && <div className="settings-feedback error" role="alert">{removalError}</div>}
     {problem && <div className="settings-feedback error" role="alert">{problem}</div>}
-    {phase === 'error' && <div className="settings-feedback error" role="alert"><span>{failure}</span><button className="settings-button quiet" type="button" onClick={submit}>{t('retry')}</button></div>}
-    <div className="settings-dialog-actions">{done ? <button className="settings-button primary" ref={doneButton} type="button" onClick={onClose}>{t('importDone')}</button> : <>
+    {phase === 'error' && <div className="settings-feedback error" role="alert"><span>{failure}</span><button className="settings-button" ref={retryButton} type="button" onClick={submit}>{t('retry')}</button></div>}
+    {!asking && <div className="settings-dialog-actions">{done ? <button className="settings-button primary" ref={doneButton} type="button" onClick={onClose}>{t('importDone')}</button> : <>
       <button className="settings-button" type="button" disabled={running} onClick={onClose}>{t(firstRun ? 'importSkip' : 'cancel')}</button>
       <button className="settings-button primary" ref={importButton} type="button" disabled={running} onClick={submit}>{running && <LoaderCircle className="spinner" aria-hidden="true" />}{running ? importProgressLabel(progress, language) : t('importButton')}</button>
-    </>}</div>
+    </>}</div>}
     {permission && <VaultImportPermission language={language} windows={vault.windows} describe={describe} onGranted={async () => { afterUnlock.current = true; }} onClose={() => {
       setPermission(false);
-      if (afterUnlock.current) { afterUnlock.current = false; void run(); } else importButton.current?.focus();
+      if (afterUnlock.current) { afterUnlock.current = false; proceed(); } else importButton.current?.focus();
     }} />}
-    {unlock && <VaultUnlock language={language} action={vaultAction} onUnlocked={async () => { afterUnlock.current = true; }} onClose={() => {
+    {unlock && <VaultUnlock language={language} describe={describe} onUnlocked={async () => { afterUnlock.current = true; }} onClose={() => {
       setUnlock(false);
-      if (afterUnlock.current) { afterUnlock.current = false; void run(); } else importButton.current?.focus();
+      if (afterUnlock.current) { afterUnlock.current = false; proceed(); } else importButton.current?.focus();
     }} />}
   </dialog>;
 }

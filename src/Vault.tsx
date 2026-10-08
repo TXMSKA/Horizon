@@ -8,22 +8,28 @@ import { ToolbarPopover } from './ToolbarPopover';
 
 type Action = (command: VaultCommand) => Promise<boolean>;
 
-export function VaultUnlock({ language, action, onClose, onUnlocked }: { language: Language; action: Action; onClose(): void; onUnlocked(): Promise<void> }) {
+// A sign-in imported from a file without names is titled with its address; the site's host is what the person recognises.
+export function loginTitle(login: VaultLogin): string {
+  const title = login.title.trim();
+  return title && !/^https?:\/\//i.test(title) ? login.title : new URL(login.origin).host;
+}
+
+export function VaultUnlock({ language, describe, onClose, onUnlocked }: { language: Language; describe(reason: unknown): string; onClose(): void; onUnlocked(): Promise<void> }) {
   const t = (key: CopyKey) => text(key, language), id = useId();
   const dialog = useRef<HTMLDialogElement>(null), input = useRef<HTMLInputElement>(null), busy = useRef(false);
-  const [password, setPassword] = useState(''), [pending, setPending] = useState(false), [failed, setFailed] = useState(false);
+  const [password, setPassword] = useState(''), [pending, setPending] = useState(false), [failure, setFailure] = useState('');
   useEffect(() => { dialog.current?.showModal(); input.current?.focus(); }, []);
+  // The field is disabled while the request is pending, so focus can come back only once it is enabled again.
+  useEffect(() => { if (failure && !pending) input.current?.focus(); }, [failure, pending]);
   return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }}>
     <form onSubmit={event => {
       event.preventDefault(); if (busy.current) return;
-      busy.current = true; setPending(true); setFailed(false);
+      busy.current = true; setPending(true); setFailure('');
       const value = password; setPassword('');
-      void action({ type: 'vault-unlock', password: value }).then(async success => {
-        if (success) { await onUnlocked(); onClose(); } else { setFailed(true); input.current?.focus(); }
-      }).finally(() => { busy.current = false; setPending(false); });
+      window.horizon.command({ type: 'vault-unlock', password: value }).then(async () => { await onUnlocked(); onClose(); }, (reason: unknown) => setFailure(describe(reason))).finally(() => { busy.current = false; setPending(false); });
     }}><div className="settings-dialog-heading"><h2 id={`${id}-title`}>{t('vaultUnlock')}</h2><p className="setting-hint">{t('vaultMasterHint')}</p></div>
       <label className="vault-form-field"><span>{t('vaultMasterPassword')}</span><input type="password" ref={input} value={password} maxLength={128} autoComplete="off" required disabled={pending} onChange={event => setPassword(event.target.value)} /></label>
-      {failed && <p className="browser-panel-error" role="alert">{t('VAULT_UNAVAILABLE')}</p>}
+      {failure && <p className="browser-panel-error" role="alert">{failure}</p>}
       <div className="settings-dialog-actions"><button className="settings-button" type="button" disabled={pending} onClick={onClose}>{t('cancel')}</button><button className="settings-button primary" type="submit" disabled={pending || !password}>{t(pending ? 'loading' : 'vaultUnlock')}</button></div>
     </form>
   </dialog>;
@@ -35,10 +41,11 @@ export function VaultImportPermission({ language, windows, describe, onGranted, 
   const dialog = useRef<HTMLDialogElement>(null), input = useRef<HTMLInputElement>(null), busy = useRef(false);
   const [password, setPassword] = useState(''), [pending, setPending] = useState(false), [failure, setFailure] = useState('');
   useEffect(() => { dialog.current?.showModal(); input.current?.focus(); }, []);
+  useEffect(() => { if (failure && !pending) input.current?.focus(); }, [failure, pending]);
   const send = (command: VaultCommand) => {
     if (busy.current) return;
     busy.current = true; setPending(true); setFailure('');
-    window.horizon.command(command).then(async () => { await onGranted(); onClose(); }, (reason: unknown) => { setFailure(describe(reason)); input.current?.focus(); }).finally(() => { busy.current = false; setPending(false); });
+    window.horizon.command(command).then(async () => { await onGranted(); onClose(); }, (reason: unknown) => setFailure(describe(reason))).finally(() => { busy.current = false; setPending(false); });
   };
   return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-describedby={`${id}-hint`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }}>
     <form onSubmit={event => {
@@ -56,11 +63,11 @@ export function VaultImportPermission({ language, windows, describe, onGranted, 
 }
 
 function VaultBadge({ login }: { login: VaultLogin }) {
-  return <span className="browser-site-badge vault-badge" data-profile-color="blue" aria-hidden="true">{(login.title || new URL(login.origin).host).slice(0, 1).toUpperCase()}</span>;
+  return <span className="browser-site-badge vault-badge" data-profile-color="blue" aria-hidden="true">{loginTitle(login).slice(0, 1).toUpperCase()}</span>;
 }
 
-export function PasswordsPanel({ state, language, opener, run, onDismiss, onAnnounce }: {
-  state: BrowserState; language: Language; opener: RefObject<HTMLButtonElement | null>; run(command: BrowserCommand): Promise<boolean>;
+export function PasswordsPanel({ state, language, opener, run, describe, onDismiss, onAnnounce }: {
+  state: BrowserState; language: Language; opener: RefObject<HTMLButtonElement | null>; run(command: BrowserCommand): Promise<boolean>; describe(reason: unknown): string;
   onDismiss(focus: boolean): void; onAnnounce(message: string): void;
 }) {
   const t = (key: CopyKey) => text(key, language), id = useId();
@@ -95,7 +102,7 @@ export function PasswordsPanel({ state, language, opener, run, onDismiss, onAnno
     {state.vault.error && <p className="browser-panel-error" role="alert">{t(state.vault.error)}</p>}
     {state.vault.unlocked ? <>
       <div className="search-field browser-panel-search"><Search aria-hidden="true" /><input ref={search} aria-label={t('vaultSearch')} placeholder={t('vaultSearch')} value={filter} onChange={event => setFilter(event.target.value)} /></div>
-      <ul className="browser-library-list">{logins.map(login => <li className="browser-library-row vault-row" key={`${login.origin}:${login.id}`}><VaultBadge login={login} /><span className="browser-entry-copy"><span title={login.origin}>{login.title || new URL(login.origin).host}</span><small>{login.username}</small></span><button className="icon-button" type="button" disabled={pending} aria-label={t('vaultCopy').replace('{site}', login.title || login.origin)} title={t('copy')} onClick={() => {
+      <ul className="browser-library-list">{logins.map(login => <li className="browser-library-row vault-row" key={`${login.origin}:${login.id}`}><VaultBadge login={login} /><span className="browser-entry-copy"><span title={login.origin}>{loginTitle(login)}</span><small>{login.username}</small></span><button className="icon-button" type="button" disabled={pending} aria-label={t('vaultCopy').replace('{site}', loginTitle(login))} title={t('copy')} onClick={() => {
         void action({ type: 'vault-copy', id: login.id, origin: login.origin }).then(success => { if (success) onAnnounce(t('vaultCopied')); });
       }}><Copy aria-hidden="true" /></button></li>)}</ul>
       {!logins.length && <p className="vault-note">{t(filter ? 'noResultsTitle' : 'vaultEmpty')}</p>}
@@ -107,11 +114,11 @@ export function PasswordsPanel({ state, language, opener, run, onDismiss, onAnno
       }}>{(['title', 'website', 'username', 'password'] as const).map(field => <label className="vault-form-field" key={field}><span>{t(field === 'title' ? 'vaultTitle' : field === 'website' ? 'vaultWebsite' : field === 'username' ? 'vaultUsername' : 'vaultPassword')}</span><input type={field === 'password' ? 'password' : field === 'website' ? 'url' : 'text'} autoComplete="off" value={form[field]} required={field !== 'username'} maxLength={field === 'title' ? 500 : field === 'website' ? 8192 : 32000} disabled={pending} onChange={event => setForm({ ...form, [field]: event.target.value })} /></label>)}<div className="settings-dialog-actions"><button className="settings-button" type="button" disabled={pending} onClick={() => { setAdding(false); setForm({ title: '', website: '', username: '', password: '' }); }}>{t('cancel')}</button><button className="settings-button primary" type="submit" disabled={pending}>{t('save')}</button></div></form>
         : <button className="browser-panel-foot" type="button" onClick={() => setAdding(true)}><span><Plus aria-hidden="true" /></span>{t('vaultAdd')}</button>}
     </> : <><p className="vault-note">{t('vaultUnlockHint')}</p><button className="settings-button" type="button" disabled={pending} onClick={() => { void requestUnlock(); }}><KeyRound aria-hidden="true" />{t('vaultUnlock')}</button></>}
-    {unlock && <VaultUnlock language={language} action={action} onClose={() => { setUnlock(false); search.current?.focus(); }} onUnlocked={async () => {}} />}
+    {unlock && <VaultUnlock language={language} describe={describe} onClose={() => { setUnlock(false); search.current?.focus(); }} onUnlocked={async () => {}} />}
   </section></ToolbarPopover>;
 }
 
-export function VaultSuggestion({ suggestion, state, language, run }: { suggestion: Suggestion; state: BrowserState; language: Language; run(command: BrowserCommand): Promise<boolean> }) {
+export function VaultSuggestion({ suggestion, state, language, run, describe }: { suggestion: Suggestion; state: BrowserState; language: Language; run(command: BrowserCommand): Promise<boolean>; describe(reason: unknown): string }) {
   const t = (key: CopyKey) => text(key, language), ref = useRef<HTMLElement>(null), busy = useRef(false);
   const [selected, setSelected] = useState<VaultLogin | null>(null), [pending, setPending] = useState(false);
   const dismiss = () => { void run({ type: 'vault-dismiss' }); };
@@ -133,8 +140,8 @@ export function VaultSuggestion({ suggestion, state, language, run }: { suggesti
   };
   return <section className="vault-suggestion" ref={ref} role="dialog" aria-label="Vault" aria-busy={pending} style={{ left: `clamp(var(--toolbar-popup-edge), ${suggestion.x}px, calc(100vw - var(--width-vault-suggestion) - var(--toolbar-popup-edge)))`, top: `min(${suggestion.y}px, calc(100vh - var(--height-vault-suggestion)))` }}>
     <div className="vault-heading"><KeyRound aria-hidden="true" /><strong>Vault</strong><button className="icon-button" aria-label={t('close')} onClick={dismiss}><X aria-hidden="true" /></button></div>
-    {suggestion.logins.map(login => <button className="vault-account" type="button" key={login.id} disabled={pending} onClick={() => { void choose(login); }}><VaultBadge login={login} /><span className="browser-entry-copy"><span>{login.username || login.title}</span><small>{new URL(login.origin).host}</small></span></button>)}
+    {suggestion.logins.map(login => <button className="vault-account" type="button" key={login.id} disabled={pending} onClick={() => { void choose(login); }}><VaultBadge login={login} /><span className="browser-entry-copy"><span>{login.username || loginTitle(login)}</span><small>{new URL(login.origin).host}</small></span></button>)}
     <p className="vault-note vault-status"><Fingerprint aria-hidden="true" /><span>{t(state.vault.unlocked ? 'vaultFillHint' : state.vault.windows ? 'vaultHelloHint' : 'vaultMasterFillHint')}</span></p>
-    {selected && <VaultUnlock language={language} action={action} onClose={() => setSelected(null)} onUnlocked={async () => { await fill(selected); }} />}
+    {selected && <VaultUnlock language={language} describe={describe} onClose={() => setSelected(null)} onUnlocked={async () => { await fill(selected); }} />}
   </section>;
 }

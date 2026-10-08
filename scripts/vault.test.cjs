@@ -230,3 +230,60 @@ test('Vault lists every saved sign-in from one request as display metadata and k
   assert.deepEqual(loginSummaries([]), []);
   assert.throws(() => loginSummaries(null), /VAULT_UNAVAILABLE/);
 });
+function interfaceModule(filename, dependencies) {
+  const { compileFunction } = require('node:vm');
+  const { transpileModule, ModuleKind, JsxEmit } = require('typescript');
+  const source = transpileModule(readFileSync(filename, 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS, jsx: JsxEmit.ReactJSX } }).outputText;
+  const exported = {}, jsx = (type, props) => ({ type, props });
+  compileFunction(source, ['exports', 'require'])(exported, name => {
+    if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
+    assert.ok(Object.hasOwn(dependencies, name), `Unexpected interface import: ${name}`);
+    return dependencies[name];
+  });
+  return exported;
+}
+
+test('a refused master password or Hello is its own answer, sets no error and never takes the Passwords choice away', async t => {
+  const copy = interfaceModule('src/copy.ts', {}), api = require('../dist/src/shared/api.js');
+  const { passwordsReason } = interfaceModule('src/Import.tsx', { react: {}, 'lucide-react': {}, './copy': copy, './shared/api': api, './Vault': {} });
+  const fixture = controller(t), { vault, service } = fixture, unlock = service.unlock, hello = service.hello.unlock;
+  await vault.run({ type: 'vault-refresh' });
+  const refuse = (code, way = 'password') => {
+    const failure = async () => { throw Object.assign(new Error('service said ' + secret), { code }); };
+    service.unlock = way === 'password' ? failure : unlock; service.hello.unlock = way === 'hello' ? failure : hello;
+  };
+  const command = way => way === 'password' ? { type: 'vault-unlock', password: secret } : { type: 'vault-hello' };
+  const cases = [['password', 'locked', 'VAULT_PERMISSION_PASSWORD'], ['password', 'limited', 'VAULT_PERMISSION_LIMITED'], ['password', 'forbidden', 'VAULT_PERMISSION_FORBIDDEN'],
+    ...(process.platform === 'win32' ? [['hello', 'not_found', 'VAULT_HELLO_NOT_SET_UP'], ['hello', 'unavailable', 'VAULT_HELLO_UNAVAILABLE'], ['hello', 'locked', 'VAULT_HELLO_FAILED']] : [])];
+  for (const [way, code, expected] of cases) {
+    refuse(code, way);
+    const sent = command(way);
+    await assert.rejects(vault.run(sent), error => error.message === expected && !error.message.includes(secret), `${way} ${code}`);
+    assert.equal(vault.state().error, null, `${way} ${code}`); assert.equal(vault.state().unlocked, false);
+    assert.equal(passwordsReason(vault.state(), false), null, `${way} ${code}`); assert.equal(passwordsReason(vault.state(), true), null, `${way} ${code}`);
+    if (sent.password !== undefined) assert.equal(sent.password, '');
+  }
+  refuse('locked', 'none'); await vault.run({ type: 'vault-unlock', password: 'Synthetic master password' }); assert.equal(vault.state().unlocked, true);
+  refuse('locked'); await assert.rejects(vault.run(command('password')), error => error.message === 'VAULT_PERMISSION_PASSWORD');
+  assert.equal(vault.state().unlocked, true); assert.equal(vault.state().error, null);
+  // Not reaching Vault at all, or a Vault that is not created, is still a failure to unlock.
+  for (const code of ['not_found', 'unavailable', 'surprise']) {
+    refuse(code); await assert.rejects(vault.run(command('password')), error => error.message === 'VAULT_UNAVAILABLE', code);
+    assert.equal(vault.state().error, 'VAULT_UNAVAILABLE'); assert.equal(vault.state().unlocked, false);
+    assert.equal(passwordsReason(vault.state(), true), null, code);
+    refuse(code, 'none'); await vault.run({ type: 'vault-refresh' }); assert.equal(vault.state().error, null);
+  }
+  const named = (available, created, probed) => passwordsReason({ available, created }, probed);
+  assert.equal(named(false, false, false), null); assert.equal(named(false, false, true), 'importPasswordsNoVault');
+  assert.equal(named(true, false, false), 'importPasswordsNoVaultCreated'); assert.equal(named(true, true, true), null);
+});
+
+test('a sign-in titled with its address, or with nothing, is shown by its host', () => {
+  const copy = interfaceModule('src/copy.ts', {});
+  const { loginTitle } = interfaceModule('src/Vault.tsx', { react: {}, 'lucide-react': {}, './copy': copy, './ToolbarPopover': {} });
+  const login = title => ({ id: 'synthetic-id', origin: 'https://mail.synthetic.test', title, username: 'synthetic-user' });
+  for (const title of ['https://mail.synthetic.test', 'http://mail.synthetic.test/login?next=1', 'HTTPS://MAIL.SYNTHETIC.TEST', '', '   ']) assert.equal(loginTitle(login(title)), 'mail.synthetic.test', title);
+  for (const title of ['Synthetic mail', 'httpsmail', 'Mail at https://mail.synthetic.test']) assert.equal(loginTitle(login(title)), title);
+  assert.equal(loginTitle({ ...login(''), origin: 'https://mail.synthetic.test:8443' }), 'mail.synthetic.test:8443');
+  assert.equal(loginTitle(login('https://mail.synthetic.test')).slice(0, 1).toUpperCase(), 'M');
+});

@@ -22,12 +22,13 @@ const connections = new Map<string, { promise: Promise<Client>; users: number }>
 const auditEvents: Partial<Record<VaultCommand['type'], Parameters<typeof vaultAudit>[0]>> = { 'vault-unlock': 'unlock', 'vault-hello': 'hello', 'vault-lock': 'lock', 'vault-fill': 'fill', 'vault-copy': 'copy', 'vault-add': 'add', 'vault-import-permission': 'permission', 'vault-import-permission-hello': 'permission' };
 // The one place where the import asks Vault whether Horizon may save passwords. The permission is given in the apps system of Vault.
 const askImportPermission = async (service: Client): Promise<boolean> => (await service.apps.self()).permissions.includes('import');
-// What the permission request answers, as codes the dialog has words for; anything else is an ordinary Vault failure.
+// What a proof of the master password or of Windows Hello answers, as codes the dialog has words for; anything else is an ordinary Vault failure.
+// Vault answers "locked" to a wrong master password (core/src/unlock.ts:33), and "not_found" means a Hello that is not set up only when the proof is Hello.
 function permissionCode(error: unknown, hello: boolean): string | null {
   const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : '';
   if (code === 'locked') return hello ? 'VAULT_HELLO_FAILED' : 'VAULT_PERMISSION_PASSWORD';
   if (code === 'limited') return 'VAULT_PERMISSION_LIMITED';
-  if (code === 'not_found') return 'VAULT_HELLO_NOT_SET_UP';
+  if (code === 'not_found') return hello ? 'VAULT_HELLO_NOT_SET_UP' : null;
   if (code === 'forbidden') return 'VAULT_PERMISSION_FORBIDDEN';
   return code === 'unavailable' && hello ? 'VAULT_HELLO_UNAVAILABLE' : null;
 }
@@ -201,13 +202,12 @@ export function createVault(options: Options) {
           const handle = options.window.getNativeWindowHandle();
           return handle.length === 8 ? handle.readBigUInt64LE().toString() : handle.readUInt32LE().toString();
         };
-        if (command.type === 'vault-unlock') await service.unlock(command.password);
-        else if (command.type === 'vault-hello') await service.hello.unlock(windowHandle());
-        else {
-          // The onboarding step of Vault: it is checked like an unlock, which also unlocks Vault, and then Horizon holds the import permission.
-          try { await (command.type === 'vault-import-permission' ? service.permissions.importWithPassword(command.password) : service.permissions.importWithHello(windowHandle())); }
-          catch (error) { const mapped = permissionCode(error, hello); throw mapped ? new Error(mapped) : error; }
-        }
+        // The onboarding step of Vault is checked like an unlock, which also unlocks Vault, and then Horizon holds the import permission.
+        try {
+          if (command.type === 'vault-unlock') await service.unlock(command.password);
+          else if (command.type === 'vault-hello') await service.hello.unlock(windowHandle());
+          else await (command.type === 'vault-import-permission' ? service.permissions.importWithPassword(command.password) : service.permissions.importWithHello(windowHandle()));
+        } catch (error) { const mapped = permissionCode(error, hello); throw mapped ? new Error(mapped) : error; }
         if (closed || ticket !== epoch) throw new Error('VAULT_PAGE_CHANGED');
         epoch++; state.unlocked = true; unlockedAt = Date.now(); state.unlockMethod = hello ? 'hello' : 'master';
         await refresh();
