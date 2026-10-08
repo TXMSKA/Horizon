@@ -25,6 +25,7 @@ const samples = [
   ['uBlock Origin Lite', 'ddkjiahejlhfcafbddmgiahcphecmpfh'],
   ['Dark Reader', 'eimadpbcbfnmbkopoojfekhnkhdbieeh'],
   ['Vimium', 'dbepggeogbaibhgnhhndojpepiihcmeb'],
+  ['JSON Formatter', 'bcjindcccaagfpapjjmafapmmgkkhgoa'],
 ];
 const outputPath = resolve(temporary, 'output.txt');
 function report(message) { appendFileSync(outputPath, message + '\n'); console.log(message); }
@@ -89,12 +90,18 @@ if (!phase) {
     const command = value => window.webContents.executeJavaScript(`window.horizon.command(${JSON.stringify(value)})`);
     const target = session.fromPartition(registry.profiles[0].partition), manager = existingExtensions(target);
     await manager.ready;
-    const local = createServer((_request, response) => {
+    const local = createServer((request, response) => {
+      if (request.url === '/data.json') {
+        response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        response.end('{"horizon":"extensions","samples":3,"ok":true}');
+        return;
+      }
       response.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
       response.end('<!doctype html><html><head><title>Extension runtime test</title><style>body{background:white;color:black}</style></head><body><h1>Extension runtime test</h1><a href="/next">Next</a></body></html>');
     });
     await new Promise(done => local.listen(0, '127.0.0.1', done));
     const localURL = `http://127.0.0.1:${local.address().port}/`;
+    const jsonURL = `${localURL}data.json`;
     const workerRunning = id => Object.values(target.serviceWorkers.getAllRunning()).some(info => info.scope === `chrome-extension://${id}/`);
     const startWorker = async (name, id) => {
       // Mirrors Horizon's own retry: a just-registered worker's first start can abort.
@@ -113,6 +120,14 @@ if (!phase) {
       await until(() => { page = window.contentView.children.find(view => view.webContents?.getURL() === localURL)?.webContents; return page && !page.isLoading(); }, 'Local test page did not load');
       await until(() => page.executeJavaScript(`Boolean(document.querySelector('style.darkreader')) && getComputedStyle(document.body).backgroundColor !== 'rgb(255, 255, 255)'`), 'Dark Reader did not change the local test page');
       report('Dark Reader: its content script inserted a darkreader stylesheet and changed the local page background');
+    };
+    const checkJsonPage = async () => {
+      await command({ type: 'navigate', input: jsonURL });
+      let page;
+      await until(() => { page = window.contentView.children.find(view => view.webContents?.getURL() === jsonURL)?.webContents; return page && !page.isLoading(); }, 'Local JSON page did not load');
+      await until(() => page.executeJavaScript(`Boolean(document.getElementById('jsonFormatterParsed')) && Boolean(document.getElementById('jsonFormatterRaw'))`), 'JSON Formatter did not format the local JSON response');
+      await until(() => page.executeJavaScript(`typeof window.json === 'object' && window.json !== null && window.json.horizon === 'extensions'`), 'JSON Formatter did not set the json global in the page');
+      report('JSON Formatter: its content scripts formatted a local JSON response and set the json global in the page');
     };
 
     if (!restart) {
@@ -142,10 +157,12 @@ if (!phase) {
         await command({ type: 'answer-extension-install', id: warning.requestId, allow: true });
         const extension = await installation;
         assert.equal(extension.id, id); assert.ok(target.extensions.getExtension(id));
-        // uBlock Origin Lite is the unsupported sample: its worker needs declarativeNetRequest, which Electron lacks, so it is installed anyway and not expected to run.
+        // uBlock Origin Lite is the unsupported warning sample: its worker needs declarativeNetRequest, which Electron lacks, so it is installed anyway and not expected to run.
+        // JSON Formatter has no service worker; its content scripts are the proof it runs.
         if (id === samples[0][1]) report('uBlock Origin Lite: installed anyway; not expected to run without declarativeNetRequest');
-        else await startWorker(name, id);
+        else if (id !== samples[3][1]) await startWorker(name, id);
         if (id === samples[1][1]) await checkDarkPage();
+        if (id === samples[3][1]) await checkJsonPage();
       }
       await window.webContents.executeJavaScript('document.querySelector("[aria-controls=extensions-popover]").click()');
       await until(() => window.webContents.executeJavaScript('Boolean(document.querySelector(".extensions-popover"))'), 'Extensions popover did not open');
@@ -216,7 +233,7 @@ if (!phase) {
       app.exit(0);
     } else {
       const restored = (await state()).extensions;
-      assert.equal(restored.length, 3);
+      assert.equal(restored.length, 4);
       for (const [, id] of samples) {
         const entry = restored.find(extension => extension.id === id); assert.ok(entry);
         assert.equal(entry.enabled, id !== samples[1][1]);
@@ -226,7 +243,8 @@ if (!phase) {
       assert.equal(session.fromPartition(registry.profiles[1].partition).extensions.getAllExtensions().length, 0);
       await startWorker(...samples[2]);
       assert.ok(manager.list().find(extension => extension.id === samples[2][1]).action);
-      report('Restart: 3 installed; uBlock Origin Lite and Vimium on; Dark Reader off; Vimium pin preserved and running; second profile empty');
+      await checkJsonPage();
+      report('Restart: 4 installed; uBlock Origin Lite, Vimium and JSON Formatter on; Dark Reader off; Vimium pin preserved and running; JSON Formatter still formatting; second profile empty');
       report('Extension runtime verification passed.');
       clearTimeout(timer); local.close(); browser.flush(); app.exit(0);
     }
