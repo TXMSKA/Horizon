@@ -10,7 +10,7 @@ import { blobReference, computerName, mergeOperation, projectSnapshot, recordTit
 import type { BlobReference, SyncSnapshot } from './sync-model';
 import { atomicSyncFile, readSyncState, syncStorageAvailable, writeSyncState } from './sync-storage';
 import type { SyncCipher } from './sync-storage';
-import { datasetFolder, decodeSync, FolderTransport, objectName, validBatch, validCheckpoint, writerParts } from './sync-transport';
+import { datasetFolder, decodeSync, FolderTransport, objectName, SYNC_ROOT_PARTS, validBatch, validCheckpoint, writerParts } from './sync-transport';
 
 export interface SyncHost {
   read(): SyncSnapshot;
@@ -162,16 +162,16 @@ export class SyncEngine {
     return this.enqueue(async () => {
       requireSync(accepted === true && !this.local); syncStorageAvailable(this.cipher);
       const { key, check } = await this.keys().create(), transport = new FolderTransport(folder);
-      await transport.publish(['Horizon Sync', check.datasetId, 'dataset.hzs'], Buffer.from(canonical(check)), 4096);
+      await transport.publish([...SYNC_ROOT_PARTS, check.datasetId, 'dataset.hzs'], Buffer.from(canonical(check)), 4096);
       const state = this.initial(folder, check, key); this.save(state); this.local = state; this.failure = null; this.host.changed();
     });
   }
   async join(folder: string, input: string, accepted: boolean): Promise<void> {
     return this.enqueue(async () => {
       requireSync(accepted === true && !this.local); syncStorageAvailable(this.cipher);
-      const transport = new FolderTransport(folder), datasets = (await transport.list(['Horizon Sync'])).filter(uuid); requireSync(datasets.length === 1, 'SYNC_FOLDER');
+      const transport = new FolderTransport(folder), datasets = (await transport.list([...SYNC_ROOT_PARTS])).filter(uuid); requireSync(datasets.length === 1, 'SYNC_FOLDER');
       let parameters: unknown;
-      try { parameters = JSON.parse((await transport.read(['Horizon Sync', datasets[0]!, 'dataset.hzs'], 4096)).toString('utf8')); } catch { throw new Error('SYNC_INVALID'); }
+      try { parameters = JSON.parse((await transport.read([...SYNC_ROOT_PARTS, datasets[0]!, 'dataset.hzs'], 4096)).toString('utf8')); } catch { throw new Error('SYNC_INVALID'); }
       validateDataset(parameters); requireSync(parameters.datasetId === datasets[0]);
       const key = await this.keys().open(input, parameters), state = this.initial(folder, parameters, key); state.joining = true;
       this.save(state); this.local = state; this.failure = null; this.host.changed();

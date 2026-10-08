@@ -7,7 +7,7 @@ const { createCipheriv, createDecipheriv, randomBytes, randomUUID } = require('n
 const { SyncEngine } = require('../dist/electron/sync-engine.js');
 const { browserSyncHost } = require('../dist/electron/sync-browser.js');
 const { sealSync, openSync, randomSyncKeys, canonical, SYNC_LIMITS } = require('../dist/electron/sync-format.js');
-const { FolderTransport, decodeSync, deadline } = require('../dist/electron/sync-transport.js');
+const { FolderTransport, decodeSync, deadline, SYNC_ROOT_PARTS } = require('../dist/electron/sync-transport.js');
 const transportModule = require('../dist/electron/sync-transport.js');
 const { readSyncState } = require('../dist/electron/sync-storage.js');
 const { createSettings } = require('../dist/electron/settings.js');
@@ -49,7 +49,7 @@ function seat(t, root, name, options = {}) {
 const favorite = (id = randomUUID(), title = 'Synthetic favorite') => ({ kind: 'link', id, title, url: 'https://synthetic-sync.example/favorite', createdAt: 100 });
 async function pair(t) {
   const { root, folder } = setup(t), a = seat(t, root, 'a'), b = seat(t, root, 'b');
-  await a.engine.create(folder, true); await a.engine.pulse(); await b.engine.join(folder, a.engine.revealKey(), true); await b.engine.pulse(); await a.engine.pulse(); return { root, folder, a, b };
+  await a.engine.create(folder, true); assert.ok(existsSync(join(folder, 'Data', 'Horizon', a.engine.local.dataset.datasetId, 'dataset.hzs'))); await a.engine.pulse(); await b.engine.join(folder, a.engine.revealKey(), true); await b.engine.pulse(); await a.engine.pulse(); return { root, folder, a, b };
 }
 async function converge(a, b) { await a.engine.pulse(); await b.engine.pulse(); await a.engine.pulse(); }
 function batchFiles(folder) { return files(folder).filter(path => path.includes('batches') && path.endsWith('.hzs')); }
@@ -117,10 +117,10 @@ test('sync sequence gaps wait without applying later records', async t => {
   const { folder, a, b } = await pair(t); const state = a.engine.local, key = Buffer.from(state.key, 'base64'), id = randomUUID(), sequence = state.sequence + 2;
   const operation = { item: 'settings', profile: null, key: 'language', value: 'es', id: randomUUID(), base: null, time: 2000000, device: state.device, generation: state.generation };
   const identity = { dataset: state.dataset.datasetId, device: state.device, generation: state.generation, sequence, id, kind: 'batch' }, parts = ['writers', state.device, state.generation, 'batches', `${sequence}-${id}.hzs`];
-  await new FolderTransport(join(folder, 'Horizon Sync', state.dataset.datasetId)).publish(parts, sealSync(key, identity, { version: 1, kind: 'batch', createdAt: 1000000, sequence, operations: [operation], conflicts: [] }), SYNC_LIMITS.package);
+  await new FolderTransport(join(folder, ...SYNC_ROOT_PARTS, state.dataset.datasetId)).publish(parts, sealSync(key, identity, { version: 1, kind: 'batch', createdAt: 1000000, sequence, operations: [operation], conflicts: [] }), SYNC_LIMITS.package);
   await b.engine.pulse(); assert.equal(b.settings.language, 'system');
   const missingId = randomUUID(), missing = { ...identity, sequence: sequence - 1, id: missingId };
-  await new FolderTransport(join(folder, 'Horizon Sync', state.dataset.datasetId)).publish([...parts.slice(0, -1), `${sequence - 1}-${missingId}.hzs`], sealSync(key, missing, { version: 1, kind: 'batch', createdAt: 1000000, sequence: sequence - 1, operations: [], conflicts: [] }), SYNC_LIMITS.package);
+  await new FolderTransport(join(folder, ...SYNC_ROOT_PARTS, state.dataset.datasetId)).publish([...parts.slice(0, -1), `${sequence - 1}-${missingId}.hzs`], sealSync(key, missing, { version: 1, kind: 'batch', createdAt: 1000000, sequence: sequence - 1, operations: [], conflicts: [] }), SYNC_LIMITS.package);
   await b.engine.pulse(); assert.equal(b.settings.language, 'es');
 });
 
@@ -130,7 +130,7 @@ test('sync crash after sealing republishes exactly the saved ciphertext on resta
   const pending = a.engine.local.outbox, saved = pending.files.map(file => ({ parts: file.parts, bytes: readFileSync(join(a.directory, 'sync', 'outbox', file.file)) }));
   const oldGeneration = a.engine.local.generation; crash = false;
   const reopened = new SyncEngine(a.directory, a.encryption, a.host, { now: () => 1000000 }); t.after(() => reopened.stop()); assert.equal(reopened.local.generation, oldGeneration); await reopened.pulse();
-  for (const file of saved) assert.equal(readFileSync(join(folder, 'Horizon Sync', reopened.local.dataset.datasetId, ...file.parts)).equals(file.bytes), true);
+  for (const file of saved) assert.equal(readFileSync(join(folder, ...SYNC_ROOT_PARTS, reopened.local.dataset.datasetId, ...file.parts)).equals(file.bytes), true);
   const copied = join(root, 'copy'); mkdirSync(join(copied, 'sync'), { recursive: true }); copyFileSync(join(a.directory, 'sync', 'state.sealed'), join(copied, 'sync', 'state.sealed')); const clone = new SyncEngine(copied, a.encryption, a.host); assert.notEqual(clone.local.device, a.engine.local.device);
 });
 
@@ -146,13 +146,13 @@ for (const attack of ['tampered', 'truncated', 'oversized', 'newer', 'moved', 'i
     const state = a.engine.local, name = path.split(/[\\/]/).at(-1), sequence = Number(name.split('-')[0]), id = name.slice(String(sequence).length + 1, -4), identity = { dataset: state.dataset.datasetId, device: state.device, generation: state.generation, sequence, id, kind: 'batch' }, payload = openSync(Buffer.from(state.key, 'base64'), identity, bytes); payload.operations[0].value.entry.url = 'file:///synthetic'; bytes = sealSync(Buffer.from(state.key, 'base64'), identity, payload);
   }
   if (attack === 'moved') {
-    const state = a.engine.local, device = randomUUID(), generation = randomUUID(), name = path.split(/[\\/]/).at(-1), target = join(folder, 'Horizon Sync', state.dataset.datasetId, 'writers', device, generation, 'batches', `1-${name.slice(name.indexOf('-') + 1)}`); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, bytes);
+    const state = a.engine.local, device = randomUUID(), generation = randomUUID(), name = path.split(/[\\/]/).at(-1), target = join(folder, ...SYNC_ROOT_PARTS, state.dataset.datasetId, 'writers', device, generation, 'batches', `1-${name.slice(name.indexOf('-') + 1)}`); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, bytes);
   } else writeFileSync(path, bytes);
   const before = canonical(b.read()), cursors = canonical(b.engine.local.cursors); await assert.rejects(b.engine.pulse(), /SYNC_/); assert.equal(canonical(b.read()), before); assert.equal(canonical(b.engine.local.cursors), cursors);
 });
 
 test('sync ignores cloud conflict copies and partial files', async t => {
-  const { folder, a, b } = await pair(t), state = a.engine.local, path = join(folder, 'Horizon Sync', state.dataset.datasetId, 'writers', state.device, state.generation, 'batches');
+  const { folder, a, b } = await pair(t), state = a.engine.local, path = join(folder, ...SYNC_ROOT_PARTS, state.dataset.datasetId, 'writers', state.device, state.generation, 'batches');
   for (const name of [`99-${randomUUID()}-MOTHERSHIP.hzs`, `99-${randomUUID()}.hzs.partial`, 'unknown.hzs']) writeFileSync(join(path, name), Buffer.from('Synthetic untrusted garbage'));
   await b.engine.pulse(); assert.equal(b.engine.state().failure, null);
 });
@@ -226,7 +226,7 @@ test('sync switching off a sealed item retires the batch and still syncs enabled
   const { root, folder } = setup(t); let crash = false; const a = seat(t, root, 'a', { afterSeal() { if (crash) throw new Error('Synthetic interruption'); } }); await a.engine.create(folder, true); await a.engine.pulse();
   const b = seat(t, root, 'b'); await b.engine.join(folder, a.engine.revealKey(), true); await b.engine.pulse(); await a.engine.pulse();
   a.store(store => store.favorites.bar.push(favorite())); a.settings.setLanguage('es'); a.engine.markDirty('settings'); crash = true; await assert.rejects(a.engine.pulse()); const pending = a.engine.local.outbox.files.filter(file => file.parts[3] === 'batches');
-  await a.engine.setItem('favorites', false); crash = false; await converge(a, b); assert.equal(b.settings.language, 'es'); assert.equal(b.data.store.favorites.bar.length, 0); for (const file of pending) assert.equal(existsSync(join(folder, 'Horizon Sync', a.engine.local.dataset.datasetId, ...file.parts)), false);
+  await a.engine.setItem('favorites', false); crash = false; await converge(a, b); assert.equal(b.settings.language, 'es'); assert.equal(b.data.store.favorites.bar.length, 0); for (const file of pending) assert.equal(existsSync(join(folder, ...SYNC_ROOT_PARTS, a.engine.local.dataset.datasetId, ...file.parts)), false);
 });
 
 test('sync focus receives and the development pulse publishes after its delay', async t => {
@@ -245,7 +245,7 @@ test('sync rejects unavailable secret storage and basic_text before creating a d
 });
 
 test('sync bounds writer discovery and ignores unrelated folder names', async t => {
-  const { folder, a } = await pair(t), path = join(folder, 'Horizon Sync', a.engine.local.dataset.datasetId, 'writers');
+  const { folder, a } = await pair(t), path = join(folder, ...SYNC_ROOT_PARTS, a.engine.local.dataset.datasetId, 'writers');
   mkdirSync(join(path, 'cloud-conflict-copy')); await a.engine.pulse();
   for (let index = 0; index < 65; index++) mkdirSync(join(path, randomUUID())); const before = canonical(a.read()); await assert.rejects(a.engine.pulse(), /SYNC_LIMIT/); assert.equal(canonical(a.read()), before);
 });

@@ -87,4 +87,5 @@ export function decodeSync(key: Buffer, identity: SyncIdentity, bytes: Buffer): 
     worker.once('exit', () => finish(() => reject(new Error('SYNC_INVALID'))));
   });
 }
-export function datasetFolder(folder: string, dataset: string) { requireSync(uuid(dataset)); return resolve(folder, 'Horizon Sync', dataset); }
+export const SYNC_ROOT_PARTS = ['Data', 'Horizon'] as const;
+export function datasetFolder(folder: string, dataset: string) { requireSync(uuid(dataset)); return resolve(folder, ...SYNC_ROOT_PARTS, dataset); }

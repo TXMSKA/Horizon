@@ -4,7 +4,7 @@ Settings > Sync exposes setup, joining, the item switches, conflicts and leaving
 
 ## Transport
 
-The chosen folder contains `Horizon Sync/<datasetId>/dataset.hzs`. The descriptor is bounded JSON with exactly `magic`, `version`, `datasetId`, `keyType` and `check`. Version 1 uses a random 32-byte dataset key; `check` is an authenticated encrypted check block. The descriptor contains no personal data.
+The chosen folder contains `Data/Horizon/<datasetId>/dataset.hzs`. Data is shared by the family's apps; Horizon keeps its datasets in its own subfolder. The descriptor is bounded JSON with exactly `magic`, `version`, `datasetId`, `keyType` and `check`. Version 1 uses a random 32-byte dataset key; `check` is an authenticated encrypted check block. The descriptor contains no personal data.
 
 Each writer owns `writers/<deviceId>/<generationId>/` beneath that dataset, with `batches/<sequence>-<batchId>.hzs`, `blobs/<blobId>.hzs` and `checkpoints/<sequence>-<checkpointId>.hzs`. Writes use an exclusive temporary `.partial` file, flush it, then rename. Existing final files must have identical bytes. Other names, including cloud conflict copies, are ignored.
 

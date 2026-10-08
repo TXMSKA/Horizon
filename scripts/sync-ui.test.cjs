@@ -49,6 +49,10 @@ test('sync failures use bilingual messages without exposing arbitrary error text
     const key = `SYNC_${suffix}`; assert.equal(syncErrorKey(new Error(`IPC failed: ${key}`)), key);
     assert.ok(copy[key].en && copy[key].es); assert.doesNotMatch(copy[key].en + copy[key].es, /[\u2010-\u2015\u2212]/);
   }
+  for (const code of ['SYNC_INVALID', 'SYNC_FOLDER']) {
+    assert.match(copy[code].en, /the Data folder/i); assert.match(copy[code].es, /la carpeta Data/i);
+    assert.doesNotMatch(copy[code].en + copy[code].es, /Horizon Sync/);
+  }
   assert.equal(syncErrorKey(new Error('unknown synthetic sensitive value')), 'browserError');
   assert.equal(syncErrorKey(new Error('syncCopyFailed')), 'syncCopyFailed');
 });
