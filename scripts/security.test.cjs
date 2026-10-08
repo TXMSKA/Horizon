@@ -6941,7 +6941,7 @@ function lyraFixture(options = {}) {
   const calls = [], reads = [], decisions = new Map(), pages = new Map();
   let alive = true;
   const host = {
-    privateWindow: options.privateWindow ?? false, alive: () => alive, language: () => 'en', changed() {},
+    privateWindow: options.privateWindow ?? false, alive: () => alive, language: () => options.language ?? 'en', changed() {},
     page: id => { if (!pages.has(id)) throw new Error('LYRA_PAGE_UNAVAILABLE'); return pages.get(id); },
     decision: origin => decisions.get(origin) ?? 'ask', allow: origin => { decisions.set(origin, 'allow'); },
     project: () => options.project ?? { id: 'project', items: [] }, item: () => options.item,
@@ -6993,6 +6993,14 @@ test('Lyra never reads without permission, asks once per site and remembers it i
   assert.ok(request.context.includes('Route and lodging facts.')); assert.equal(request.context.includes('form secret'), false);
   for (const secret of ['typed secret', 'embedded secret', 'other site secret']) assert.equal(request.context.includes(secret), false);
   assert.deepEqual(fixture.calls.find(call => call[0] === 'protocol' && call[2] === 'Accessibility.getFullAXTree')[3], { depth: 24, frameId: 'main-frame' });
+});
+
+test('Lyra pins the answer language of every chat request to the Horizon language', async t => {
+  for (const language of ['en', 'es']) {
+    const fixture = lyraFixture({ language }); t.after(fixture.close); fixture.add('first', 'https://routes.example/a'); fixture.decisions.set('https://routes.example', 'allow');
+    await fixture.ask(); await lyraSettled(fixture.lyra);
+    assert.equal(fixture.calls.find(call => call[0] === 'chat')[1].language, language);
+  }
 });
 
 test('Lyra comparison authorizes every origin before any read and one-time grants expire after the turn', async t => {

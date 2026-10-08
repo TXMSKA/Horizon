@@ -95,7 +95,7 @@ export function createLyra(host: LyraHost) {
     const language = host.language();
     const instruction = text('lyraInstruction', language);
     // Fast has an explicit 2,048 output-token ceiling in Lyra's runtime. The client exposes no per-call override.
-    const stream = client.chat({ mode: 'fast', priority: 'interactive', context, messages: [{ role: 'user', content: `${instruction}\n${JSON.stringify({ task: asked.task, question: asked.question })}` }] }, { signal });
+    const stream = client.chat({ mode: 'fast', priority: 'interactive', language, context, messages: [{ role: 'user', content: `${instruction}\n${JSON.stringify({ task: asked.task, question: asked.question })}` }] }, { signal });
     let done = false;
     for await (const event of stream) {
       current(id, signal);
