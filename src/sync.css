@@ -1,0 +1,23 @@
+.sync-settings { display: flex; flex-direction: column; gap: var(--space-24); border-radius: var(--radius-panel); }
+.sync-settings .setting-controls { flex-wrap: wrap; justify-content: flex-end; }
+.sync-settings .setting-row, .sync-conflict { flex-wrap: wrap; }
+.sync-settings .setting-copy { flex-basis: var(--width-settings-dropdown); }
+.sync-code-label { display: flex; flex-direction: column; gap: var(--space-8); font-size: var(--type-label); color: var(--text-title); }
+.sync-code { min-height: var(--size-44); padding: var(--space-8) var(--space-10); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--surface-field); color: var(--text-title); font-family: var(--font-code); font-size: var(--type-label); }
+.sync-dialog .settings-dialog-actions, .sync-code-actions { flex-wrap: wrap; }
+.sync-dialog .settings-checkbox { min-height: var(--target-minimum); }
+.sync-conflict-note { padding-top: var(--space-16); }
+.sync-notice-dot { display: inline-block; flex: none; width: var(--size-dot); height: var(--size-dot); border-radius: var(--radius-pill); background: var(--accent); }
+.settings-rail-row .sync-notice-dot { margin-inline-start: auto; }
+.sync-remote { display: flex; flex-direction: column; gap: var(--space-12); border-top: var(--border-width) solid var(--divider); padding-top: var(--space-12); }
+.sync-remote > h3 { margin: 0; font-size: var(--type-caption); line-height: var(--line-caption); font-weight: var(--weight-emphasis); color: var(--text-secondary); }
+.sync-remote h3, .sync-remote h4 { overflow-wrap: anywhere; }
+.sync-remote-window { display: flex; flex-direction: column; gap: var(--space-4); }
+.sync-remote h4 { display: flex; align-items: center; gap: var(--space-6); }
+.sync-remote-window + .sync-remote-window { margin-top: var(--space-8); }
+.sync-remote-group { display: flex; align-items: center; gap: var(--space-8); width: 100%; min-height: var(--target-minimum); padding: var(--space-4) var(--space-8); border-radius: var(--radius-small); color: var(--text-title); font-size: var(--type-label); text-align: start; overflow-wrap: anywhere; }
+.sync-remote-tab { min-height: var(--size-44); }
+.sync-remote-tab[aria-disabled=true], .sync-remote-group:disabled { color: var(--text-secondary); cursor: default; }
+@media (pointer: coarse) {
+  .sync-settings .settings-button, .sync-dialog .settings-button, .sync-dialog .settings-checkbox, .sync-remote button, .sync-remote-tab { min-height: var(--target-touch); }
+}

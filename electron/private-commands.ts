@@ -4,6 +4,7 @@ const favoriteWrites = new Set(['bookmark', 'add-favorite', 'create-favorite-fol
 const desktopWrites = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item']);
 
 export function assertPrivateCommand(command: BrowserCommand): void {
+  if (command.type.startsWith('sync-')) throw new Error('SYNC_PRIVATE');
   if (command.type.includes('extension') || command.type === 'open-settings' && command.section === 'extensions') throw new Error('EXTENSIONS_UNAVAILABLE');
   if (command.type.startsWith('translate-')) throw new Error('TRANSLATE_PRIVATE');
   if (command.type.startsWith('lyra-')) throw new Error('LYRA_PRIVATE');

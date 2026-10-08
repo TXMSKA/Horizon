@@ -14,6 +14,17 @@ export type VaultCommand =
   | { type: 'set-vault-timeout'; value: VaultTimeout };
 export type LanguageSetting = 'system' | Language;
 export type OnStart = 'restore' | 'new-page';
+export const SYNC_ITEMS = ['profiles', 'favorites', 'history', 'tabs', 'desktop', 'siteSettings', 'settings'] as const;
+export type SyncItem = typeof SYNC_ITEMS[number];
+export type SyncFailure = 'SYNC_INVALID' | 'SYNC_NEWER_FORMAT' | 'SYNC_WRONG_KEY' | 'SYNC_STORAGE' | 'SYNC_FOLDER' | 'SYNC_FULL' | 'SYNC_LIMIT' | 'SYNC_TIMEOUT' | 'SYNC_LOCKED' | 'SYNC_GAP' | 'SYNC_BLOB_PENDING' | 'SYNC_CHANGED';
+export interface SyncComputerIdentity { id: string; name: string }
+export interface SyncConflict { id: string; item: SyncItem; title: string; computer: SyncComputerIdentity; time: number; deleted: boolean }
+export interface SyncRemoteWindow { profile: string; id: string; tabs: { title: string; url: string; group: string | null }[]; groups: { id: string; title: string }[] }
+export interface SyncComputer extends SyncComputerIdentity { windows: SyncRemoteWindow[] }
+export interface SyncState { configured: boolean; folderName: string | null; lastSynced: number | null; switches: Record<SyncItem, boolean>; failure: SyncFailure | null; conflicts: SyncConflict[]; computers: SyncComputer[]; syncing: boolean }
+export type SyncCommand = { type: 'sync-create'; accepted: true } | { type: 'sync-join'; accepted: true; key: string }
+  | { type: 'sync-set-item'; item: SyncItem; enabled: boolean } | { type: 'sync-now' } | { type: 'sync-reveal-key' } | { type: 'sync-save-key' }
+  | { type: 'sync-leave'; removeOwnFiles: boolean } | { type: 'sync-restore-conflict' | 'sync-dismiss-conflict'; id: string };
 export const SEARCH_ENGINES = {
   duckduckgo: { displayName: 'DuckDuckGo', searchPrefix: 'https://duckduckgo.com/?q=' },
   startpage: { displayName: 'Startpage', searchPrefix: 'https://www.startpage.com/sp/search?query=' },
@@ -23,7 +34,7 @@ export const SEARCH_ENGINES = {
   google: { displayName: 'Google', searchPrefix: 'https://www.google.com/search?q=' },
 } as const;
 export type SearchEngine = keyof typeof SEARCH_ENGINES;
-export type SettingsSection = 'general' | 'appearance' | 'privacy' | 'privacy/sites' | 'profiles' | 'extensions';
+export type SettingsSection = 'general' | 'appearance' | 'privacy' | 'privacy/sites' | 'profiles' | 'extensions' | 'sync';
 export type DefaultBrowserStatus = 'default' | 'notDefault' | 'developmentBuild' | 'unsupported';
 export type UpdateState = { status: 'unavailable' | 'idle' | 'checking' | 'upToDate' | 'ready' | 'error' } | { status: 'downloading'; percent: number };
 export interface ClearedBrowsingData { history: boolean; cookies: boolean; cache: boolean }
@@ -75,7 +86,7 @@ export interface PermissionPrompt { id: string; origin: string; permissions: Sit
 export interface BlockedCounts { ads: number; trackers: number; cookies: number }
 export interface BrowserStore { version: 5; history: HistoryEntry[]; favorites: FavoritesTree; downloads: DownloadEntry[]; siteSettings: SiteSettingsStore; clearHistoryOnClose: boolean; clearCacheOnClose: boolean }
 export interface TabState { translation: TranslateState; id: string; groupId: string | null; movable: boolean; settings: SettingsSection | null; desktop: string | null; desktopItem: string | null; url: string; title: string; favicon: string | null; loading: boolean; fullscreen: boolean; canGoBack: boolean; canGoForward: boolean; zoom: number; error: string | null; find: { active: number; total: number }; blocked: BlockedCounts }
-export interface BrowserState { vault: VaultState; lyra: LyraState; extensions: ExtensionState[]; extensionWarning: ExtensionWarning | null; extensionsUpdating: boolean; extensionsError: boolean; firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; update: UpdateState; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; installedThemes: MarketplaceTheme[]; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
+export interface BrowserState { sync: SyncState; vault: VaultState; lyra: LyraState; extensions: ExtensionState[]; extensionWarning: ExtensionWarning | null; extensionsUpdating: boolean; extensionsError: boolean; firstRun: boolean; importProgress: ImportProgress | null; groups: TabGroup[]; groupEditorId: string | null; privateWindow: boolean; canReopenTab: boolean; onStart: OnStart; showCapture: boolean; version: string; update: UpdateState; quickAccess: HubApp[]; searchEngine: SearchEngine; languageSetting: LanguageSetting; language: Language; downloadsFolder: string; downloadsFolderDefault: boolean; downloadsFolderUnavailable: boolean; askWhereToSave: boolean; blockAds: boolean; blockThirdPartyCookies: boolean; clearHistoryOnClose: boolean; clearCacheOnClose: boolean; sites: SiteSettingsEntry[]; clearingBrowsingData: boolean; defaultBrowser: DefaultBrowserStatus; projects: ProjectSummary[]; captures: CaptureSummary[]; desktopPanel: DesktopPanelState; projectInUse: string | null; desktopVersion: number; desktopReadError: boolean; desktopLocked: boolean; desktopStorageError: boolean; profiles: ProfileState[]; activeProfileId: string; tabs: TabState[]; activeId: string; store: BrowserStore; storageError: boolean; storageReadError: boolean; installedThemes: MarketplaceTheme[]; theme: Theme; contrast: Contrast; darkPages: DarkPagesState; blockingReady: boolean; siteSettings: SiteSettings | null; permissionPrompt: PermissionPrompt | null }
 export type ContextMenuItemId = 'add-to-desktop' | 'open-link' | 'copy-link' | 'open-image' | 'save-image' | 'copy-image' | 'copy-image-address' | 'copy' | 'search-selection' | 'undo' | 'redo' | 'cut' | 'paste' | 'select-all' | 'back' | 'forward' | 'reload' | `spell:${string}` | `extension:${string}`;
 export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean; label?: string; checked?: boolean }
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
@@ -94,7 +105,7 @@ export type CaptureSummary = Pick<DesktopItem, 'id' | 'title' | 'source' | 'crea
 export type DesktopPanelPage = { kind: 'home' | 'captures' | 'new-project' } | { kind: 'project'; project: string; folder?: string | null } | { kind: 'item'; project: string | null; id: string };
 export interface DesktopPanelState { open: boolean; page: DesktopPanelPage }
 export type DesktopError = 'DESKTOP_COMMAND_INVALID' | 'DESKTOP_LOCKED' | 'FOLDER_NAME_INVALID' | 'FOLDER_NAME_EMPTY' | 'FOLDER_NAME_LONG' | 'FOLDER_NAME_DUPLICATE' | 'FOLDER_LIMIT' | 'FOLDER_NOT_FOUND' | 'CAPTURE_LIMIT' | 'LINK_INVALID' | 'TEXT_INVALID' | 'DESKTOP_NOT_FOUND' | 'PROJECT_NAME_INVALID' | 'PROJECT_NAME_EMPTY' | 'PROJECT_NAME_LONG' | 'PROJECT_NAME_DUPLICATE' | 'PROJECT_ADDRESS_CONFLICT' | 'PROJECT_LIMIT' | 'PROJECT_ITEM_LIMIT' | 'PROJECT_NOT_FOUND' | 'DESKTOP_ITEM_NOT_FOUND' | 'DESKTOP_ITEM_INVALID' | 'DESKTOP_STORAGE_FAILED' | 'DESKTOP_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'CAPTURE_LOADING' | 'CAPTURE_CRASHED' | 'CAPTURE_DESKTOP' | 'CAPTURE_SETTINGS';
-export type BrowserCommand = VaultCommand
+export type BrowserCommand = VaultCommand | SyncCommand
   | { type: 'set-extension-enabled'; id: string; enabled: boolean }
   | { type: 'set-extension-pinned'; id: string; pinned: boolean }
   | { type: 'remove-extension'; id: string }
@@ -199,6 +210,8 @@ export interface HorizonAPI {
   getFavicon(id: string, hash: string): Promise<Uint8Array | null>;
   command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
   command(command: Extract<BrowserCommand, { type: 'list-import-sources' }>): Promise<ImportSource[]>;
+  command(command: Extract<BrowserCommand, { type: 'sync-reveal-key' }>): Promise<string>;
+  command(command: Extract<BrowserCommand, { type: 'sync-save-key' }>): Promise<boolean>;
   command(command: Extract<BrowserCommand, { type: 'import-browser-data' }>): Promise<ImportResult>;
   command(command: Extract<BrowserCommand, { type: 'save-capture-file' }>): Promise<boolean>;
   command(command: Extract<BrowserCommand, { type: 'take-capture' | 'capture-full-page' | 'capture-screen' | 'edit-capture' | 'copy-capture' }>): Promise<CaptureShot>;

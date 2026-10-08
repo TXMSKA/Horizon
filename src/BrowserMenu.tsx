@@ -7,8 +7,9 @@ import type { LibraryPanel } from './BrowserPanel';
 import { Menu } from './Menu';
 import { ToolbarPopover } from './ToolbarPopover';
 
-export function BrowserMenu({ language, active, privateWindow = false, canReopen, keyboard, opener, onDismiss, onShortcut, onPanel, onSettings, onExtensions, onAbout, run }: {
+export function BrowserMenu({ language, active, privateWindow = false, syncConflicts = false, canReopen, keyboard, opener, onDismiss, onShortcut, onPanel, onSettings, onExtensions, onAbout, run }: {
   privateWindow?: boolean;
+  syncConflicts?: boolean;
   canReopen: boolean;
   language: Language; active: TabState | undefined; keyboard: boolean; opener: RefObject<HTMLButtonElement | null>;
   onDismiss: (focus: boolean) => void; onShortcut: (shortcut: BrowserShortcut) => void; onPanel: (panel: LibraryPanel | 'passwords') => void;
@@ -42,7 +43,7 @@ export function BrowserMenu({ language, active, privateWindow = false, canReopen
     {!privateWindow && <button type="button" role="menuitem" tabIndex={-1} onClick={() => onPanel('passwords')}><KeyRound aria-hidden="true" /><span>{t('passwords')}</span></button>}
     {!privateWindow && <button type="button" role="menuitem" tabIndex={-1} onClick={onExtensions}><Puzzle aria-hidden="true" /><span>{t('extensions')}</span></button>}
     <hr />
-    <button type="button" role="menuitem" tabIndex={-1} onClick={onSettings}><Settings2 aria-hidden="true" /><span>{t('settings')}</span></button>
+    <button type="button" role="menuitem" tabIndex={-1} aria-label={syncConflicts ? `${t('settings')}. ${t('syncConflictNotice')}` : undefined} onClick={onSettings}><Settings2 aria-hidden="true" /><span>{t('settings')}</span>{syncConflicts && <i className="sync-notice-dot" aria-hidden="true" />}</button>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => onShortcut('clear-browsing-data')}><Trash2 aria-hidden="true" /><span>{t('clearBrowsingData')}</span><kbd>Ctrl+Shift+Delete</kbd></button>
     <button type="button" role="menuitem" tabIndex={-1} onClick={onAbout}><Info aria-hidden="true" /><span>{t('aboutHorizon')}</span></button>
   </Menu></ToolbarPopover>;

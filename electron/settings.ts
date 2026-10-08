@@ -3,6 +3,8 @@ import { dirname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { HUB_APPS, MARKETPLACE_THEMES, QUICK_ACCESS_LIMIT, SEARCH_ENGINES } from '../src/shared/api';
 import type { BuiltInTheme, MarketplaceTheme, Contrast, DarkPagesMode, DarkStrength, DarkTone, HubApp, Language, LanguageSetting, OnStart, SearchEngine, Theme, VaultTimeout } from '../src/shared/api';
+import { syncSettings, validateSyncSettings } from './sync-model';
+import type { SyncSettings } from './sync-model';
 
 interface LegacySettings { version: 1; theme: Theme; contrast?: Contrast }
 interface SettingsV2 { version: 2; theme: Theme; contrast: Contrast; darkPages: DarkPagesMode; darkStrength: DarkStrength; darkTone: DarkTone }
@@ -26,6 +28,8 @@ export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
   setOnStart(value: OnStart): void;
   setVaultTimeout(value: VaultTimeout): void;
   finishFirstRun(): void;
+  syncSnapshot(): SyncSettings;
+  applySync(value: SyncSettings): void;
 }
 export function isVaultTimeout(value: unknown): value is VaultTimeout { return ['close', '5', '15', '60'].includes(value as string); }
 export function isOnStart(value: unknown): value is OnStart { return value === 'restore' || value === 'new-page'; }
@@ -145,6 +149,8 @@ export function createSettings(path: string, changed: (theme: Theme) => void, hi
     if (typeof value !== 'boolean') throw new Error(error); save({ ...settings, [key]: value });
   };
   return {
+    syncSnapshot: () => syncSettings(settings),
+    applySync(value) { validateSyncSettings(value); const next = { ...settings, ...value }; if (!value.marketplace) delete next.marketplace; save(next); },
     get installedThemes() { return [...(settings.marketplace?.installed ?? [])]; },
     installTheme(id) {
       if (!isMarketplaceTheme(id)) throw new Error('SETTINGS_COMMAND_INVALID');
