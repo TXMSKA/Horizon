@@ -1,39 +1,47 @@
 import fs from "node:fs";
 import { dirname, join, resolve, isAbsolute } from "node:path";
-import { execFileSync } from "node:child_process";
 import { VaultClientError } from "./errors.ts";
+import { runHelper, runHelperSync } from "./helper.ts";
 
 // ACLs protect all service data, including ciphertext, discovery and audit records.
-// A fresh descriptor carries only the owner and the access list; rewriting the one Get-Acl returns also writes the audit list, which needs a privilege users lack once the folder is protected.
-// The check reads the descriptor through .NET, not Get-Acl: started from PowerShell 7, Windows PowerShell inherits its module path and Get-Acl fails to load.
-export function privateDirectory(directory: string): void {
+// A fresh descriptor carries only the owner and the access list; rewriting one read back from the folder also writes the audit list, which needs a privilege users lack once the folder is protected.
+// The native helper sets the descriptor, reads it back and fails unless it is exactly the owner and the three allowed accounts.
+// `home` names the Vault install whose helper does the work; it defaults to the one this process resolves.
+// The async forms are for hosts: a helper build's first run can wait on the antivirus for half a minute, and a host's main thread must not.
+
+// Checks and creates the folder; answers the folder the helper still has to protect on Windows, or nothing when it is done.
+function folder(directory: string): string | undefined {
   directory = resolve(directory);
-  try {
-    if (!isAbsolute(directory) || /^\\\\/.test(directory) || /[\x00-\x1f]/.test(directory) || directory.split(/[\\/]/).some(part => /^(?:onedrive(?: - .*)?|dropbox|google drive|icloud drive)$/i.test(part))) throw new Error();
-    let ancestor = directory;
-    while (!fs.existsSync(ancestor)) { const parent = dirname(ancestor); if (parent === ancestor) throw new Error(); ancestor = parent; }
-    const resolvedAncestor = fs.realpathSync.native(ancestor);
-    if (process.platform === "win32" ? resolvedAncestor.toLowerCase() !== ancestor.toLowerCase() : resolvedAncestor !== ancestor) throw new Error();
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const actual = fs.realpathSync.native(directory);
-    if ((process.platform === "win32" ? actual.toLowerCase() !== directory.toLowerCase() : actual !== directory) || fs.lstatSync(directory).isSymbolicLink()) throw new Error();
-    if (process.platform !== "win32") { if (fs.statSync(directory).uid !== process.getuid?.()) throw new Error(); fs.chmodSync(directory, 0o700); return; }
-    const executable = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    const script = "$ErrorActionPreference='Stop'; $p=$env:VAULT_PRIVATE_PATH; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); foreach($s in @($sid.Value,'S-1-5-18','S-1-5-32-544')){$r=[Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($s),'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($r)}; (Get-Item -LiteralPath $p).SetAccessControl($acl); $a=(Get-Item -LiteralPath $p).GetAccessControl(); if(-not $a.AreAccessRulesProtected -or $a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value){exit 1}; foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if($r.IdentityReference.Value -notin @($sid.Value,'S-1-5-18','S-1-5-32-544') -or $r.AccessControlType -ne 'Allow'){exit 1}}";
-    execFileSync(executable, ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, stdio: "ignore", timeout: 10000, env: { ...process.env, VAULT_PRIVATE_PATH: directory } });
-  } catch { throw new VaultClientError("unsafe_location"); }
+  if (!isAbsolute(directory) || /^\\\\/.test(directory) || /[\x00-\x1f]/.test(directory) || directory.split(/[\\/]/).some(part => /^(?:onedrive(?: - .*)?|dropbox|google drive|icloud drive)$/i.test(part))) throw new Error();
+  let ancestor = directory;
+  while (!fs.existsSync(ancestor)) { const parent = dirname(ancestor); if (parent === ancestor) throw new Error(); ancestor = parent; }
+  const resolvedAncestor = fs.realpathSync.native(ancestor);
+  if (process.platform === "win32" ? resolvedAncestor.toLowerCase() !== ancestor.toLowerCase() : resolvedAncestor !== ancestor) throw new Error();
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const actual = fs.realpathSync.native(directory);
+  if ((process.platform === "win32" ? actual.toLowerCase() !== directory.toLowerCase() : actual !== directory) || fs.lstatSync(directory).isSymbolicLink()) throw new Error();
+  if (process.platform !== "win32") { if (fs.statSync(directory).uid !== process.getuid?.()) throw new Error(); fs.chmodSync(directory, 0o700); return undefined; }
+  return directory;
 }
-export function privateFile(filename: string): void {
-  try {
-    const stat = fs.lstatSync(filename);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error();
-    if (process.platform !== "win32") { fs.chmodSync(filename, 0o600); if (stat.uid !== process.getuid?.()) throw new Error(); }
-    else {
-      const executable = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-      const script = "$ErrorActionPreference='Stop'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $a=(Get-Item -LiteralPath $env:VAULT_PRIVATE_PATH).GetAccessControl(); if($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid){exit 1}; foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if($r.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544') -or $r.AccessControlType -ne 'Allow'){exit 1}}";
-      execFileSync(executable, ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, stdio: "ignore", timeout: 10000, env: { ...process.env, VAULT_PRIVATE_PATH: filename } });
-    }
-  } catch { throw new VaultClientError("unsafe_location"); }
+// Checks the file; answers whether the helper still has to check its descriptor on Windows.
+function file(filename: string): boolean {
+  const stat = fs.lstatSync(filename);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error();
+  if (process.platform !== "win32") { fs.chmodSync(filename, 0o600); if (stat.uid !== process.getuid?.()) throw new Error(); return false; }
+  return true;
+}
+const unsafe = (error: unknown) => new VaultClientError("unsafe_location", { cause: error });
+export function privateDirectory(directory: string, home?: string): void {
+  try { const path = folder(directory); if (path) runHelperSync("protect-folder", { path }, { home }); } catch (error) { throw unsafe(error); }
+}
+export function privateFile(filename: string, home?: string): void {
+  try { if (file(filename)) runHelperSync("check-file", { path: filename }, { home }); } catch (error) { throw unsafe(error); }
+}
+export async function privateDirectoryAsync(directory: string, home?: string): Promise<void> {
+  try { const path = folder(directory); if (path) await runHelper("protect-folder", { path }, { home }); } catch (error) { throw unsafe(error); }
+}
+export async function privateFileAsync(filename: string, home?: string): Promise<void> {
+  try { if (file(filename)) await runHelper("check-file", { path: filename }, { home }); } catch (error) { throw unsafe(error); }
 }
 export function prepareHome(home: string) {
   privateDirectory(home);
