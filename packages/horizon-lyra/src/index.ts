@@ -304,6 +304,16 @@ async function ensureService(home: string, overridden: boolean, timeout: number)
   return pending;
 }
 
+/** Whether the service is already running. It only looks and never starts the service. */
+export async function isRunning(options: { home?: string } = {}): Promise<boolean> {
+  return await running(resolveHome(options.home).home) !== undefined;
+}
+
+/** Whether a valid install record exists. It only reads and validates the file and never starts anything. */
+export async function isInstalled(options: { home?: string } = {}): Promise<boolean> {
+  try { await readInstall(resolveHome(options.home).home); return true; } catch { return false; }
+}
+
 // ---------------------------------------------------------------- the client
 
 interface Call {

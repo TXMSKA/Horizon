@@ -14,7 +14,8 @@ const { pageLanguage } = require('../dist/src/shared/translate.js');
 function pageFixture(options = {}) {
   const entries = (options.texts ?? ['Lagos del Sur', 'Tres paseos tranquilos alrededor del lago.']).map(text => ({ nodeValue: text, isConnected: true,
     parentElement: { closest: () => null, isContentEditable: false, getClientRects: () => [{}] } }));
-  const calls = [], model = [], writes = [];
+  const calls = [], model = [], writes = [], seen = [];
+  let connects = 0;
   const document = { documentElement: { lang: options.lang ?? 'es' }, body: {}, createTreeWalker: () => { let index = 0; return { nextNode: () => entries[index++] ?? null }; } };
   const worlds = new Map();
   const page = { url: 'https://translate.example/page', generation: 1, header: options.header ?? null, contents: {
@@ -31,11 +32,17 @@ function pageFixture(options = {}) {
   let alive = true;
   const settings = { blocking: [], dark: [], permissions: [] };
   const host = {
-    privateWindow: options.privateWindow ?? false, alive: () => alive, page: () => page, language: () => options.target ?? 'en', changed() {},
+    privateWindow: options.privateWindow ?? false, alive: () => alive, page: () => page, language: () => options.target ?? 'en', changed() { seen.push(structuredClone(translation.state())); },
     never: () => translationChoice(settings, page.url, null).never,
     always: source => translationChoice(settings, page.url, source).always,
     remember: (choice, source, target, enabled) => setTranslationChoice(settings, page.url, choice, source, target, enabled),
+    // Looking never starts Lyra; a missing Lyra answers no, and connecting to it is the only thing that could start it.
+    // Missing: no install record. Asleep: installed but its service is not running, so connecting is what would start it.
+    installed: async () => !options.lyraMissing,
+    available: async () => !options.lyraMissing && !options.lyraAsleep,
     async connect() {
+      connects++;
+      if (options.lyraMissing) throw { code: 'not_installed' };
       if (options.connectError) throw { code: options.connectError };
       return { chat(request, { signal }) {
         model.push(request);
@@ -49,7 +56,7 @@ function pageFixture(options = {}) {
     },
   };
   const translation = createTranslation(host);
-  return { translation, host, page, entries, worlds, calls, model, writes, settings, close() { translation.stop(); alive = false; } };
+  return { translation, host, page, entries, worlds, calls, model, writes, settings, seen, connects: () => connects, close() { translation.stop(); alive = false; } };
 }
 async function settled(translation, phase) {
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -132,6 +139,46 @@ test('translation detects html lang then Content-Language, falls back to a cappe
   const same = pageFixture({ lang: 'en-US' }); t.after(same.close); same.translation.probe(); await settled(same.translation, 'idle');
   same.translation.run({ type: 'translate-open' }); assert.equal(same.translation.state().open, false); assert.equal(same.model.length, 0);
   for (const value of ['<script>', 'en,es', '', 'x', null, 'a'.repeat(81)]) assert.equal(pageLanguage(value), null);
+});
+
+test('an automatic detection with Lyra missing leaves no bar and no error, and only a request from the person shows the failure', async t => {
+  const quiet = async fixture => { for (let attempt = 0; attempt < 20; attempt++) await new Promise(setImmediate); const state = fixture.translation.state(); assert.deepEqual([state.open, state.phase, state.error, state.source], [false, 'idle', null, null]); };
+  // An unknown language is named by Lyra, so without Lyra the detection ends silently and never connects, which would start it.
+  const unknown = pageFixture({ lang: '', header: null, lyraMissing: true }); t.after(unknown.close);
+  unknown.translation.probe(); await quiet(unknown);
+  assert.equal(unknown.connects(), 0); assert.deepEqual(unknown.model, []); assert.ok(unknown.seen.every(state => !state.open && state.error === null && state.phase !== 'failed'));
+  // A known and different language is not offered either when Lyra could not translate it.
+  const spanish = pageFixture({ lang: 'es', lyraMissing: true }); t.after(spanish.close);
+  spanish.translation.probe(); await quiet(spanish);
+  assert.equal(spanish.connects(), 0); assert.deepEqual(spanish.model, []); assert.ok(spanish.seen.every(state => !state.open && state.error === null && state.phase !== 'failed'));
+  // The page is not probed again, but asking for the translation still shows what is wrong.
+  spanish.translation.probe(); await quiet(spanish);
+  spanish.translation.run({ type: 'translate-open' }); const offered = await settled(spanish.translation, 'offered');
+  assert.equal(offered.open, true); assert.equal(offered.source, 'es');
+  spanish.translation.run({ type: 'translate-start' }); const failed = await settled(spanish.translation, 'failed');
+  assert.equal(failed.open, true); assert.equal(failed.error, 'not_installed');
+  unknown.translation.run({ type: 'translate-open' }); const asked = await settled(unknown.translation, 'failed');
+  assert.equal(asked.open, true); assert.equal(asked.error, 'not_installed');
+  const retried = pageFixture({ lang: 'es', lyraMissing: true }); t.after(retried.close);
+  retried.translation.run({ type: 'translate-start' }); assert.equal((await settled(retried.translation, 'failed')).error, 'not_installed');
+  // A language the person chose to always translate is a request, so its failure shows; a language that needs no Lyra is still known.
+  const always = pageFixture({ lang: 'es', lyraMissing: true }); t.after(always.close);
+  always.host.always = () => 'en'; always.translation.probe(); assert.equal((await settled(always.translation, 'failed')).error, 'not_installed');
+  const same = pageFixture({ lang: 'en', lyraMissing: true }); t.after(same.close);
+  same.translation.probe(); await new Promise(setImmediate); await settled(same.translation, 'idle'); assert.equal(same.translation.state().source, 'en');
+  // Installed but asleep: a known different language is still offered, without connecting; the person's click is what starts Lyra.
+  const asleep = pageFixture({ lang: 'es', lyraAsleep: true }); t.after(asleep.close);
+  asleep.translation.probe(); const sleeping = await settled(asleep.translation, 'offered');
+  assert.equal(sleeping.open, true); assert.equal(sleeping.source, 'es'); assert.equal(asleep.connects(), 0); assert.deepEqual(asleep.model, []);
+  asleep.translation.run({ type: 'translate-start' }); await settled(asleep.translation, 'translated'); assert.ok(asleep.connects() > 0);
+  // Installed but asleep, an unknown language is not guessed: detection never starts Lyra, so nothing shows and nothing connects.
+  const guessing = pageFixture({ lang: '', header: null, lyraAsleep: true }); t.after(guessing.close);
+  guessing.translation.probe(); await quiet(guessing);
+  assert.equal(guessing.connects(), 0); assert.deepEqual(guessing.model, []); assert.ok(guessing.seen.every(state => !state.open && state.error === null && state.phase !== 'failed'));
+  guessing.translation.run({ type: 'translate-open' }); await settled(guessing.translation, 'offered'); assert.ok(guessing.connects() > 0);
+  // With Lyra running the automatic offer is the same as before.
+  const running = pageFixture({ lang: 'es' }); t.after(running.close);
+  running.translation.probe(); assert.equal((await settled(running.translation, 'offered')).open, true);
 });
 
 test('always-language and never-host choices survive fresh encrypted site settings, never wins and reset clears the site exception', async t => {
