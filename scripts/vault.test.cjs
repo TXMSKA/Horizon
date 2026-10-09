@@ -10,6 +10,7 @@ const { vaultLogFields } = require('../dist/electron/vault-log.js');
 const { validateCommand } = require('../dist/electron/commands.js');
 const { createSettings } = require('../dist/electron/settings.js');
 const origin = 'https://synthetic.example';
+const settle = () => new Promise(done => setImmediate(done));
 const secret = 'Synthetic-value-for-tests-only';
 
 function directory(t) {
@@ -58,7 +59,7 @@ function row(site = origin, id = 'synthetic-id') {
 }
 function controller(t, privateWindow = false, policy = 'close', before = () => {}) {
   const fixture = page(), events = [], reads = [], copy = { text: '', writeText(value) { this.text = value; }, readText() { return this.text; }, clear() { this.text = ''; } };
-  let unlocked = false, connected = 0, generation = 1, closed = 0, hwnd;
+  let unlocked = false, connected = 0, generation = 1, closed = 0, hwnd, connector = async () => service;
   const service = {
     async status() { return { created: true, unlocked }; }, async unlock() { unlocked = true; }, async lock() { unlocked = false; }, async close() { closed++; },
     async logins(site) { reads.push(site); return [row(), row('https://synthetic.example.evil', 'evil-id')]; },
@@ -69,10 +70,10 @@ function controller(t, privateWindow = false, policy = 'close', before = () => {
   const folder = directory(t), protection = cipher(); before(folder);
   const vault = createVault({ window: { webContents: { getZoomFactor: () => 1 }, getNativeWindowHandle: () => { const bytes = Buffer.alloc(8); bytes.writeBigUInt64LE(123n); return bytes; } }, directory: folder, privateWindow, cipher: protection, clipboard: copy,
     timeout: () => policy, saveTimeout(value) { policy = value; }, page: () => ({ contents: fixture.contents, generation, id: 'synthetic-tab', zoom: 1, bounds: { x: 0, y: 96, width: 900, height: 700 } }),
-    covered: () => false, revealPage() {}, changed: () => events.push(vault.state()), connect: async () => { connected++; return service; },
+    covered: () => false, revealPage() {}, changed: () => events.push(vault.state()), connect: async () => { connected++; return connector(); },
   });
   t.after(() => vault.close());
-  return { vault, fixture, events, reads, copy, service, folder, protection, hwnd: () => hwnd, connected: () => connected, closed: () => closed, navigate() { generation++; fixture.navigate('https://evil.example'); } };
+  return { vault, fixture, events, reads, copy, service, folder, protection, connectWith(work) { connector = work; }, hwnd: () => hwnd, connected: () => connected, closed: () => closed, navigate() { generation++; fixture.navigate('https://evil.example'); } };
 }
 
 test('Vault refuses private windows before connecting, inspecting or copying', async t => {
@@ -169,7 +170,10 @@ test('Vault commands are bounded, settings persist, and audit fields redact secr
 
 test('Vault shows nothing of itself while locked, only the way to unlock, and asks Hello with this window handle', async t => {
   const never = controller(t); await never.vault.scan();
-  assert.equal(never.vault.state().suggestion, null); assert.equal(never.connected(), 0);
+  assert.equal(never.vault.state().suggestion, null); await settle(); await never.vault.scan();
+  const offer = never.vault.state().suggestion;
+  assert.ok(offer); assert.equal(offer.locked, true); assert.deepEqual(offer.logins, []); assert.equal(never.connected(), 1); assert.deepEqual(never.reads, []);
+  assert.equal(JSON.stringify(never.vault.state()).includes('Synthetic site'), false);
   const fixture = controller(t), saved = [{ id: 'other-id', version: 1, title: 'Other synthetic title', username: 'other-user', website: 'https://other.example' }];
   const listed = fixture.service.listLogins; fixture.service.listLogins = async () => [...await listed(), ...saved];
   if (process.platform === 'win32') { await fixture.vault.run({ type: 'vault-hello' }); assert.equal(fixture.hwnd(), '123'); assert.equal(fixture.vault.state().unlockMethod, 'hello'); }
@@ -196,6 +200,43 @@ test('Vault shows nothing of itself while locked, only the way to unlock, and as
   for (const hidden of ['Synthetic site', 'synthetic-user', 'synthetic.example', 'synthetic-id', 'Other synthetic title', 'other-user', 'other.example', 'other-id']) assert.equal(serialized.includes(hidden), false, hidden);
   assert.equal(existsSync(join(fixture.folder, 'vault-sites.sealed')), false);
   await assert.rejects(fixture.vault.run({ type: 'vault-fill', suggestion: selected.id, id: 'synthetic-id' })); assert.deepEqual(fixture.fixture.writes, []);
+});
+
+test('Vault makes one background connection at the first sign-in field, never blocks the scan on it and then offers only the unlock', async t => {
+  const fixture = controller(t); let reached;
+  fixture.connectWith(() => new Promise(done => { reached = () => done(fixture.service); }));
+  assert.equal(fixture.connected(), 0);
+  await fixture.vault.scan();
+  assert.equal(fixture.connected(), 1); assert.equal(fixture.vault.state().suggestion, null);
+  // While the attempt is pending no later scan starts a second one or offers anything.
+  await fixture.vault.scan(); await fixture.vault.scan(); await settle();
+  assert.equal(fixture.connected(), 1); assert.equal(fixture.vault.state().suggestion, null);
+  reached(); await settle(); await fixture.vault.scan();
+  const offer = fixture.vault.state().suggestion;
+  assert.ok(offer); assert.equal(offer.locked, true); assert.deepEqual(offer.logins, []); assert.equal(offer.origin, origin);
+  await fixture.vault.scan(); await settle(); await fixture.vault.scan();
+  assert.equal(fixture.connected(), 1); assert.deepEqual(fixture.reads, []);
+  assert.equal(JSON.stringify([fixture.vault.state(), ...fixture.events]).includes('synthetic-user'), false);
+  // A page that is not a sign-in field never makes the attempt.
+  const blank = controller(t); blank.fixture.snapshot({ strings: [origin, '#document', 'HTML'], documents: [{ documentURL: 0, nodes: { nodeName: [1, 2], backendNodeId: [1, 2], parentIndex: [-1, 0], attributes: [[], []] }, layout: { nodeIndex: [], bounds: [] }, scrollOffsetX: 0, scrollOffsetY: 0 }] });
+  await blank.vault.scan(); await settle(); await blank.vault.scan(); assert.equal(blank.connected(), 0); assert.equal(blank.vault.state().suggestion, null);
+});
+
+test('Vault that is not installed, or fails to answer, offers nothing at sign-in fields and is not asked again', async t => {
+  for (const code of ['not_installed', 'unavailable']) {
+    const fixture = controller(t);
+    fixture.connectWith(async () => { throw Object.assign(new Error('Vault said ' + code), { code }); });
+    for (let scan = 0; scan < 4; scan++) { await fixture.vault.scan(); await settle(); }
+    assert.equal(fixture.connected(), 1, code); assert.equal(fixture.vault.state().suggestion, null, code);
+    assert.equal(fixture.vault.state().error, null, code); assert.equal(fixture.vault.state().available, false, code);
+    assert.equal(fixture.vault.hasSession(), false, code); assert.deepEqual(fixture.reads, [], code);
+  }
+});
+
+test('Vault never connects from a sign-in field in a private window', async t => {
+  const fixture = controller(t, true);
+  for (let scan = 0; scan < 3; scan++) { await fixture.vault.scan(); await settle(); }
+  assert.equal(fixture.connected(), 0); assert.equal(fixture.vault.state().suggestion, null); assert.deepEqual(fixture.fixture.commands, []);
 });
 
 test('Vault deletes the display index an older version kept and never fails to start over it', t => {

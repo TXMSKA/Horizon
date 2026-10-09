@@ -79,7 +79,7 @@ export function createVault(options: Options) {
   removeLegacyIndex(options.directory);
   // The sign-ins found for the field in view exist only here, only while Vault is unlocked.
   let found: VaultLogin[] = [], client: Client | undefined, connection: Promise<Client> | undefined;
-  let closed = false, working = false, scanning = false, epoch = 0, unlockedAt = 0, suppressed = '';
+  let closed = false, working = false, scanning = false, contacted = false, epoch = 0, unlockedAt = 0, suppressed = '';
   let closeTask: Promise<void> | undefined;
   let target: { page: VaultPage; fields: LoginFields; id: string } | null = null, lastLookup = '';
   const copied = vaultClipboard(options.clipboard);
@@ -168,6 +168,9 @@ export function createVault(options: Options) {
       const signature = fields ? `${page.id}:${page.generation}:${fields.username}` : '';
       if (!fields || signature === suppressed) { if (target) { dismiss(); publish(); } return; }
       if (suppressed && signature !== suppressed) suppressed = '';
+      // The first sign-in field of the session makes the one attempt to reach Vault, in the background. Vault's answer (not installed included)
+      // is final for the sign-in fields: a failure leaves them without any offer and nothing retries it on a later scan. The next scan uses the connection.
+      if (!client && !contacted) { contacted = true; void getClient().catch(() => undefined); }
       if (client && signature !== lastLookup) {
         lastLookup = signature;
         await updateStatus(client);
