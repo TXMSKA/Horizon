@@ -41,5 +41,5 @@ linux:
 publish:
   provider: github
   owner: TXMSKA
-  repo: horizon-releases
+  repo: Horizon
   releaseType: draft

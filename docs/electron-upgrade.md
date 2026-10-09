@@ -24,8 +24,8 @@ For a new major:
 
 1. Set `version` in `package.json` and merge the change to `master`.
 2. Tag the merge commit as `vX.Y.Z`, matching `version`, and push the tag.
-3. The Release workflow runs the checks, then builds the Windows installer on Windows and the AppImage and deb package on Linux. It creates a draft release in `TXMSKA/horizon-releases` and uploads the installers and the update metadata (`latest.yml`, `latest-linux.yml`). The upload uses the `HORIZON_RELEASES_TOKEN` secret, which is set only on that step.
-4. A person reviews the draft and publishes it. Installed builds find the update only after the draft is published.
+3. The Release workflow runs the checks, then builds the Windows installer on Windows and the AppImage and deb package on Linux. It creates a draft release in `TXMSKA/Horizon` and uploads the installers and the update metadata (`latest.yml`, `latest-linux.yml`). The upload uses the run's own `GITHUB_TOKEN`, and only the release job has `contents: write`; nothing publishes the release.
+4. The owner reviews the draft and publishes it. Installers are downloaded from the GitHub releases of `TXMSKA/Horizon`, and installed builds find the update there only after the draft is published.
 
 Builds are unsigned and experimental. Windows SmartScreen and Smart App Control warn about or block the installer and the installed app.
 

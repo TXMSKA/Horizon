@@ -94,5 +94,8 @@ builds are available.
 
 `npm run dist:win` builds the Windows installer and `npm run dist:linux` the
 AppImage and deb package, in `release/`. Builds are unsigned and experimental.
-Installed builds update themselves from published releases. The upgrade and
-release routine is in [Electron upgrades and releases](docs/electron-upgrade.md).
+Installers and updates come from the GitHub releases of TXMSKA/Horizon: the
+release workflow publishes a draft with the run's token and the owner publishes
+the draft. Installed builds update themselves from published releases. The
+upgrade and release routine is in
+[Electron upgrades and releases](docs/electron-upgrade.md).
