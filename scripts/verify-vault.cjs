@@ -103,7 +103,8 @@ app.whenReady().then(async () => {
   try {
     stage = 'temporary service';
     const node = process.env.HORIZON_VERIFY_NODE || 'node';
-    const vaultRepository = resolve(root, '../Vault');
+    // HORIZON_VERIFY_VAULT_REPO points the check at a clean Vault checkout instead of the sibling working copy.
+    const vaultRepository = resolve(process.env.HORIZON_VERIFY_VAULT_REPO || resolve(root, '../Vault'));
     const env = { ...process.env, VAULT_HOME: vaultHome }; delete env.NODE_OPTIONS; delete env.ELECTRON_RUN_AS_NODE;
     // dev-install writes only the generated VAULT_HOME, never the real service home.
     await promisify(execFile)(node, [join(vaultRepository, 'packages/cli/src/main.ts'), 'dev-install'], { env, windowsHide: true, timeout: 30000 });
@@ -139,7 +140,7 @@ app.whenReady().then(async () => {
     secureSession(session.defaultSession);
     await serveHorizon(session.defaultSession.protocol, resolve(root, 'dist/renderer'));
     window = await createWindow(false, settings, registry);
-    stage = 'local sign-in and metadata';
+    stage = 'local sign-in';
     await command({ type: 'navigate', input: origin + '/login' });
     let contents;
     await until(() => { contents = webContents.getAllWebContents().find(item => item.getURL() === origin + '/login'); return contents && !contents.isLoading(); }, 'Local page missing');
@@ -147,13 +148,16 @@ app.whenReady().then(async () => {
     assert.equal((await chrome('window.horizon.getState()')).vault.logins.some(item => item.id === mainId), true);
     await command({ type: 'vault-lock' });
     await focusEmail(contents);
-    // The first locked visit has no metadata API in Vault. Priming above exercises
-    // the supported learned-site path without copying a password into chrome.
-    stage = 'suggestion';
+    // A locked Vault shows nothing of itself: the suggestion is only the way to unlock, and no saved title, username, site or id reaches chrome.
+    const hidden = [mainId, otherId, 'Synthetic local site', 'Synthetic look-alike site', username];
+    const leaks = async () => { const text = JSON.stringify((await chrome('window.horizon.getState()')).vault); return hidden.filter(value => text.includes(value)); };
+    stage = 'locked suggestion';
     await until(() => chrome('Boolean(document.querySelector(".vault-suggestion .vault-account"))'), 'Suggestion missing');
     await until(() => window.contentView.children.some(view => view.webContents === contents && !view.getVisible()), 'Suggestion did not cover the native page');
     const suggestion = (await chrome('window.horizon.getState()')).vault.suggestion;
-    assert.equal(suggestion.origin, origin); assert.deepEqual(suggestion.logins.map(item => item.id), [mainId]);
+    assert.equal(suggestion.origin, origin); assert.equal(suggestion.locked, true); assert.deepEqual(suggestion.logins, []); assert.deepEqual(await leaks(), []);
+    assert.equal(await chrome('document.querySelectorAll(".vault-suggestion .vault-account").length'), 1);
+    assert.equal(await chrome('document.querySelector(".vault-suggestion").textContent.includes("Synthetic")'), false);
     const geometry = await chrome('(() => { const r=document.querySelector(".vault-suggestion").getBoundingClientRect();return {x:r.x,y:r.y};})()');
     assert.ok(Math.abs(geometry.x - suggestion.x) < 2); assert.ok(Math.abs(geometry.y - suggestion.y) < 2);
     mkdirSync(screenshots, { recursive: true });
@@ -163,6 +167,11 @@ app.whenReady().then(async () => {
     await until(() => chrome('Boolean(document.querySelector(".vault-dialog[open]"))'), 'Unlock dialog missing');
     await chrome(`(() => { const input=document.querySelector('.vault-dialog input'); const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; setter.call(input,${JSON.stringify(master)}); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
     await pause(100); await chrome('document.querySelector(".vault-dialog form").requestSubmit()');
+    // After the unlock the same suggestion shows the sign-ins of this origin, without focusing the field again.
+    await until(async () => { const shown = (await chrome('window.horizon.getState()')).vault.suggestion; return shown?.locked === false && shown.logins.length === 1; }, 'Sign-ins missing after unlock');
+    assert.deepEqual((await chrome('window.horizon.getState()')).vault.suggestion.logins.map(item => item.id), [mainId]);
+    await until(() => chrome('!document.querySelector(".vault-dialog[open]")'), 'Unlock dialog did not close');
+    await chrome('document.querySelector(".vault-account").click()');
     await until(async () => {
       const data = await snapshot(contents), document = data.documents[0];
       const values = document.nodes.inputValue;
@@ -172,8 +181,18 @@ app.whenReady().then(async () => {
     stage = 'look-alike page';
     await command({ type: 'vault-lock' }); await command({ type: 'navigate', input: lookalike + '/login' });
     await until(() => { contents = webContents.getAllWebContents().find(item => item.getURL() === lookalike + '/login'); return contents && !contents.isLoading(); }, 'Look-alike page missing');
-    await focusEmail(contents); await pause(1700);
-    assert.equal((await chrome('window.horizon.getState()')).vault.suggestion, null);
+    await focusEmail(contents);
+    // Locked, the look-alike page gets the same unlock offer and no login data at all.
+    await until(() => chrome('Boolean(document.querySelector(".vault-suggestion .vault-account"))'), 'Look-alike suggestion missing');
+    const lookalikeLocked = (await chrome('window.horizon.getState()')).vault.suggestion;
+    assert.equal(lookalikeLocked.origin, lookalike); assert.equal(lookalikeLocked.locked, true); assert.deepEqual(lookalikeLocked.logins, []); assert.deepEqual(await leaks(), []);
+    // Unlocked, only the sign-in of the look-alike's own origin is offered, never the one of the other origin.
+    await command({ type: 'vault-unlock', password: master });
+    await until(async () => { const shown = (await chrome('window.horizon.getState()')).vault.suggestion; return shown?.locked === false && shown.logins.length > 0; }, 'Look-alike sign-in missing after unlock');
+    const lookalikeShown = (await chrome('window.horizon.getState()')).vault.suggestion;
+    assert.equal(lookalikeShown.origin, lookalike); assert.deepEqual(lookalikeShown.logins.map(item => item.id), [otherId]);
+    assert.equal(JSON.stringify(lookalikeShown).includes(mainId), false); assert.equal(JSON.stringify(lookalikeShown).includes('Synthetic local site'), false);
+    await command({ type: 'vault-lock' }); assert.deepEqual(await leaks(), []);
     // Both origins have saved logins. The service still returns only the exact one.
     await seed.unlock(master);
     assert.deepEqual((await seed.logins(origin)).map(row => row.entry.id), [mainId]); assert.deepEqual((await seed.logins(lookalike)).map(row => row.entry.id), [otherId]); await seed.lock();
@@ -185,7 +204,7 @@ app.whenReady().then(async () => {
     const frame = contents.mainFrame.frames.find(item => item.url.startsWith(lookalike)); assert.ok(frame);
     await frame.executeJavaScript('document.querySelector("input[type=email]").focus()');
     await until(() => contents.focusedFrame && contents.focusedFrame !== contents.mainFrame, 'Frame was not focused'); await pause(1700);
-    assert.equal((await chrome('window.horizon.getState()')).vault.suggestion, null);
+    assert.equal((await chrome('window.horizon.getState()')).vault.suggestion, null); assert.deepEqual(await leaks(), []);
     stage = 'private window';
     privateWindow = await createWindow(true, settings, registry);
     await chrome(`window.horizon.command({type:'navigate',input:${JSON.stringify(origin + '/login')}})`, privateWindow); await pause(1700);

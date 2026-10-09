@@ -449,6 +449,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       const { connect } = await import('horizon-lyra');
       return connect({ app: { id: 'horizon', name: 'Horizon', kind: 'cosmic' }, tokens: sealedLyraTokens(resolve(userData, 'lyra.token'), safeStorage) });
     };
+    // Looks for a running Lyra without starting it, so nothing automatic can wake the service.
+    const lyraRunning = async () => {
+      try { return await (await import('horizon-lyra')).isRunning(); } catch { return false; }
+    };
+    const lyraInstalled = async () => {
+      try { return await (await import('horizon-lyra')).isInstalled(); } catch { return false; }
+    };
     const lyra = createLyra({
       privateWindow, alive: () => !disposed && !closing && isCurrent(), language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { layout(); publish(); },
       page: id => {
@@ -778,7 +785,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         }
         for (const owner of shared.owners.values()) owner.publish();
       },
-      connect: connectLyra,
+      connect: connectLyra, available: lyraRunning, installed: lyraInstalled,
     }), alive: tab => !disposed && !closing && tabs.includes(tab), update, publish, fail: (tab, description) => fail(tab, description), close: tab => closeTab(tab), count: () => tabs.length };
     const downloadBindings = new Map<string, DownloadBinding>();
     const downloadOwner: DownloadOwner = { disposed: () => disposed, store, items, reserved, bindings: downloadBindings, trusted: trustedDownloads, persist, publish };
@@ -894,7 +901,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       tab.translation = createTranslation({
         privateWindow, alive: () => tab.host.alive(tab), language: () => tab.host.translation(tab).language(), changed: () => tab.host.update(),
         page: () => tab.host.translation(tab).page(), never: () => tab.host.translation(tab).never(), always: source => tab.host.translation(tab).always(source),
-        remember: (...args) => tab.host.translation(tab).remember(...args), connect: () => tab.host.translation(tab).connect(),
+        remember: (...args) => tab.host.translation(tab).remember(...args), connect: () => tab.host.translation(tab).connect(), available: () => tab.host.translation(tab).available(), installed: () => tab.host.translation(tab).installed(),
       });
       return tab;
     };

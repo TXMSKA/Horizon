@@ -15,6 +15,9 @@ export interface TranslateHost {
   never(): boolean; always(source: string): Language | null;
   remember(choice: 'always' | 'never', source: string | null, target: Language, enabled: boolean): void;
   connect(): Promise<Client>;
+  // Both only look and never start the service, so nothing automatic can wake Lyra up.
+  // installed: Lyra has a valid install record, so a click can start it. available: its service is already running.
+  installed(): Promise<boolean>; available(): Promise<boolean>;
 }
 export function translationBatches(texts: string[]): { node: number; text: string }[][] {
   const batches: { node: number; text: string }[][] = [];
@@ -106,10 +109,14 @@ export function createTranslation(host: TranslateHost) {
       return output;
     } finally { modelBusy = false; }
   };
-  const detect = async (page: TranslationPage, id: number, signal: AbortSignal) => {
+  // An automatic detection runs without anyone having asked for a translation. Offering a known, different language only needs Lyra to be installed
+  // (the click starts it, unless the person already chose to always translate that language). Naming an unknown language needs Lyra's service
+  // already running, because detection never starts it just to guess.
+  const detect = async (page: TranslationPage, id: number, signal: AbortSignal, automatic = false) => {
     state.phase = 'detecting'; state.error = null; publish();
     const lang = await read(page, 'language', undefined, id, signal);
     let source = pageLanguage(lang) ?? pageLanguage(page.header);
+    if (automatic && (!source ? !await host.available() : source !== host.language() && !host.always(source) && !await host.installed())) throw new Error('TRANSLATE_UNOFFERED');
     if (!source) {
       const sample = await read(page, 'sample', undefined, id, signal);
       if (typeof sample !== 'string' || !sample.trim()) throw new Error('TRANSLATE_EMPTY');
@@ -156,7 +163,12 @@ export function createTranslation(host: TranslateHost) {
       if (detected === page.generation) return;
       detected = page.generation;
       launch(async (page, id, signal) => {
-        await detect(page, id, signal);
+        // Nobody asked for this, so a detection that cannot finish leaves no bar and no error behind; only what the person asked for is shown as failed.
+        try { await detect(page, id, signal, true); }
+        catch {
+          if (id === generation && host.alive()) { state.open = false; state.phase = 'idle'; state.error = null; publish(); }
+          return;
+        }
         const target = state.source && host.always(state.source);
         if (target && target !== state.source) { state.target = target; await translate(page, id, signal); }
       });

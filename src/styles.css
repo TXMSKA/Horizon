@@ -876,3 +876,4 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .vault-account:hover { background: var(--surface-hover); }
 .vault-suggestion > .vault-note { padding: var(--space-4) var(--space-10); }
 .vault-suggestion .vault-status > svg { color: var(--text-secondary); }
+.vault-badge > svg { width: var(--icon-control); height: var(--icon-control); }

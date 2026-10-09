@@ -59,6 +59,36 @@ test('Lyra client reports a missing install and never trusts a malformed service
   await connect({ app, tokens: memoryTokens(), home: service.home });
 });
 
+test('Lyra client only looks for a running service when asked and never starts one', async t => {
+  const { isRunning } = await library();
+  const service = await fakeService(t, (request, response) => json(response, 200, { ok: true }));
+  assert.equal(await isRunning({ home: service.home }), true);
+  const installed = temporary(t); mkdirSync(join(installed, 'run'), { recursive: true });
+  const marker = join(installed, 'started'), script = join(installed, 'service.cjs');
+  writeFileSync(script, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started');`);
+  writeFileSync(join(installed, 'install.json'), JSON.stringify({ version: 1, command: process.execPath, args: [script] }));
+  assert.equal(await isRunning({ home: installed }), false);
+  await new Promise(done => setTimeout(done, 300));
+  assert.throws(() => readFileSync(marker), { code: 'ENOENT' });
+  writeFileSync(join(service.home, 'run', 'service.json'), 'not json');
+  assert.equal(await isRunning({ home: service.home }), false);
+});
+
+test('Lyra client reads only a valid install record to say it is installed and starts nothing', async t => {
+  const { isInstalled } = await library();
+  const home = temporary(t), file = join(home, 'install.json'), marker = join(home, 'started'), script = join(home, 'service.cjs');
+  writeFileSync(script, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started');`);
+  assert.equal(await isInstalled({ home }), false);
+  writeFileSync(file, JSON.stringify({ version: 1, command: process.execPath, args: [script] }));
+  assert.equal(await isInstalled({ home }), true);
+  for (const bad of [{ version: 2, command: process.execPath, args: [] }, { version: 1, command: 'relative/service', args: [] }, { version: 1, command: process.execPath }, { version: 1, command: process.execPath, args: [1] }, [], 'not json', '']) {
+    writeFileSync(file, typeof bad === 'string' ? bad : JSON.stringify(bad));
+    assert.equal(await isInstalled({ home }), false, JSON.stringify(bad));
+  }
+  await new Promise(done => setTimeout(done, 300));
+  assert.throws(() => readFileSync(marker), { code: 'ENOENT' });
+});
+
 test('Lyra client starts the installed service with a minimal environment', async t => {
   const { connect } = await library();
   const home = temporary(t), script = join(home, 'service.cjs'), report = join(home, 'environment.json');
