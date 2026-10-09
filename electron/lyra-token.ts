@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { TokenStore } from 'lyra-client' with { 'resolution-mode': 'import' };
+import type { TokenStore } from 'horizon-lyra' with { 'resolution-mode': 'import' };
 import type { StoreCipher } from './store';
 
 const header = Buffer.from('HORIZON-LYRA-1\n');

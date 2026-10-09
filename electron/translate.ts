@@ -1,4 +1,4 @@
-import type { Client } from 'lyra-client' with { 'resolution-mode': 'import' };
+import type { Client } from 'horizon-lyra' with { 'resolution-mode': 'import' };
 import type { Language } from '../src/shared/api';
 import { pageLanguage } from '../src/shared/translate';
 import type { TranslateCommand, TranslateState } from '../src/shared/translate';

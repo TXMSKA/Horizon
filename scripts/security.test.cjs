@@ -1,5 +1,6 @@
 const { test } = require('node:test');
 require('./vault.test.cjs');
+require('./horizon-lyra.test.cjs');
 const assert = require('node:assert/strict');
 const { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, mkdirSync, symlinkSync, rmSync } = require('node:fs');
 const { resolve, join, dirname } = require('node:path');

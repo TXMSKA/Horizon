@@ -446,7 +446,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
     const connectLyra = async () => {
-      const { connect } = await import('lyra-client');
+      const { connect } = await import('horizon-lyra');
       return connect({ app: { id: 'horizon', name: 'Horizon', kind: 'cosmic' }, tokens: sealedLyraTokens(resolve(userData, 'lyra.token'), safeStorage) });
     };
     const lyra = createLyra({

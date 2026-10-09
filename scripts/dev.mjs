@@ -42,8 +42,8 @@ const stop = () => {
 };
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
-// The Lyra and Vault clients are built once; the watchers cover only Horizon's own sources.
-await run(tsc, ['-p', 'packages/lyra-client']);
+// The Horizon-Lyra and Vault clients are built once; the watchers cover only Horizon's own sources.
+await run(tsc, ['-p', 'packages/horizon-lyra']);
 await run(tsc, ['-p', 'packages/vault-client']);
 // Serving Vite's built output keeps development under the production CSP without unsafe HMR.
 await rebuild();

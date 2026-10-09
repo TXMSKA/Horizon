@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Client } from 'lyra-client' with { 'resolution-mode': 'import' };
+import type { Client } from 'horizon-lyra' with { 'resolution-mode': 'import' };
 import type { DesktopItem, Language, PermissionDecision, ProjectContent } from '../src/shared/api';
 import type { LyraCommand, LyraSource, LyraState } from '../src/shared/lyra';
 import { text } from '../src/copy';
