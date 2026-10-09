@@ -15,12 +15,11 @@ export async function readCapped(filename: string, cap = FILE_CAP): Promise<stri
     finally { bytes.fill(0); }
   } finally { await file.close(); }
 }
-export async function atomicJson(filename: string, value: unknown) { await atomicText(filename, JSON.stringify(value)); }
-export async function atomicText(filename: string, text: string, mode = 0o600) {
+export async function atomicJson(filename: string, value: unknown) {
   const temporary = `${filename}.${randomUUID()}.tmp`;
   try {
-    const file = await open(temporary, "wx", mode);
-    try { await file.writeFile(text); await file.sync(); } finally { await file.close(); }
+    const file = await open(temporary, "wx", 0o600);
+    try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
     await rename(temporary, filename);
   } finally { await rm(temporary, { force: true }); }
 }
