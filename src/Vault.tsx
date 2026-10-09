@@ -120,7 +120,7 @@ export function PasswordsPanel({ state, language, opener, run, describe, onDismi
 
 export function VaultSuggestion({ suggestion, state, language, run, describe }: { suggestion: Suggestion; state: BrowserState; language: Language; run(command: BrowserCommand): Promise<boolean>; describe(reason: unknown): string }) {
   const t = (key: CopyKey) => text(key, language), ref = useRef<HTMLElement>(null), busy = useRef(false);
-  const [selected, setSelected] = useState<VaultLogin | null>(null), [pending, setPending] = useState(false);
+  const [selected, setSelected] = useState<VaultLogin | null>(null), [asking, setAsking] = useState(false), [pending, setPending] = useState(false);
   const dismiss = () => { void run({ type: 'vault-dismiss' }); };
   useEffect(() => {
     const outside = (event: PointerEvent) => { if (!ref.current?.contains(event.target as Node)) void run({ type: 'vault-dismiss' }); };
@@ -138,10 +138,16 @@ export function VaultSuggestion({ suggestion, state, language, run, describe }: 
     if (state.vault.unlocked || state.vault.windows && await action({ type: 'vault-hello' })) await fill(login);
     else setSelected(login);
   };
+  // Locked, the suggestion offers only the unlock. Once it succeeds the backend replaces the suggestion with the sign-ins of this site.
+  const unlock = async () => {
+    if (!(state.vault.windows && await action({ type: 'vault-hello' }))) setAsking(true);
+  };
   return <section className="vault-suggestion" ref={ref} role="dialog" aria-label="Vault" aria-busy={pending} style={{ left: `clamp(var(--toolbar-popup-edge), ${suggestion.x}px, calc(100vw - var(--width-vault-suggestion) - var(--toolbar-popup-edge)))`, top: `min(${suggestion.y}px, calc(100vh - var(--height-vault-suggestion)))` }}>
     <div className="vault-heading"><KeyRound aria-hidden="true" /><strong>Vault</strong><button className="icon-button" aria-label={t('close')} onClick={dismiss}><X aria-hidden="true" /></button></div>
+    {suggestion.locked && <button className="vault-account" type="button" disabled={pending} onClick={() => { void unlock(); }}><span className="browser-site-badge vault-badge" data-profile-color="blue" aria-hidden="true">{state.vault.windows ? <Fingerprint /> : <KeyRound />}</span><span className="browser-entry-copy"><span>{t('vaultUnlock')}</span></span></button>}
     {suggestion.logins.map(login => <button className="vault-account" type="button" key={login.id} disabled={pending} onClick={() => { void choose(login); }}><VaultBadge login={login} /><span className="browser-entry-copy"><span>{login.username || loginTitle(login)}</span><small>{new URL(login.origin).host}</small></span></button>)}
     <p className="vault-note vault-status"><Fingerprint aria-hidden="true" /><span>{t(state.vault.unlocked ? 'vaultFillHint' : state.vault.windows ? 'vaultHelloHint' : 'vaultMasterFillHint')}</span></p>
+    {asking && <VaultUnlock language={language} describe={describe} onClose={() => setAsking(false)} onUnlocked={async () => {}} />}
     {selected && <VaultUnlock language={language} describe={describe} onClose={() => setSelected(null)} onUnlocked={async () => { await fill(selected); }} />}
   </section>;
 }

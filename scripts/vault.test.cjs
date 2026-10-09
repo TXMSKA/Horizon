@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { readFileSync, mkdtempSync, rmSync, mkdirSync } = require('node:fs');
+const { readFileSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } = require('node:fs');
 const { resolve, join } = require('node:path');
 const { randomBytes, createCipheriv, createDecipheriv } = require('node:crypto');
 const { loginFields, inspectLogin, fillLogin } = require('../dist/electron/vault-page.js');
@@ -56,7 +56,7 @@ function row(site = origin, id = 'synthetic-id') {
     { id: 'website', value: site }, { id: 'username', value: 'synthetic-user' }, { id: 'password', value: secret },
   ], note: secret, totp: secret, recovery: [{ value: secret }], files: [] } };
 }
-function controller(t, privateWindow = false, policy = 'close') {
+function controller(t, privateWindow = false, policy = 'close', before = () => {}) {
   const fixture = page(), events = [], reads = [], copy = { text: '', writeText(value) { this.text = value; }, readText() { return this.text; }, clear() { this.text = ''; } };
   let unlocked = false, connected = 0, generation = 1, closed = 0, hwnd;
   const service = {
@@ -66,7 +66,7 @@ function controller(t, privateWindow = false, policy = 'close') {
     async listLogins() { return [{ id: 'synthetic-id', version: 1, title: 'Synthetic site', username: 'synthetic-user', website: origin }]; },
     hello: { async unlock(handle) { hwnd = handle; unlocked = true; } }, entries: { async save() {} },
   };
-  const folder = directory(t), protection = cipher();
+  const folder = directory(t), protection = cipher(); before(folder);
   const vault = createVault({ window: { webContents: { getZoomFactor: () => 1 }, getNativeWindowHandle: () => { const bytes = Buffer.alloc(8); bytes.writeBigUInt64LE(123n); return bytes; } }, directory: folder, privateWindow, cipher: protection, clipboard: copy,
     timeout: () => policy, saveTimeout(value) { policy = value; }, page: () => ({ contents: fixture.contents, generation, id: 'synthetic-tab', zoom: 1, bounds: { x: 0, y: 96, width: 900, height: 700 } }),
     covered: () => false, revealPage() {}, changed: () => events.push(vault.state()), connect: async () => { connected++; return service; },
@@ -115,7 +115,7 @@ test('Vault sends display metadata only, rejects mismatched service rows and wri
   await fixture.vault.run({ type: 'vault-unlock', password: 'Synthetic master password' }); await fixture.vault.scan();
   assert.equal(fixture.events.some(state => JSON.stringify(state).includes(secret)), false);
   const suggestion = fixture.vault.state().suggestion;
-  assert.ok(suggestion); assert.deepEqual(suggestion.logins.map(item => item.id), ['synthetic-id']);
+  assert.ok(suggestion); assert.equal(suggestion.locked, false); assert.deepEqual(suggestion.logins.map(item => item.id), ['synthetic-id']);
   assert.equal(await fixture.vault.run({ type: 'vault-copy', id: 'synthetic-id', origin }), undefined); assert.equal(fixture.copy.text === secret, true);
   assert.equal(fixture.events.some(state => JSON.stringify(state).includes(secret)), false);
   await fixture.vault.run({ type: 'vault-fill', suggestion: suggestion.id, id: 'synthetic-id' }); assert.equal(fixture.fixture.writes.length, 2);
@@ -134,13 +134,11 @@ test('Vault rejects a stale suggestion after navigation and an in-flight lock', 
   await assert.rejects(fixture.vault.run({ type: 'vault-fill', suggestion: next.id, id: 'synthetic-id' })); assert.deepEqual(fixture.fixture.writes, []);
 });
 
-test('Vault tokens and metadata are sealed, and OS encryption fails closed', async t => {
+test('Vault tokens are sealed, no display index is written, and OS encryption fails closed', async t => {
   const folder = directory(t), path = join(folder, 'token.sealed'), protection = cipher(), token = randomBytes(32).toString('base64url');
   const store = vaultTokenStore(path, protection); assert.equal(await store.get(), undefined); await store.set(token); assert.equal(await store.get() === token, true); assert.equal(readFileSync(path).includes(Buffer.from(token)), false);
   const fixture = controller(t); await fixture.vault.run({ type: 'vault-unlock', password: 'Synthetic master password' });
-  const indexPath = join(fixture.folder, 'vault-sites.sealed'), indexBytes = readFileSync(indexPath);
-  assert.equal(indexBytes.includes(Buffer.from(secret)), false); assert.equal(indexBytes.includes(Buffer.from('synthetic-user')), false); assert.equal(indexBytes.includes(Buffer.from(origin)), false);
-  assert.equal(JSON.stringify(readVaultFile(indexPath, fixture.protection)).includes(secret), false);
+  assert.equal(existsSync(join(fixture.folder, 'vault-sites.sealed')), false);
   for (const bad of [{ isEncryptionAvailable: () => false }, { ...protection, getSelectedStorageBackend: () => 'basic_text' }]) {
     const unavailable = vaultTokenStore(join(folder, 'unavailable'), bad); await assert.rejects(unavailable.set(token)); await assert.rejects(unavailable.get());
   }
@@ -169,14 +167,48 @@ test('Vault commands are bounded, settings persist, and audit fields redact secr
   for (const file of ['src/Vault.tsx', 'electron/preload.ts']) assert.equal(readFileSync(resolve(file), 'utf8').includes('vault-client'), false);
 });
 
-test('Vault learns locked suggestions without retaining values and asks Hello with this window handle', async t => {
-  const fixture = controller(t);
+test('Vault shows nothing of itself while locked, only the way to unlock, and asks Hello with this window handle', async t => {
+  const never = controller(t); await never.vault.scan();
+  assert.equal(never.vault.state().suggestion, null); assert.equal(never.connected(), 0);
+  const fixture = controller(t), saved = [{ id: 'other-id', version: 1, title: 'Other synthetic title', username: 'other-user', website: 'https://other.example' }];
+  const listed = fixture.service.listLogins; fixture.service.listLogins = async () => [...await listed(), ...saved];
   if (process.platform === 'win32') { await fixture.vault.run({ type: 'vault-hello' }); assert.equal(fixture.hwnd(), '123'); assert.equal(fixture.vault.state().unlockMethod, 'hello'); }
   else await fixture.vault.run({ type: 'vault-unlock', password: 'Synthetic master password' });
-  await fixture.vault.run({ type: 'vault-lock' }); const reads = fixture.reads.length;
-  await fixture.vault.scan(); assert.ok(fixture.vault.state().suggestion); assert.equal(fixture.reads.length, reads); assert.deepEqual(fixture.vault.state().logins, []);
+  await fixture.vault.scan();
+  const open = fixture.vault.state().suggestion;
+  assert.ok(open); assert.equal(open.locked, false); assert.deepEqual(open.logins.map(item => item.id), ['synthetic-id']); assert.equal(fixture.vault.state().logins.length, 2);
+  // Vault reporting itself locked clears every copy and leaves the suggestion as only the offer to unlock.
+  await fixture.service.lock(); await fixture.vault.run({ type: 'vault-refresh' });
+  const relocked = fixture.vault.state().suggestion;
+  assert.equal(relocked.id, open.id); assert.equal(relocked.locked, true); assert.deepEqual(relocked.logins, []); assert.deepEqual(fixture.vault.state().logins, []);
+  // After the unlock the same suggestion shows the sign-ins of its own origin without the field being focused again.
+  await fixture.vault.run({ type: 'vault-unlock', password: 'Synthetic master password' });
+  const revealed = fixture.vault.state().suggestion;
+  assert.equal(revealed.id, open.id); assert.equal(revealed.locked, false); assert.deepEqual(revealed.logins.map(item => item.id), ['synthetic-id']);
+  await fixture.vault.run({ type: 'vault-lock' });
+  assert.equal(fixture.vault.state().suggestion, null); const reads = fixture.reads.length, seen = fixture.events.length;
+  await fixture.vault.scan();
   const selected = fixture.vault.state().suggestion;
+  assert.ok(selected); assert.equal(selected.locked, true); assert.deepEqual(selected.logins, []); assert.equal(selected.origin, origin); assert.equal(fixture.reads.length, reads); assert.deepEqual(fixture.vault.state().logins, []);
+  // The page's own address is the only site in the state; no saved title, username or site is.
+  const bare = state => { const copy = structuredClone(state); if (copy.suggestion) delete copy.suggestion.origin; return copy; };
+  const serialized = JSON.stringify([bare(fixture.vault.state()), ...fixture.events.slice(seen).map(bare)]);
+  for (const hidden of ['Synthetic site', 'synthetic-user', 'synthetic.example', 'synthetic-id', 'Other synthetic title', 'other-user', 'other.example', 'other-id']) assert.equal(serialized.includes(hidden), false, hidden);
+  assert.equal(existsSync(join(fixture.folder, 'vault-sites.sealed')), false);
   await assert.rejects(fixture.vault.run({ type: 'vault-fill', suggestion: selected.id, id: 'synthetic-id' })); assert.deepEqual(fixture.fixture.writes, []);
+});
+
+test('Vault deletes the display index an older version kept and never fails to start over it', t => {
+  const old = Buffer.from('HORIZON-VAULT-1\nsynthetic');
+  const fixture = controller(t, false, 'close', folder => { writeFileSync(join(folder, 'vault-sites.sealed'), old); writeFileSync(join(folder, 'vault-sites.sealed.synthetic.tmp'), old); writeFileSync(join(folder, 'vault-token.sealed'), old); });
+  assert.equal(existsSync(join(fixture.folder, 'vault-sites.sealed')), false); assert.equal(existsSync(join(fixture.folder, 'vault-sites.sealed.synthetic.tmp')), false);
+  assert.equal(existsSync(join(fixture.folder, 'vault-token.sealed')), true);
+  const logged = [], info = console.info; console.info = line => { logged.push(String(line)); };
+  try {
+    // A file that cannot be removed only leaves a fixed line in the log.
+    controller(t, false, 'close', folder => { mkdirSync(join(folder, 'vault-sites.sealed', 'inner'), { recursive: true }); });
+  } finally { console.info = info; }
+  assert.equal(logged.length, 1); assert.deepEqual(Object.keys(JSON.parse(logged[0])).sort(), ['actor', 'event', 'outcome', 'time']); assert.equal(JSON.parse(logged[0]).event, 'cleanup');
 });
 
 test('Vault time limits lock before values are fetched and the close policy adds no timer lock', async t => {
@@ -208,7 +240,7 @@ test('Vault lock interrupts a pending fill and clipboard disposal awaits an OS w
   const copy = clipboard.copy(secret); await writing; const disposed = clipboard.clear(); finishWrite(); await copy; await disposed; assert.equal(value, '');
 });
 
-test('Vault lists every saved sign-in from one request as display metadata and keeps the sealed index bounded', async t => {
+test('Vault lists every saved sign-in from one request as display metadata and keeps the list bounded and in memory', async t => {
   const fixture = controller(t);
   const summary = (id, website, extra = {}) => ({ id, version: 1, title: 'Site ' + id, username: 'user-' + id, website, ...extra });
   fixture.service.listLogins = async () => [summary('one', 'https://one.example/login'), summary('two', 'https://two.example'), summary('one', 'https://dup.example'), summary('bad', 'javascript:alert(1)'), summary('none', ''), { id: 7, title: 1, username: 2, website: 3 }, summary('long', 'https://long.example', { title: 'x'.repeat(900), username: 'y'.repeat(900) })];
@@ -218,9 +250,7 @@ test('Vault lists every saved sign-in from one request as display metadata and k
   assert.deepEqual(logins.map(item => [item.id, item.origin]), [['one', 'https://one.example'], ['two', 'https://two.example'], ['long', 'https://long.example']]);
   assert.equal(logins[2].title.length, 500); assert.equal(logins[2].username.length, 512);
   assert.equal(fixture.events.some(state => JSON.stringify(state).includes(secret)), false);
-  const bytes = readFileSync(join(fixture.folder, 'vault-sites.sealed'));
-  assert.equal(bytes.includes(Buffer.from('user-one')), false); assert.equal(bytes.includes(Buffer.from('one.example')), false);
-  assert.deepEqual(readVaultFile(join(fixture.folder, 'vault-sites.sealed'), fixture.protection).map(item => item.id), ['one', 'two', 'long']);
+  assert.equal(existsSync(join(fixture.folder, 'vault-sites.sealed')), false);
   fixture.service.listLogins = async () => Array.from({ length: 5000 }, (_, index) => summary('bulk-' + index, 'https://bulk' + index + '.example'));
   await fixture.vault.run({ type: 'vault-refresh' });
   assert.equal(fixture.vault.state().logins.length, 4096);

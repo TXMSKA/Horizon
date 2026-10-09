@@ -3,7 +3,7 @@ import type { TranslateCommand, TranslateState, TranslationChoices } from './tra
 export type Language = 'en' | 'es';
 export type VaultTimeout = 'close' | '5' | '15' | '60';
 export interface VaultLogin { id: string; origin: string; title: string; username: string }
-export interface VaultSuggestion { id: string; origin: string; x: number; y: number; width: number; logins: VaultLogin[] }
+export interface VaultSuggestion { id: string; origin: string; x: number; y: number; width: number; locked: boolean; logins: VaultLogin[] }
 export interface VaultState { available: boolean; created: boolean; unlocked: boolean; importAllowed: boolean; unlockMethod: 'hello' | 'master' | null; timeout: VaultTimeout; logins: VaultLogin[]; suggestion: VaultSuggestion | null; error: 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAILABLE' | null; windows: boolean }
 export type VaultCommand =
   | { type: 'vault-refresh' | 'vault-lock' | 'vault-hello' | 'vault-dismiss' }

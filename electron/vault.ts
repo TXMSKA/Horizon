@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { BrowserWindow, WebContents } from 'electron';
 import type { Client, EntryRow, ImportCount } from 'vault-client' with { 'resolution-mode': 'import' };
 import type { ImportPasswordsResult, VaultCommand, VaultLogin, VaultState, VaultTimeout } from '../src/shared/api';
 import { assertVaultPage, fillLogin, inspectLogin, vaultOrigin } from './vault-page';
 import type { LoginFields } from './vault-page';
-import { readVaultFile, vaultClipboard, vaultTokenStore, writeVaultFile } from './vault-storage';
+import { vaultClipboard, vaultTokenStore } from './vault-storage';
 import type { StoreCipher } from './store';
 import { vaultAudit } from './vault-log';
 import type { PasswordsFormat } from './import-passwords';
@@ -51,45 +52,49 @@ export function loginSummaries(rows: unknown): VaultLogin[] {
     return [{ id, origin, title: title.slice(0, 500), username: username.slice(0, 512) }];
   });
 }
-const isMetadata = (item: unknown): item is VaultLogin => {
-  if (!item || typeof item !== 'object') return false;
-  const fields = item as Record<string, unknown>;
-  return Object.keys(fields).sort().join() === 'id,origin,title,username' && typeof fields.id === 'string' && fields.id.length <= 128
-    && typeof fields.origin === 'string' && vaultOrigin(fields.origin) === fields.origin && typeof fields.title === 'string' && fields.title.length <= 500
-    && typeof fields.username === 'string' && fields.username.length <= 512;
-};
+// The display list stays bounded even when a service entry contains a long field.
+function bounded(items: VaultLogin[]): VaultLogin[] {
+  const next = items.slice(-4096);
+  while (next.length && Buffer.byteLength(JSON.stringify(next)) > 1024 * 1024) next.shift();
+  return next;
+}
+// Older versions kept an encrypted index of sign-in titles, usernames and sites in the profile directory. No Vault display data lives outside Vault, so it is deleted.
+const legacyIndex = 'vault-sites.sealed';
+function removeLegacyIndex(directory: string): void {
+  let failed = false;
+  try {
+    for (const name of readdirSync(directory)) {
+      if (name !== legacyIndex && !(name.startsWith(`${legacyIndex}.`) && name.endsWith('.tmp'))) continue;
+      try { rmSync(resolve(directory, name), { force: true }); } catch { failed = true; }
+    }
+  } catch (error) { failed = !(error instanceof Error && 'code' in error && error.code === 'ENOENT'); }
+  // Only the fixed event reaches the log, never a path or a name.
+  if (failed) vaultAudit('cleanup', 'denied');
+}
 function errorCode(error: unknown): 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAILABLE' {
   return error instanceof Error && error.message === 'VAULT_STORAGE_UNAVAILABLE' ? 'VAULT_STORAGE_UNAVAILABLE' : 'VAULT_UNAVAILABLE';
 }
 export function createVault(options: Options) {
   const state: VaultState = { available: false, created: false, unlocked: false, importAllowed: false, unlockMethod: null, timeout: options.timeout(), logins: [], suggestion: null, error: null, windows: process.platform === 'win32' };
-  const metadataPath = resolve(options.directory, 'vault-sites.sealed');
-  let metadata: VaultLogin[] = [], loaded = false, client: Client | undefined, connection: Promise<Client> | undefined;
+  removeLegacyIndex(options.directory);
+  // The sign-ins found for the field in view exist only here, only while Vault is unlocked.
+  let found: VaultLogin[] = [], client: Client | undefined, connection: Promise<Client> | undefined;
   let closed = false, working = false, scanning = false, epoch = 0, unlockedAt = 0, suppressed = '';
   let closeTask: Promise<void> | undefined;
   let target: { page: VaultPage; fields: LoginFields; id: string } | null = null, lastLookup = '';
   const copied = vaultClipboard(options.clipboard);
   const publish = () => { if (!closed) { state.timeout = options.timeout(); options.changed(); } };
   const dismiss = () => { target = null; state.suggestion = null; };
-  const loadMetadata = () => {
-    if (loaded) return;
-    const saved = readVaultFile(metadataPath, options.cipher);
-    if (saved !== undefined && (!Array.isArray(saved) || saved.length > 4096 || !saved.every(isMetadata))) throw new Error('VAULT_STORAGE_UNAVAILABLE');
-    metadata = saved as VaultLogin[] ?? []; loaded = true;
+  // While Vault is locked nothing of it stays in memory: the panel list and the field's sign-ins go, and an open suggestion becomes only the offer to unlock.
+  const forget = () => {
+    state.logins = []; found = []; lastLookup = '';
+    if (state.suggestion) state.suggestion = { ...state.suggestion, locked: true, logins: [] };
   };
-  const keep = (items: VaultLogin[]) => {
-    const next = items.slice(-4096);
-    // Display indexes stay bounded even when a service entry contains a long field.
-    while (next.length && Buffer.byteLength(JSON.stringify(next)) > 1024 * 1024) next.shift();
-    writeVaultFile(metadataPath, next, options.cipher); metadata = next;
-  };
-  const remember = (rows: EntryRow[], origin: string) => keep([...metadata.filter(item => item.origin !== origin), ...loginMetadata(rows, origin)]);
   const getClient = async () => {
     if (closed || options.privateWindow) throw new Error('VAULT_UNAVAILABLE');
     if (client) return client;
     if (!connection) {
       connection = (async () => {
-        loadMetadata();
         if (options.connect) return options.connect();
         let shared = connections.get(options.directory);
         if (!shared) {
@@ -109,15 +114,29 @@ export function createVault(options: Options) {
     if (closed) throw new Error('VAULT_UNAVAILABLE');
     state.available = true; state.created = status.created; state.error = null;
     if (state.unlocked !== status.unlocked) {
-      epoch++;
+      epoch++; lastLookup = '';
       if (status.unlocked) unlockedAt = Date.now();
-      else { unlockedAt = 0; state.unlockMethod = null; state.logins = []; }
+      else { unlockedAt = 0; state.unlockMethod = null; forget(); }
     }
     state.unlocked = status.unlocked;
     const limit = options.timeout();
     if (state.unlocked && limit !== 'close' && Date.now() - unlockedAt >= Number(limit) * 60000) {
-      await service.lock(); epoch++; state.unlocked = false; state.unlockMethod = null; state.logins = []; dismiss();
+      await service.lock(); epoch++; state.unlocked = false; state.unlockMethod = null; forget(); dismiss();
     }
+  };
+  // Once Vault is unlocked, a suggestion that only offered the unlock shows the sign-ins of its own origin, without waiting for the field to be focused again.
+  const reveal = async () => {
+    const current = target, shown = state.suggestion;
+    if (!current || !shown?.locked || !client || !state.unlocked) return;
+    const ticket = epoch;
+    try {
+      const rows = await client.logins(current.fields.origin), page = options.page();
+      if (closed || ticket !== epoch || target !== current || state.suggestion !== shown || !page || page.contents !== current.page.contents || page.generation !== current.page.generation || page.id !== current.page.id || vaultOrigin(page.contents.getURL()) !== current.fields.origin) return;
+      found = loginMetadata(rows, current.fields.origin);
+      if (found.length) state.suggestion = { ...shown, locked: false, logins: structuredClone(found) };
+      else dismiss();
+    } catch { dismiss(); }
+    publish();
   };
   const refresh = async () => {
     const service = await getClient(); await updateStatus(service);
@@ -126,9 +145,9 @@ export function createVault(options: Options) {
       // Every saved sign-in comes as display metadata only; a value is asked for one exact origin when it is copied or filled.
       const ticket = epoch, summaries = loginSummaries(await service.listLogins());
       if (closed || ticket !== epoch) throw new Error('VAULT_PAGE_CHANGED');
-      keep(summaries);
-      state.logins = structuredClone(metadata);
+      state.logins = bounded(summaries);
     }
+    await reveal();
     publish();
   };
   const scan = async () => {
@@ -143,7 +162,6 @@ export function createVault(options: Options) {
     if (!origin) return;
     scanning = true;
     try {
-      loadMetadata();
       const fields = await inspectLogin(page.contents, origin, false);
       const now = options.page();
       if (!now || page.contents !== now.contents || page.generation !== now.generation || page.id !== now.id || options.covered()) return;
@@ -157,18 +175,20 @@ export function createVault(options: Options) {
           const ticket = epoch, rows = await client.logins(origin);
           const current = options.page();
           if (closed || ticket !== epoch || !current || current.id !== page.id || current.generation !== page.generation || current.contents !== page.contents || options.covered()) return;
-          remember(rows, origin); state.logins = structuredClone(metadata);
+          found = loginMetadata(rows, origin);
         }
       }
-      const logins = metadata.filter(item => item.origin === origin);
-      if (!logins.length) return;
+      const logins = state.unlocked ? found.filter(item => item.origin === origin) : [];
+      // A locked Vault shows nothing of itself, only the way to unlock it, and only once Horizon has reached a created Vault.
+      const locked = !state.unlocked && Boolean(client) && state.available && state.created && !state.error;
+      if (!locked && !logins.length) { if (target) { dismiss(); publish(); } return; }
       // DOM snapshot bounds are device pixels; the view's bounds and the chrome's layout are not.
       const pixels = page.pixels ?? 1, chromeZoom = options.window.webContents.getZoomFactor();
       const left = fields.x / pixels, bottom = (fields.y + fields.height) / pixels;
       const x = (page.bounds.x + left) / chromeZoom, y = (page.bounds.y + bottom) / chromeZoom;
       if (left < 0 || fields.y < 0 || left >= page.bounds.width || bottom >= page.bounds.height) return;
       const id = randomUUID(); target = { page, fields, id };
-      state.suggestion = { id, origin, x, y, width: fields.width / pixels / chromeZoom, logins: structuredClone(logins) };
+      state.suggestion = { id, origin, x, y, width: fields.width / pixels / chromeZoom, locked, logins: locked ? [] : structuredClone(logins) };
       publish();
     } catch { if (target) { dismiss(); publish(); } } // Unreadable pages never get a suggestion.
     finally { scanning = false; }
@@ -181,7 +201,7 @@ export function createVault(options: Options) {
     }
     if (command.type === 'vault-lock') {
       // Lock can interrupt a value request. It must not queue behind a pending fill.
-      epoch++; dismiss(); state.logins = []; state.unlocked = false; state.unlockMethod = null; publish();
+      epoch++; dismiss(); forget(); state.unlocked = false; state.unlockMethod = null; publish();
       try {
         const service = await getClient();
         try { await copied.clear(); } finally { await service.lock(); }
@@ -209,7 +229,7 @@ export function createVault(options: Options) {
           else await (command.type === 'vault-import-permission' ? service.permissions.importWithPassword(command.password) : service.permissions.importWithHello(windowHandle()));
         } catch (error) { const mapped = permissionCode(error, hello); throw mapped ? new Error(mapped) : error; }
         if (closed || ticket !== epoch) throw new Error('VAULT_PAGE_CHANGED');
-        epoch++; state.unlocked = true; unlockedAt = Date.now(); state.unlockMethod = hello ? 'hello' : 'master';
+        epoch++; lastLookup = ''; state.unlocked = true; unlockedAt = Date.now(); state.unlockMethod = hello ? 'hello' : 'master';
         await refresh();
       } else if (command.type === 'vault-refresh') await refresh();
       else {
@@ -245,7 +265,7 @@ export function createVault(options: Options) {
             { id: 'website', name: 'Website', value: command.website, secret: false }, { id: 'username', name: 'Username', value: command.username, secret: false },
             { id: 'password', name: 'Password', value: command.password, secret: true },
           ], note: '', totp: '', recovery: [], files: [], updatedAt: new Date().toISOString() }, 0);
-          check(); remember(await service.logins(origin), origin); await refresh();
+          check(); await refresh();
         }
       }
       if (event) vaultAudit(event, 'allowed');
@@ -258,7 +278,7 @@ export function createVault(options: Options) {
         throw error;
       }
       state.error = errorCode(error);
-      epoch++; state.unlocked = false; state.unlockMethod = null; state.logins = [];
+      epoch++; state.unlocked = false; state.unlockMethod = null; forget();
       if (event) vaultAudit(event, 'denied');
       if (command.type === 'vault-fill') dismiss();
       if (command.type === 'vault-unlock') command.password = '';
@@ -279,7 +299,7 @@ export function createVault(options: Options) {
     try {
       let service: Client;
       try { service = await getClient(); await updateStatus(service); }
-      catch (error) { state.error = errorCode(error); epoch++; state.unlocked = false; state.unlockMethod = null; state.logins = []; publish(); throw new Error(state.error); }
+      catch (error) { state.error = errorCode(error); epoch++; state.unlocked = false; state.unlockMethod = null; forget(); publish(); throw new Error(state.error); }
       if (!state.unlocked) throw new Error('VAULT_LOCKED');
       if (!await askImportPermission(service)) { state.importAllowed = false; throw new Error('VAULT_IMPORT_PERMISSION'); }
       let source: string | undefined = read();
@@ -303,7 +323,7 @@ export function createVault(options: Options) {
   const scanner = options.privateWindow ? undefined : setInterval(() => { void scan(); }, 750);
   scanner?.unref();
   const statusTimer = options.privateWindow ? undefined : setInterval(() => {
-    if (client && !working && !closed) void updateStatus(client).then(publish).catch(() => { state.unlocked = false; state.logins = []; state.error = 'VAULT_UNAVAILABLE'; epoch++; publish(); });
+    if (client && !working && !closed) void updateStatus(client).then(reveal).then(publish).catch(() => { state.unlocked = false; forget(); state.error = 'VAULT_UNAVAILABLE'; epoch++; publish(); });
   }, 20000);
   statusTimer?.unref();
   return {
@@ -312,7 +332,7 @@ export function createVault(options: Options) {
     close(): Promise<void> {
       if (closeTask) return closeTask;
       closeTask = (async () => {
-        closed = true; epoch++; clearInterval(scanner); clearInterval(statusTimer); dismiss(); state.logins = []; metadata = [];
+        closed = true; epoch++; clearInterval(scanner); clearInterval(statusTimer); dismiss(); forget();
         try { await copied.clear(); } catch { /* Presence must still leave if the clipboard is unavailable. */ }
         if (!connection) return;
         try {
