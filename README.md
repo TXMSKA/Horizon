@@ -90,6 +90,21 @@ binary stays unmodified. Windows Smart App Control blocks it because it is
 unsigned, so development on Windows needs Smart App Control off until signed
 builds are available.
 
+## Code signing policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation, is
+applied for. Until it is granted, the builds are unsigned and the release notes say so.
+
+- Authors, reviewers and approvers: [TXMSKA](https://github.com/orgs/TXMSKA/people).
+- Every release is approved by hand before it is signed and published.
+- Only releases built by the release workflow from a tag on the default branch, on a
+  GitHub-hosted runner, are submitted for signing.
+
+## Privacy
+
+Horizon collects no data about the people who use it and sends nothing about them
+to TXMSKA. What it connects to, and why, is in the [privacy policy](PRIVACY.md).
+
 ## Installers
 
 `npm run dist:win` builds the Windows installer and `npm run dist:linux` the
