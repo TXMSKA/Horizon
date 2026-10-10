@@ -10,6 +10,7 @@ import { integer, recordId, requireSync, shape, uuid } from './sync-format';
 import type { SyncOperation, SyncRecord } from './sync-format';
 import { isWebURL } from './browsing';
 
+// Automatic update checks stay local: another computer must not re-enable network checks here through sync.
 export const SYNC_SETTING_KEYS = ['theme', 'contrast', 'darkPages', 'darkStrength', 'darkTone', 'searchEngine', 'language', 'onStart', 'askWhereToSave', 'blockAds', 'blockThirdPartyCookies', 'quickAccess', 'showCapture', 'marketplace'] as const;
 export type SyncSettings = Pick<Settings, typeof SYNC_SETTING_KEYS[number]>;
 export interface SyncProfileSnapshot { id: string; name: string; color: ProfileColor; createdAt: number; store: BrowserStore; desktop: DesktopStore; windows: SyncRemoteWindow[] }

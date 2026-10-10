@@ -13,9 +13,10 @@ interface SettingsV4 extends Omit<SettingsV3, 'version'> { version: 4; quickAcce
 interface SettingsV5 extends Omit<SettingsV4, 'version'> { version: 5; showCapture: boolean }
 interface SettingsV6 extends Omit<SettingsV5, 'version'> { version: 6; onStart: OnStart }
 interface MarketplaceSettings { installed: MarketplaceTheme[]; builtIn: BuiltInTheme; contrast: Contrast }
-// Older version 7 files have no catalog state or Vault timeout; each is added when first set.
-export interface Settings extends Omit<SettingsV6, 'version'> { version: 7; onboarded: boolean; marketplace?: MarketplaceSettings; vaultTimeout?: VaultTimeout }
+// Older version 7 files omit these newer choices; missing automatic update checks default to on.
+export interface Settings extends Omit<SettingsV6, 'version'> { version: 7; onboarded: boolean; marketplace?: MarketplaceSettings; vaultTimeout?: VaultTimeout; checkUpdatesAutomatically?: boolean }
 export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
+  readonly checkUpdatesAutomatically: boolean;
   readonly installedThemes: MarketplaceTheme[];
   installTheme(id: MarketplaceTheme): void; removeTheme(id: MarketplaceTheme): void;
   readonly migrationAllowed: boolean;
@@ -26,6 +27,7 @@ export interface ThemeSettings extends Readonly<Omit<Settings, 'version'>> {
   setAppPinned(id: HubApp, pinned: boolean): void;
   setShowCapture(value: boolean): void;
   setOnStart(value: OnStart): void;
+  setCheckUpdatesAutomatically(value: boolean): void;
   setVaultTimeout(value: VaultTimeout): void;
   finishFirstRun(): void;
   syncSnapshot(): SyncSettings;
@@ -90,7 +92,8 @@ function v6Settings(value: unknown): value is SettingsV6 {
 }
 function settingsShape(value: unknown): value is Settings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const fields = value as Record<string, unknown>, previous = { ...fields }; delete previous.onboarded; delete previous.marketplace; delete previous.vaultTimeout;
+  const fields = value as Record<string, unknown>, previous = { ...fields }; delete previous.onboarded; delete previous.marketplace; delete previous.vaultTimeout; delete previous.checkUpdatesAutomatically;
+  if (Object.hasOwn(fields, 'checkUpdatesAutomatically') && typeof fields.checkUpdatesAutomatically !== 'boolean') return false;
   if (Object.hasOwn(fields, 'vaultTimeout') && !isVaultTimeout(fields.vaultTimeout)) return false;
   if (Object.hasOwn(fields, 'marketplace')) {
     const catalog = fields.marketplace;
@@ -145,7 +148,7 @@ export function createSettings(path: string, changed: (theme: Theme) => void, hi
     writeSettings(path, normalized); settings = normalized; if (unavailable) readStatus.downloadsFolderUnavailable = true;
     migrationAllowed = false; changed(settings.theme);
   };
-  const boolean = (key: 'askWhereToSave' | 'blockAds' | 'blockThirdPartyCookies', value: boolean, error: string) => {
+  const boolean = (key: 'askWhereToSave' | 'blockAds' | 'blockThirdPartyCookies' | 'checkUpdatesAutomatically', value: boolean, error: string) => {
     if (typeof value !== 'boolean') throw new Error(error); save({ ...settings, [key]: value });
   };
   return {
@@ -172,6 +175,8 @@ export function createSettings(path: string, changed: (theme: Theme) => void, hi
     get quickAccess() { return [...settings.quickAccess]; },
     get showCapture() { return settings.showCapture; },
     get onStart() { return settings.onStart; },
+    get checkUpdatesAutomatically() { return settings.checkUpdatesAutomatically ?? true; },
+    setCheckUpdatesAutomatically(value) { boolean('checkUpdatesAutomatically', value, 'SETTINGS_COMMAND_INVALID'); },
     get onboarded() { return settings.onboarded; },
     get vaultTimeout() { return settings.vaultTimeout ?? 'close'; },
     setVaultTimeout(value) { if (!isVaultTimeout(value)) throw new Error('VAULT_COMMAND_INVALID'); save({ ...settings, vaultTimeout: value }); },

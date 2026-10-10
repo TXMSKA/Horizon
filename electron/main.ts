@@ -84,9 +84,11 @@ if (instance) {
     const updates = createUpdates({
       platform: process.platform, packaged: app.isPackaged, appImage: Boolean(process.env.APPIMAGE), packageType: process.platform === 'linux' && app.isPackaged ? packageType() : null,
       feed: app.isPackaged ? localFeedURL(process.env.HORIZON_UPDATE_URL) : undefined,
+      automaticEnabled: settings.checkUpdatesAutomatically,
       // The updater is loaded only when a check runs, so development builds never touch it.
       load: async () => (createRequire(__filename)('electron-updater') as typeof import('electron-updater')).autoUpdater,
     });
+    app.once('before-quit', () => updates.stop());
     const tokens = readFileSync(resolve(__dirname, '../tokens.css'), 'utf8');
     if (darkPagesActive(settings.darkPages, nativeTheme.shouldUseDarkColors)) setDarkPagesSwitch(app.commandLine, true);
     const background = () => {

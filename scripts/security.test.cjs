@@ -3,6 +3,9 @@ require('./vault.test.cjs');
 require('./horizon-lyra.test.cjs');
 require('./services-install.test.cjs');
 require('./favorite-favicons-ui.test.cjs');
+require('./updates-policy.test.cjs');
+require('./blocking-policy.test.cjs');
+require('./signpath-policy.test.cjs');
 const assert = require('node:assert/strict');
 const { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, mkdirSync, symlinkSync, rmSync } = require('node:fs');
 const { resolve, join, dirname } = require('node:path');
@@ -2162,7 +2165,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const loaded = { exports: {} };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'module', '__filename', '__dirname', 'setTimeout', 'clearTimeout'])(loaded.exports,
     name => name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name), createBlockingEngine() { return {
-      get ready() { return mockBlockingReady; }, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '',
+      get ready() { return mockBlockingReady; }, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '',
       match(url) { blockingCalls.push(url); return url.includes('/blocked-ad') ? { kind: 'ads' } : url.includes('/blocked-tracker') ? { kind: 'trackers' } : undefined; },
     }; } } : name === './store' ? { ...localRequire(name), writeStore(path, store, cipher) {
       if (writeFailure) throw new Error('Disk unavailable');
@@ -3182,7 +3185,7 @@ test('dark page flips replace views in every profile without closing tabs and si
   };
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', '__dirname'])(exported, name => name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './blocking' ? { ...localRequire(name),
-    createBlockingEngine: () => ({ ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '', match: () => undefined }),
+    createBlockingEngine: () => ({ ready: true, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => mockCosmetics ? '.advert {display:none!important;}' : '', match: () => undefined }),
   } : localRequire(name), require('node:path').dirname(filename));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen(value) { this.fullscreen = value; }, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} },
@@ -4591,7 +4594,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
-    name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './favicon-cache' ? timedModule('favicon-cache', timers) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './lyra' && options.lyraConnect ? { ...localRequire(name), createLyra: host => localRequire(name).createLyra({ ...host, connect: options.lyraConnect }) } : name === './vault' && options.vaultConnect ? { ...localRequire(name), createVault: host => localRequire(name).createVault({ ...host, connect: options.vaultConnect }) } : name === './sync-browser' && options.syncHostCapture ? { ...localRequire(name), browserSyncHost(...args) { const host = localRequire(name).browserSyncHost(...args); options.syncHostCapture(host); return host; } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
+    name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './favicon-cache' ? timedModule('favicon-cache', timers) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './lyra' && options.lyraConnect ? { ...localRequire(name), createLyra: host => localRequire(name).createLyra({ ...host, connect: options.lyraConnect }) } : name === './vault' && options.vaultConnect ? { ...localRequire(name), createVault: host => localRequire(name).createVault({ ...host, connect: options.vaultConnect }) } : name === './sync-browser' && options.syncHostCapture ? { ...localRequire(name), browserSyncHost(...args) { const host = localRequire(name).browserSyncHost(...args); options.syncHostCapture(host); return host; } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: (...args) => options.blockingFactory?.(...args) ?? options.blocker ?? ({ ready: false, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
   electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialog: async (...args) => { options.captureSaveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.captureSaveChoice ?? { canceled: true }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
@@ -4631,6 +4634,33 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   window.close = close;
   return { directory, handlers, views, timers, sessions, window, app, close, event, state, command, notebook, image, area, navigate, settings, browser, addWindow, children, restoredWindows: exported.restoredWindows, isProfileSession: exported.isProfileSession, openLaunch: browser.openLaunch, isLaunchNavigation: exported.isLaunchNavigation };
 }
+
+test('global blocking off prevents list downloads in Personal, Work and private windows, and enabling updates every owner', async t => {
+  let requests = 0;
+  const starts = [], engines = [], choices = [];
+  const first = notebookBrowser(t, plainCipher, {
+    prepare: folder => createSettings(join(folder, 'settings.json'), () => {}).setBlockAds(false),
+    blockingFactory(folder, ready, options) {
+      choices.push(options.enabled);
+      // Separate cache files keep this privacy regression independent of concurrent Windows renames.
+      const engine = createBlockingEngine(join(folder, `blocking-fixture-${engines.length}`), ready, { ...options, download: async url => { requests++; return filterSource(url); } });
+      engines.push(engine);
+      return { ...engine, get ready() { return engine.ready; }, start() { const started = engine.start(); starts.push(started); return started; } };
+    },
+  });
+  const work = first.state().profiles.find(profile => profile.id !== first.state().activeProfileId).id;
+  first.addWindow({ profileId: work, fresh: true });
+  first.addWindow({ privateWindow: true, fresh: true });
+  await Promise.all(starts);
+  assert.deepEqual(choices, [false, false, false]); assert.equal(requests, 0);
+  first.command({ type: 'set-block-ads', value: true }); first.browser.settingsChanged();
+  assert.ok(requests > 0);
+  assert.deepEqual(await Promise.all(engines.map(engine => engine.refresh())), [true, true, true]);
+  const enabledRequests = requests;
+  first.command({ type: 'set-block-ads', value: false }); first.browser.settingsChanged();
+  assert.deepEqual(await Promise.all(engines.map(engine => engine.refresh())), [false, false, false]);
+  assert.equal(requests, enabledRequests);
+});
 
 test('favorite IPC keeps the current profile tree ordered, opens nested links, stars and restores deletes', t => {
   const browser = notebookBrowser(t), { command, state } = browser;
@@ -5446,33 +5476,36 @@ test('browser panel routes are removed, panels use the menu anchor and all menu 
 test('About uses the app version, a labelled modal and Close focus with Escape restoration', () => {
   const hooks = notebookTestHooks(), { AboutHorizon } = interfaceModule('src/AboutHorizon.tsx', { react: hooks.react, './copy': interfaceModule('src/copy.ts'), './HorizonMark': { HorizonMark: 'mark' } });
   const focus = [], modal = [], opener = { current: { focus: () => focus.push('menu') } }; let dismissed = 0;
-  const tree = hooks.render(() => AboutHorizon({ language: 'en', version: '2.3.4', update: { status: 'idle' }, opener, onClose: () => dismissed++, onRestart() {} }));
+  const tree = hooks.render(() => AboutHorizon({ language: 'en', version: '2.3.4', update: { status: 'idle' }, opener, onClose: () => dismissed++, onRestart() {}, onCheck() {} }));
   assert.equal(tree.type, 'dialog'); assert.equal(tree.props['aria-labelledby'], notebookNodes(tree, node => node.type === 'h2')[0].props.id);
   assert.equal(notebookNodes(tree, node => node.type === 'p')[0].props.children, 'Version 2.3.4');
   tree.props.ref.current = { showModal: () => modal.push('open'), close: () => modal.push('close') };
-  const button = notebookNodes(tree, node => node.type === 'button')[0]; button.props.ref.current = { focus: () => focus.push('close') }; hooks.flush();
+  const button = notebookNodes(tree, node => node.type === 'button' && node.props.children === 'Close')[0]; button.props.ref.current = { focus: () => focus.push('close') }; hooks.flush();
   assert.deepEqual(modal, ['open']); assert.deepEqual(focus, ['close']); button.props.onClick(); assert.equal(dismissed, 1);
   tree.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); assert.equal(dismissed, 2);
   hooks.dispose(); assert.deepEqual(modal, ['open', 'close']); assert.deepEqual(focus, ['close', 'menu']);
 });
 
-test('About shows one polite update line that stays empty while idle and restarts only from the ready line', () => {
+test('About shows one polite update line, keeps a manual check beside it and restarts only from the ready line', () => {
   const { copy } = interfaceModule('src/copy.ts');
-  for (const key of ['updateUpToDate', 'updateChecking', 'updateDownloading', 'updateReady', 'updateRestart', 'updateUnavailable', 'updateError']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim());
+  for (const key of ['updateUpToDate', 'updateChecking', 'updateDownloading', 'updateReady', 'updateRestart', 'updateUnavailable', 'updateError', 'updateIdle', 'updateCheckNow']) for (const language of ['en', 'es']) assert.ok(copy[key][language].trim());
   assert.ok(copy.updateDownloading.en.includes('{percent}') && copy.updateDownloading.es.includes('{percent}'));
-  const render = (language, update, onRestart = () => {}) => {
+  const render = (language, update, onRestart = () => {}, onCheck = () => {}) => {
     const hooks = notebookTestHooks(), { AboutHorizon } = interfaceModule('src/AboutHorizon.tsx', { react: hooks.react, './copy': interfaceModule('src/copy.ts'), './HorizonMark': { HorizonMark: 'mark' } });
-    return hooks.render(() => AboutHorizon({ language, version: '1.0.0', update, opener: { current: null }, onClose() {}, onRestart }));
+    return hooks.render(() => AboutHorizon({ language, version: '1.0.0', update, opener: { current: null }, onClose() {}, onRestart, onCheck }));
   };
-  const line = tree => { const nodes = notebookNodes(tree, node => node.props.className === 'settings-feedback'); assert.equal(nodes.length, 1); assert.equal(nodes[0].props.role, 'status'); assert.equal(nodes[0].props['aria-live'], 'polite'); return nodes[0]; };
-  assert.equal(line(render('en', { status: 'idle' })).props.children, null);
+  const line = tree => { const rows = notebookNodes(tree, node => node.props.className === 'settings-feedback'); assert.equal(rows.length, 1); const nodes = notebookNodes(rows[0], node => node.props.role === 'status'); assert.equal(nodes.length, 1); assert.equal(nodes[0].props['aria-live'], 'polite'); return nodes[0]; };
+  let checks = 0; const idle = render('en', { status: 'idle' }, () => {}, () => checks++), check = notebookNodes(idle, node => node.type === 'button' && node.props.children === 'Check now')[0];
+  assert.equal(line(idle).props.children, copy.updateIdle.en); assert.equal(check.props.disabled, false); check.props.onClick(); assert.equal(checks, 1);
   for (const [update, expected] of [[{ status: 'upToDate' }, 'Horizon is up to date'], [{ status: 'checking' }, 'Checking for updates'], [{ status: 'downloading', percent: 42 }, 'Downloading update (42%)'], [{ status: 'unavailable' }, 'Updates are not available in this build'], [{ status: 'error' }, 'Could not check for updates']]) {
-    const tree = render('en', update); assert.equal(line(tree).props.children, expected); assert.equal(notebookNodes(tree, node => node.type === 'button').length, 1);
+    const tree = render('en', update); assert.equal(line(tree).props.children, expected); assert.equal(notebookNodes(tree, node => node.type === 'button').length, 2);
+    assert.equal(notebookNodes(tree, node => node.type === 'button' && node.props.children === 'Check now')[0].props.disabled, !['idle', 'upToDate', 'error'].includes(update.status));
   }
   assert.equal(line(render('es', { status: 'downloading', percent: 7 })).props.children, 'Descargando la actualización (7%)');
   let restarts = 0; const ready = render('es', { status: 'ready' }, () => restarts++), buttons = notebookNodes(ready, node => node.type === 'button');
-  assert.equal(buttons.length, 2); assert.equal(buttons[0].props.children, 'Reiniciar'); assert.equal(notebookNodes(ready, node => node.type === 'span')[0].props.children, 'Reiniciar Horizon para terminar de actualizar');
-  buttons[0].props.onClick(); assert.equal(restarts, 1);
+  assert.equal(buttons.length, 3); assert.equal(line(ready).props.children, 'Reiniciar Horizon para terminar de actualizar');
+  const restart = buttons.find(button => button.props.children === 'Reiniciar'), checkReady = buttons.find(button => button.props.children === 'Buscar ahora');
+  assert.ok(restart); assert.equal(checkReady.props.disabled, true); restart.props.onClick(); assert.equal(restarts, 1);
 });
 
 test('restart-to-update is a bare settings command', () => {
@@ -5975,7 +6008,7 @@ test('clear failures report each selected kind and profile reset rolls back a fa
 
 test('global ads off avoids network matches and cosmetics, keeps exceptions and counts refused cookies independently', t => {
   let matches = 0, cosmetics = 0;
-  const blocker = { ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => { cosmetics++; return ''; }, match: () => { matches++; return { kind: 'ads' }; } };
+  const blocker = { ready: true, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => { cosmetics++; return ''; }, match: () => { matches++; return { kind: 'ads' }; } };
   const browser = notebookBrowser(t, plainCipher, { blocker }), { state, command } = browser; browser.navigate();
   command({ type: 'set-blocking', enabled: false }); const exception = structuredClone(state().store.siteSettings.blocking);
   command({ type: 'set-block-ads', value: false }); browser.navigate('https://other.example/');
@@ -6106,7 +6139,7 @@ test('temporary browser stores close every owner before their directories are re
 });
 
 test('peer profile deletion and unrelated settings preserve local tabs and blocked counts', async t => {
-  const blocker = { ready: true, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => ({ kind: 'trackers' }) };
+  const blocker = { ready: true, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => '', match: () => ({ kind: 'trackers' }) };
   const first = notebookBrowser(t, authenticatedCipher(), { blocker }), second = first.addWindow({ fresh: true });
   const profile = first.state().activeProfileId, unused = first.state().profiles.find(entry => entry.id !== profile).id;
   second.command({ type: 'create-profile', name: 'Third', color: 'blue' });
@@ -6374,7 +6407,7 @@ test('private views keep execution disabled across replacements and popups; PDFs
 });
 
 test('private requests fail closed until filter initialization and unknown workers keep strict cookies', t => {
-  const blocker = { ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }, normal = notebookBrowser(t, plainCipher, { blocker }), privatePeer = normal.addWindow({ privateWindow: true });
+  const blocker = { ready: false, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }, normal = notebookBrowser(t, plainCipher, { blocker }), privatePeer = normal.addWindow({ privateWindow: true });
   privatePeer.navigate(); const contents = normal.views.at(-1).webContents, target = contents.session;
   target.onBeforeRequest({ id: 1, url: 'https://example.com/script', resourceType: 'script', webContentsId: contents.id }, result => assert.equal(result.cancel, true));
   blocker.ready = true;
