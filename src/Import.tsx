@@ -157,7 +157,7 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
     if (event.key !== 'Escape' || unlock || permission) return;
     event.preventDefault(); event.stopPropagation();
     if (removal === 'confirm') setRemoval('idle'); else dismiss();
-  }}><div className="settings-dialog-heading"><h2 id={`${id}-title`}>{t(firstRun ? 'importFirstTitle' : 'importFrom')}</h2><p id={`${id}-note`} className="setting-hint">{firstRun ? t('importFirstHint') : t('importNote').replace('{name}', profileName)}</p></div>
+  }}><div className="settings-dialog-heading"><h2 id={`${id}-title`}>{t(done ? 'importFinishedTitle' : firstRun ? 'importFirstTitle' : 'importFrom')}</h2><p id={`${id}-note`} className="setting-hint">{done ? t('importFinishedHint').replace('{name}', profileName) : firstRun ? t('importFirstHint') : t('importNote').replace('{name}', profileName)}</p></div>
     {!done && <>
       <div className="settings-clear-options" role="radiogroup" aria-labelledby={`${id}-source`}><span className="import-label" id={`${id}-source`}>{t('importSource')}</span>
         {options.map((option, index) => <label className="settings-checkbox settings-radio" key={`${option.source.browser}:${option.profile.id}`}>
