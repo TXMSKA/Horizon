@@ -26,9 +26,49 @@ export function favoritesError(reason: unknown, language: Language): string {
   return text(key ?? 'browserError', language);
 }
 
-function FavoriteBadge({ item }: { item: FavoriteItem }) {
+function useFavoriteFavicons(state: BrowserState, items: FavoriteItem[]) {
+  const origins = JSON.stringify([...new Set(items.filter(item => item.kind === 'link').map(item => new URL(item.url).origin))].sort());
+  const binding = JSON.stringify([state.activeProfileId, state.favoriteFaviconVersion, state.privateWindow, origins]);
+  const [cached, setCached] = useState<{ binding: string; icons: Record<string, string> } | null>(null);
+  useEffect(() => {
+    if (state.privateWindow) return;
+    let cancelled = false;
+    const urls: string[] = [];
+    const revoke = () => { for (const url of urls.splice(0)) URL.revokeObjectURL(url); };
+    const load = async () => {
+      const requested = JSON.parse(origins) as string[], icons: Record<string, string> = {};
+      for (let index = 0; index < requested.length; index += 200) {
+        if (cancelled) return;
+        const batch = requested.slice(index, index + 200);
+        const result = await window.horizon.getFavoriteFavicons(batch);
+        if (cancelled) return;
+        for (const origin of batch) {
+          const data = result[origin];
+          if (typeof data !== 'string' || data.length > Math.ceil(16 * 1024 / 3) * 4 + 22) continue;
+          const encoded = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(data);
+          if (!encoded) continue;
+          try {
+            const decoded = atob(encoded[1]!);
+            if (decoded.length > 16 * 1024) continue;
+            const bytes = Uint8Array.from(decoded, character => character.charCodeAt(0));
+            const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+            urls.push(url); icons[origin] = url;
+          } catch { /* A malformed local icon keeps its initial badge. */ }
+        }
+      }
+      if (!cancelled) setCached({ binding, icons });
+    };
+    void load().catch(revoke);
+    return () => { cancelled = true; revoke(); };
+  }, [binding, origins, state.privateWindow]);
+  return !state.privateWindow && cached?.binding === binding ? cached.icons : {};
+}
+
+function FavoriteBadge({ item, icons = {} }: { item: FavoriteItem; icons?: Record<string, string> }) {
+  const [failed, setFailed] = useState<string | null>(null);
   if (item.kind === 'folder') return <Folder aria-hidden="true" />;
-  const host = new URL(item.url).hostname;
+  const { hostname: host, origin } = new URL(item.url), icon = icons[origin];
+  if (icon && failed !== icon) return <img className="favorite-badge favorite-favicon" src={icon} alt="" aria-hidden="true" onError={() => setFailed(icon)} />;
   const color = PROFILE_COLORS[[...host].reduce((sum, character) => sum + character.charCodeAt(0), 0) % PROFILE_COLORS.length];
   return <span className="favorite-badge" data-profile-color={color} aria-hidden="true">{host.slice(0, 1).toUpperCase()}</span>;
 }
@@ -157,12 +197,14 @@ function useFavoriteDrag(state: BrowserState, run: ActionProps['run']) {
   return { props, containerProps, end };
 }
 
-function FolderPopover({ folder, opener, beside, language, onOpen, onClose, actions, drag, openAll = true }: {
+function FolderPopover({ state, folder, opener, beside, language, onOpen, onClose, actions, drag, openAll = true }: {
+  state: BrowserState;
   folder: FolderTarget; opener: RefObject<HTMLElement | null>; beside: boolean; language: Language;
   onOpen: (item: FavoriteItem, button: HTMLElement, background?: boolean) => void; onClose: () => void; openAll?: boolean;
   actions: ReturnType<typeof useFavoriteActions>; drag: ReturnType<typeof useFavoriteDrag>;
 }) {
   const ref = useRef<HTMLElement>(null), count = favoriteLinks(folder.children).length;
+  const icons = useFavoriteFavicons(state, folder.children);
   useEffect(() => { if (!dragging) (ref.current?.querySelector<HTMLElement>('[role=menuitem]') ?? ref.current)?.focus(); }, []);
   return <PopupAnchor opener={opener} align="start" beside={beside}><section ref={ref} className="favorites-surface favorite-popover" role="menu" aria-label={folder.name} tabIndex={-1} {...drag.containerProps(folder.id)} onKeyDown={event => {
     if (event.defaultPrevented) return;
@@ -171,7 +213,7 @@ function FolderPopover({ folder, opener, beside, language, onOpen, onClose, acti
     const next = event.key === 'ArrowDown' ? (index + 1) % buttons.length : event.key === 'ArrowUp' ? index < 0 ? buttons.length - 1 : (index + buttons.length - 1) % buttons.length : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : -1;
     if (next >= 0) { event.preventDefault(); event.stopPropagation(); buttons[next]?.focus(); }
   }}>{!folder.children.length && <p className="favorite-empty">{text('emptyFolder', language)}</p>}
-    {folder.children.map((item, position) => <button className="favorite-popup-row" type="button" role="menuitem" aria-haspopup={item.kind === 'folder' ? 'menu' : undefined} key={item.id} title={itemName(item)} {...drag.props(item.id, folder.id, position, item.kind === 'folder')} onClick={event => onOpen(item, event.currentTarget, event.ctrlKey)} onAuxClick={event => { if (event.button === 1 && item.kind === 'link') { event.preventDefault(); onOpen(item, event.currentTarget, true); } }} onDragEnter={event => { if (item.kind === 'folder' && dragging) onOpen(item, event.currentTarget); }} onContextMenu={event => actions.showMenu(event, item)} onKeyDown={event => { actions.menuKey(event, item); if (!event.defaultPrevented && item.kind === 'folder' && (event.key === 'ArrowRight' || event.key === 'ArrowDown')) { event.preventDefault(); event.stopPropagation(); onOpen(item, event.currentTarget); } }}><span className="favorite-mark"><FavoriteBadge item={item} /></span><span className="favorite-label">{itemName(item)}</span>{item.kind === 'folder' && <ChevronRight aria-hidden="true" />}</button>)}
+    {folder.children.map((item, position) => <button className="favorite-popup-row" type="button" role="menuitem" aria-haspopup={item.kind === 'folder' ? 'menu' : undefined} key={item.id} title={itemName(item)} {...drag.props(item.id, folder.id, position, item.kind === 'folder')} onClick={event => onOpen(item, event.currentTarget, event.ctrlKey)} onAuxClick={event => { if (event.button === 1 && item.kind === 'link') { event.preventDefault(); onOpen(item, event.currentTarget, true); } }} onDragEnter={event => { if (item.kind === 'folder' && dragging) onOpen(item, event.currentTarget); }} onContextMenu={event => actions.showMenu(event, item)} onKeyDown={event => { actions.menuKey(event, item); if (!event.defaultPrevented && item.kind === 'folder' && (event.key === 'ArrowRight' || event.key === 'ArrowDown')) { event.preventDefault(); event.stopPropagation(); onOpen(item, event.currentTarget); } }}><span className="favorite-mark"><FavoriteBadge item={item} icons={icons} /></span><span className="favorite-label">{itemName(item)}</span>{item.kind === 'folder' && <ChevronRight aria-hidden="true" />}</button>)}
     {openAll && count > 0 && <><hr role="separator" /><button type="button" role="menuitem" className="favorite-popup-row" onClick={event => onOpen({ kind: 'folder', id: folder.id, name: folder.name, createdAt: 0, children: [] }, event.currentTarget)} data-open-all><span className="favorite-mark"><ExternalLink aria-hidden="true" /></span><span>{text('openAllFavorites', language).replace('{count}', String(count))}</span></button></>}
   </section></PopupAnchor>;
 }
@@ -185,6 +227,7 @@ export function FavoritesBar({ state, language, run, onDelete, onOverlay, onActi
   const [folders, setFolders] = useState<{ id: string; opener: RefObject<HTMLElement | null>; overflow?: boolean }[]>([]);
   const close = () => setFolders([]), actions = useFavoriteActions({ state, language, run, onDelete }, close), drag = useFavoriteDrag(state, run);
   const items = state.store.favorites.bar, hidden = items.slice(visible), hasOverlay = Boolean(folders.length || actions.hasOverlay);
+  const icons = useFavoriteFavicons(state, items.slice(0, visible));
   useEffect(() => { onOverlay(hasOverlay); return () => onOverlay(false); }, [hasOverlay, onOverlay]);
   useEffect(() => { if (dismiss) { setFolders([]); actions.clear(); } }, [dismiss]);
   useEffect(() => {
@@ -218,7 +261,7 @@ export function FavoritesBar({ state, language, run, onDelete, onOverlay, onActi
   };
   const controls = [...items.slice(0, visible).map(item => item.id), ...(hidden.length ? ['overflow'] : []), 'other'];
   const tabStop = controls.includes(focused) ? focused : hidden.some(item => item.id === focused) ? 'overflow' : controls[0];
-  const label = (item: FavoriteItem) => <><FavoriteBadge item={item} /><span className="favorite-label">{itemName(item)}</span></>;
+  const label = (item: FavoriteItem) => <><FavoriteBadge item={item} icons={icons} /><span className="favorite-label">{itemName(item)}</span></>;
   return <><div className="favorites-bar" role="toolbar" aria-label={text('favorites', language)} ref={ref} onKeyDown={event => {
     if (event.defaultPrevented) return;
     const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button')], index = buttons.indexOf(document.activeElement as HTMLButtonElement);
@@ -235,7 +278,7 @@ export function FavoritesBar({ state, language, run, onDelete, onOverlay, onActi
   {folders.map((entry, level) => {
     const folder = favoriteLocation(state.store.favorites, entry.id)?.item;
     const target = entry.overflow ? { id: 'bar', name: text('moreFavorites', language), children: hidden } : entry.id === 'other' ? { id: 'other', name: rootName('other', language), children: state.store.favorites.other } : folder?.kind === 'folder' ? folder : null;
-    return target && <FolderPopover key={entry.id} folder={target} opener={entry.opener} beside={level > 0} language={language} actions={actions} drag={drag} openAll={!entry.overflow} onOpen={(item, button, background) => open(item, button, level + 1, background)} onClose={() => { setFolders(previous => previous.slice(0, level)); entry.opener.current?.focus(); }} />;
+    return target && <FolderPopover key={entry.id} state={state} folder={target} opener={entry.opener} beside={level > 0} language={language} actions={actions} drag={drag} openAll={!entry.overflow} onOpen={(item, button, background) => open(item, button, level + 1, background)} onClose={() => { setFolders(previous => previous.slice(0, level)); entry.opener.current?.focus(); }} />;
   })}
   {actions.overlays}
   {undo?.kind === 'bookmarks' && <div className="favorites-undo undo-bar" role="status"><span>{text(undo.message, language)}</span><button className="settings-button quiet" type="button" data-favorite-undo onClick={onRestore}>{text('undo', language)}</button></div>}
@@ -252,11 +295,13 @@ export function FavoritesPanel({ state, language, run, onDelete, opener, undo, o
   const close = () => onDismiss(false), actions = useFavoriteActions({ state, language, run, onDelete }, close), drag = useFavoriteDrag(state, run);
   const tree = { bar: filterFavorites(state.store.favorites.bar, filter, language), other: filterFavorites(state.store.favorites.other, filter, language) };
   const visibleIds = new Set(['bar', 'other']);
+  const visibleLinks: FavoriteItem[] = [];
   const visibleChildren = (items: FavoriteItem[], parent: string) => {
     if (!expanded.has(parent)) return;
-    for (const item of items) { visibleIds.add(item.id); if (item.kind === 'folder') visibleChildren(item.children, item.id); }
+    for (const item of items) { visibleIds.add(item.id); if (item.kind === 'folder') visibleChildren(item.children, item.id); else visibleLinks.push(item); }
   };
   visibleChildren(tree.bar, 'bar'); visibleChildren(tree.other, 'other');
+  const icons = useFavoriteFavicons(state, visibleLinks);
   const treeFocus = visibleIds.has(focused) ? focused : 'bar';
   const noResults = Boolean(filter.trim()) && !tree.bar.length && !tree.other.length;
   const t = (key: CopyKey) => text(key, language);
@@ -283,7 +328,7 @@ export function FavoritesPanel({ state, language, run, onDelete, opener, undo, o
     const open = expanded.has(folder.id);
     return <li role="none" key={folder.id}>
       <button className="favorite-tree-row" type="button" role="treeitem" aria-expanded={open} aria-owns={open ? `${id}-${folder.id}-children` : undefined} data-tree-id={folder.id} tabIndex={treeFocus === folder.id ? 0 : -1} title={folder.name} onFocus={() => setFocused(folder.id)} onClick={() => toggle(folder.id)} {...drag.props(folder.id, root ? folder.id : parent, position, true)} draggable={!state.privateWindow && !root} onDragEnter={() => { if (dragging) toggle(folder.id, true); }} onContextMenu={event => actions.showMenu(event, { ...folder, kind: 'folder', createdAt: 0 })} onKeyDown={event => actions.menuKey(event, { ...folder, kind: 'folder', createdAt: 0 })}><span className="favorite-tree-chevron">{open ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}</span><span className="favorite-mark">{open ? <FolderOpen aria-hidden="true" /> : <Folder aria-hidden="true" />}</span><span className="favorite-label">{folder.name}</span></button>
-      {open && <ul role="group" id={`${id}-${folder.id}-children`} className="favorite-tree-children">{folder.children.map((item, index) => item.kind === 'folder' ? renderFolder(item, false, folder.id, index) : <li role="none" key={item.id}><button className="favorite-tree-row favorite-tree-link" type="button" role="treeitem" data-tree-id={item.id} tabIndex={treeFocus === item.id ? 0 : -1} onFocus={() => setFocused(item.id)} title={itemName(item)} {...drag.props(item.id, folder.id, index)} onClick={event => { void run({ type: event.ctrlKey ? 'open-favorite-new-tab' : 'open-favorite', id: item.id }); close(); }} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'open-favorite-new-tab', id: item.id }); } }} onContextMenu={event => actions.showMenu(event, item)} onKeyDown={event => actions.menuKey(event, item)}><span className="favorite-tree-chevron" /><span className="favorite-mark"><FavoriteBadge item={item} /></span><span className="favorite-label">{itemName(item)}</span></button></li>)}
+      {open && <ul role="group" id={`${id}-${folder.id}-children`} className="favorite-tree-children">{folder.children.map((item, index) => item.kind === 'folder' ? renderFolder(item, false, folder.id, index) : <li role="none" key={item.id}><button className="favorite-tree-row favorite-tree-link" type="button" role="treeitem" data-tree-id={item.id} tabIndex={treeFocus === item.id ? 0 : -1} onFocus={() => setFocused(item.id)} title={itemName(item)} {...drag.props(item.id, folder.id, index)} onClick={event => { void run({ type: event.ctrlKey ? 'open-favorite-new-tab' : 'open-favorite', id: item.id }); close(); }} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); void run({ type: 'open-favorite-new-tab', id: item.id }); } }} onContextMenu={event => actions.showMenu(event, item)} onKeyDown={event => actions.menuKey(event, item)}><span className="favorite-tree-chevron" /><span className="favorite-mark"><FavoriteBadge item={item} icons={icons} /></span><span className="favorite-label">{itemName(item)}</span></button></li>)}
       </ul>}
     </li>;
   };

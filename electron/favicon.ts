@@ -77,7 +77,6 @@ export async function fetchFavicon(target: Pick<Session, 'fetch'>, candidates: s
         }
         if (!response.ok) { await response.body?.cancel(); break; }
         const bytes = await readFavicon(response);
-        // Untrusted raster bytes are decoded only by the sandboxed chrome renderer.
         return signal.aborted ? null : bytes;
       }
     } catch { /* Site icons are optional; the initial badge remains available. */ }

@@ -27,6 +27,7 @@ import { clearStoredHistoryOnClose, readStore, recordsBrowsing, reserveDownloadP
 import { validateSender } from './security';
 import { validateCommand, validateContentArea } from './commands';
 import { fetchFavicon } from './favicon';
+import { clearFaviconCacheFile, createFaviconCache, validateFaviconOrigins } from './favicon-cache';
 import type { ThemeSettings } from './settings';
 import { resolvedDownloadsFolder, resolveLanguage } from './settings';
 import { text } from '../src/copy';
@@ -114,7 +115,7 @@ function attachSession(target: Session, owner: SessionOwner) {
 }
 
 type BrowserOwner = { window: BrowserWindow; privateWindow: boolean; activeProfile(): string; publish(): void; flush(): void; stop(): void; releasePrivate(): void; persistSessions(): void; settingsChanged(): void; syncApplied(): void; syncReady(): boolean; closeVault(): Promise<void>; disposeProfile(id: string): void; registryChanged(): void; runtime(id: string): unknown };
-interface ProfileData { store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number; importProgress: ImportProgress | null }
+interface ProfileData { favicons?: ReturnType<typeof createFaviconCache>; store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number; importProgress: ImportProgress | null }
 export interface BrowserGroup {
   sync?: SyncEngine;
   registry: ProfileRegistry; owners: Map<string, BrowserOwner>; profiles: Map<string, ProfileData>;
@@ -248,7 +249,17 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   window.on('focus', refreshDefaultBrowser);
   const unsubscribeUpdates = options.updates?.subscribe(publish);
   const layout = () => { for (const runtime of runtimes.values()) runtime.layout(); };
-  const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); shared.registry = next; registry = next; shared.sync?.markDirty('profiles'); for (const owner of shared.owners.values()) owner.registryChanged(); };
+  const clearRemovedFavicons = (next: ProfileRegistry) => {
+    for (const profile of shared.registry.profiles) if (!next.profiles.some(entry => entry.id === profile.id)) {
+      const data = shared.profiles.get(profile.id);
+      try {
+        if (data?.favicons) data.favicons.clear();
+        else clearFaviconCacheFile(resolve(dirname(profileStorePath(userData, profile.id)), 'favicons.json'));
+      } catch { storageFailure(new Error('Favicon clearing failed')); }
+      finally { data?.favicons?.dispose(); if (data) delete data.favicons; }
+    }
+  };
+  const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); clearRemovedFavicons(next); shared.registry = next; registry = next; shared.sync?.markDirty('profiles'); for (const owner of shared.owners.values()) owner.registryChanged(); };
   const runtimeFor = (profile: Profile) => {
     let runtime = runtimes.get(profile.id);
     if (!runtime) { runtime = createRuntime(profile); runtimes.set(profile.id, runtime); }
@@ -414,6 +425,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const profile = registry.profiles.find(profile => profile.id === command.id)!;
         const profiles = registry.profiles.filter(other => other.id !== profile.id);
         saveRegistry({ ...registry, activeId: registry.activeId === profile.id ? profiles[0]!.id : registry.activeId, profiles, tombstones: [...registry.tombstones, profile.partition] });
+        shared.profiles.get(profile.id)?.favicons?.dispose();
         shared.profiles.get(profile.id)?.desktop.dispose(true); shared.profiles.delete(profile.id);
         deleting = true;
         return (async () => {
@@ -455,6 +467,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       shared.profiles.set(profile.id, data);
     }
     const profileData = data;
+    const favicons = privateWindow ? undefined : profileData.favicons ??= createFaviconCache(resolve(dirname(storePath), 'favicons.json'), safeStorage,
+      bytes => nativeImage.createFromBuffer(bytes), () => { for (const owner of shared.owners.values()) owner.publish(); });
     const readStatus = profileData.status;
     const store: BrowserStore = privateWindow ? { version: 5, history: [], favorites: structuredClone(profileData.store.favorites), downloads: [], siteSettings: { blocking: [], dark: [], permissions: [] }, clearHistoryOnClose: false, clearCacheOnClose: false } : profileData.store;
     // A fresh snapshot shows normal-window edits without lending private code the writable tree.
@@ -607,7 +621,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     sessionOwner.completed = details => { requests.delete(details.id); };
     sessionOwner.failed = details => { requests.delete(details.id); };
 
-    const state = () => ({ ...desktop.state(), lyra: lyra.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), translation: tab.translation?.state() ?? tab.state.translation, blocked: { ...tab.state.blocked } })), activeId, store, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
+    const state = () => ({ ...desktop.state(), lyra: lyra.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), translation: tab.translation?.state() ?? tab.state.translation, blocked: { ...tab.state.blocked } })), activeId, store, favoriteFaviconVersion: favicons?.version ?? 0, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       extensions: extensions?.list(page(active()?.view)) ?? [], extensionsUpdating: extensions?.status().updating ?? false, extensionsError: extensions?.status().storageError ?? false,
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
@@ -644,6 +658,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     };
     const flush = () => {
       flushSession();
+      try { favicons?.flush(); } catch { storageError = true; }
       if (pendingWrite === undefined || !recordsBrowsing(privateWindow)) return;
       clearTimeout(pendingWrite); pendingWrite = undefined;
       try { writeStore(storePath, store, safeStorage); storageError = false; }
@@ -690,6 +705,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const editFavorites = (edit: () => void) => editStore(edit, 'FAVORITE_STORAGE_FAILED');
     const importBrowserData = async (command: Extract<BrowserCommand, { type: 'import-browser-data' }>): Promise<ImportResult> => {
       if (profileData.importProgress) throw new Error('IMPORT_IN_PROGRESS');
+      const faviconEpoch = favicons?.epoch;
       const announce = (progress: ImportProgress | null) => { profileData.importProgress = progress; for (const owner of shared.owners.values()) owner.publish(); };
       announce({ current: 0, total: 0 });
       try {
@@ -716,6 +732,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           throw error;
         }
         if (result.settings.sitePermissions) permissions.reconcile();
+        const origins = new Set(favoriteLinks([...store.favorites.bar, ...store.favorites.other]).map(link => new URL(link.url).origin));
+        for (const icon of data.favicons ?? []) if (origins.has(icon.origin)) {
+          for (const bytes of [icon.bytes, ...icon.alternatives ?? []]) if (favicons?.put(icon.origin, bytes, faviconEpoch)) break;
+        }
+        try { favicons?.flush(); } catch { storageError = true; }
         return result;
       } finally { announce(null); }
     };
@@ -729,6 +750,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       clearingData = true;
       try {
       for (const tab of tabs) page(tab.view)?.stop(); requests.clear();
+      if (choice.history || choice.cache) try { favicons?.clear(); } catch { throw new Error(choice.history ? 'CLEAR_HISTORY_FAILED' : 'CLEAR_CACHE_FAILED'); }
       if (choice.history) {
         forget(); const previous = store.history; store.history = [];
         try { saveNow(); } catch { store.history = previous; throw new Error('CLEAR_HISTORY_FAILED'); }
@@ -742,6 +764,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const clearOnClose = () => {
       if (closeClear) return closeClear;
       stopForClear(); forget();
+      if (store.clearHistoryOnClose || store.clearCacheOnClose) try { favicons?.clear(); } catch { storageError = true; }
       if (store.clearHistoryOnClose) { try { clearStoredHistoryOnClose(storePath, store, safeStorage); } catch { storageError = true; } }
       closeClear = store.clearCacheOnClose ? Promise.resolve().then(() => webSession.clearCache()).catch(() => { storageError = true; }) : Promise.resolve();
       return closeClear;
@@ -1158,10 +1181,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         if (tab.view !== view) return;
         tab.faviconRequest?.abort();
         const request = new AbortController(); tab.faviconRequest = request;
-        void fetchFavicon(contents.session, candidates, request.signal, tab.state.url).then(bytes => {
+        const pageURL = tab.state.url, faviconEpoch = favicons?.epoch;
+        void fetchFavicon(contents.session, candidates, request.signal, pageURL).then(bytes => {
           if (!tab.host.alive(tab) || request.signal.aborted || tab.view !== view || !page(tab.view)) return;
           tab.faviconBytes = bytes ?? undefined;
           tab.state.favicon = bytes ? createHash('sha256').update(bytes).digest('hex').slice(0, 32) : null;
+          if (bytes && !clearingData && !closing && !disposed && isWebURL(pageURL) && tab.state.url === pageURL) favicons?.put(new URL(pageURL).origin, bytes, faviconEpoch);
           tab.host.publish();
         });
       });
@@ -1688,7 +1713,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           break;
         case 'stop-find': contents?.stopFindInPage('clearSelection'); tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; break;
         case 'delete-history': keep('history'); store.history = store.history.filter(entry => entry.url !== command.url); persist(); break;
-        case 'clear-history': keep('history'); store.history = []; persist(); break;
+        case 'clear-history': keep('history'); store.history = []; favicons?.clear(); persist(); break;
         case 'restore':
           if (command.kind === 'desktop') { desktop.restore(); break; }
           if (kept?.kind !== command.kind) break;
@@ -1850,7 +1875,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       invalidateMenu(tab.state.id); invalidateCaptures();
       update(); target.update(); flushSession(); target.flushSession();
     };
-    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, importBrowserData, clearOnClose, stopForClear, assertMove, assertAccept, attachView, detachView, bindTab, activate, select: (id: string) => { activeId = id; }, transferTab, requests, permissions, downloadBindings, downloadOwner, update, flushSession, ensureView };
+    return { state, tabs, active, page, run, dispatchShortcut, layout, newTab, suspend, dispose, flush, persist, persistSession, reserved, webSession, replaceViews, applyDarkCSS, desktop, resetCounts, resetCookies, clearData, importBrowserData, clearOnClose, stopForClear, assertMove, assertAccept, attachView, detachView, bindTab, activate, select: (id: string) => { activeId = id; }, transferTab, requests, permissions, downloadBindings, downloadOwner, update, flushSession, ensureView, favoriteFavicons: (origins: string[]) => favicons?.get(origins) ?? {} };
 
 
   }
@@ -1866,6 +1891,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const tab = current().tabs.find(tab => tab.state.id === id);
     if (!tab) throw new Error('Unknown tab');
     return tab.state.favicon === hash ? tab.faviconBytes ?? null : null;
+  });
+  handleChrome(window, IPC.favoriteFavicons, (event, ...args: unknown[]) => {
+    validateSender(event, window.webContents);
+    if (args.length !== 1) throw new Error('Invalid favorite favicon arguments');
+    const origins = validateFaviconOrigins(args[0]);
+    return current().favoriteFavicons(origins);
   });
   handleChrome(window, IPC.project, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
@@ -1930,6 +1961,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       shared.quitting = Promise.allSettled(registry.profiles.map(async profile => {
         const storePath = profileStorePath(userData, profile.id);
         const store = shared.profiles.get(profile.id)?.store ?? readStore(storePath, safeStorage);
+        if (store.clearHistoryOnClose || store.clearCacheOnClose) try {
+          const cache = shared.profiles.get(profile.id)?.favicons;
+          if (cache) cache.clear();
+          else clearFaviconCacheFile(resolve(dirname(storePath), 'favicons.json'));
+        } catch { storageFailure(new Error('Favicon clearing failed')); }
         try { clearStoredHistoryOnClose(storePath, store, safeStorage, writeStore); } catch { storageFailure(new Error('History clearing failed')); }
         if (store.clearCacheOnClose) try { await session.fromPartition(profile.partition).clearCache(); } catch { storageFailure(new Error('Cache clearing failed')); }
       })).then(async () => {
@@ -1987,7 +2023,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!status.memoryOnly) try { writeWindowSessions(path, saved, safeStorage); shared.sync?.markDirty('tabs'); } catch { registryError = true; }
     }
     if (privateWindow) cleanupPrivate();
-    if (!shared.owners.size) { shared.sync?.stop(); for (const data of shared.profiles.values()) data.desktop.dispose(); groups.delete(userData); }
+    if (!shared.owners.size) { shared.sync?.stop(); for (const data of shared.profiles.values()) { data.favicons?.dispose(); data.desktop.dispose(); } groups.delete(userData); }
     app.removeListener('before-quit', beforeQuit);
     window.removeListener('focus', refreshDefaultBrowser);
     unsubscribeUpdates?.();
@@ -2038,7 +2074,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   if (!privateWindow && !shared.sync) {
     const changed = () => { for (const owner of shared.owners.values()) owner.publish(); };
     const host = browserSyncHost(userData, safeStorage, settings, { profiles: shared.profiles, registry: () => shared.registry,
-      registryChanged: next => { shared.registry = next; for (const owner of shared.owners.values()) owner.registryChanged(); },
+      registryChanged: next => { clearRemovedFavicons(next); shared.registry = next; for (const owner of shared.owners.values()) owner.registryChanged(); },
       flush: () => { for (const owner of shared.owners.values()) if (!owner.privateWindow) { owner.flush(); if (!owner.syncReady()) throw new Error('SYNC_STORAGE'); } }, changed, dirty: () => shared.sync?.markDirty('desktop'), applied: () => { for (const owner of shared.owners.values()) if (!owner.privateWindow) owner.syncApplied(); } });
     const override = app.isPackaged ? undefined : Number(process.env.HORIZON_SYNC_PULSE_MS);
     shared.sync = new SyncEngine(userData, safeStorage, host, { pulseMs: typeof override === 'number' && Number.isSafeInteger(override) && override >= 50 && override <= 60000 ? override : undefined });

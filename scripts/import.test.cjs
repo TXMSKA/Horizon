@@ -5,6 +5,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { spawn } = require('node:child_process');
 const { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
+const { crc32, deflateSync } = require('node:zlib');
 const { validateCommand } = require('../dist/electron/commands.js');
 const { assertPrivateCommand } = require('../dist/electron/private-commands.js');
 const { createSettings, readSettings, validateSettings, writeSettings } = require('../dist/electron/settings.js');
@@ -12,6 +13,7 @@ const { readStore, validateStore, writeStore } = require('../dist/electron/store
 const { validFavorites } = require('../dist/electron/favorites.js');
 const { discoverImportSources, mozlz4, parseChromiumBookmarks, parseFirefoxBookmarks, readImport, searchEngineByAddress, searchEngineByName, BOOKMARK_NODE_LIMIT } = require('../dist/electron/import.js');
 const { HISTORY_LIMIT, mergeFavorites, mergeHistory } = require('../dist/electron/import-merge.js');
+const { FAVICON_LIMIT } = require('../dist/electron/favicon.js');
 const { copy } = require('../dist/src/copy.js');
 
 const NOW = Date.UTC(2026, 9, 5, 12);
@@ -30,6 +32,42 @@ function chromiumHistory(path, rows) {
   const insert = database.prepare('INSERT INTO urls (url, title, visit_count, last_visit_time, hidden) VALUES (?, ?, ?, ?, ?)');
   for (const row of rows) insert.run(row.url, row.title, row.visits, chromiumMicroseconds(row.last), row.hidden ?? 0);
   database.close();
+}
+
+function faviconPNG(width, color) {
+  const chunk = (kind, bytes) => {
+    const type = Buffer.from(kind), length = Buffer.alloc(4), checksum = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length); checksum.writeUInt32BE(crc32(Buffer.concat([type, bytes])));
+    return Buffer.concat([length, type, bytes, checksum]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(width, 4); header[8] = 8; header[9] = 6;
+  const pixels = Buffer.alloc((width * 4 + 1) * width);
+  for (let y = 0; y < width; y++) for (let x = 0; x < width; x++) pixels.set([...color, 255], y * (width * 4 + 1) + 1 + x * 4);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+function faviconDatabase(path, firefox, rows, walMode = false) {
+  const database = new DatabaseSync(path);
+  if (walMode) database.exec('PRAGMA journal_mode = WAL');
+  database.exec(firefox
+    ? 'CREATE TABLE moz_pages_w_icons (id INTEGER PRIMARY KEY, page_url TEXT); CREATE TABLE moz_icons_to_pages (page_id INTEGER, icon_id INTEGER); CREATE TABLE moz_icons (id INTEGER PRIMARY KEY, icon_url TEXT, width INTEGER, data BLOB)'
+    : 'CREATE TABLE icon_mapping (id INTEGER PRIMARY KEY, page_url TEXT, icon_id INTEGER); CREATE TABLE favicons (id INTEGER PRIMARY KEY, url TEXT); CREATE TABLE favicon_bitmaps (id INTEGER PRIMARY KEY, icon_id INTEGER, width INTEGER, height INTEGER, image_data BLOB)');
+  database.exec('BEGIN');
+  let id = 0;
+  for (const row of rows) {
+    id++;
+    if (firefox) {
+      database.prepare('INSERT INTO moz_pages_w_icons VALUES (?, ?)').run(id, row.url);
+      database.prepare('INSERT INTO moz_icons_to_pages VALUES (?, ?)').run(id, id);
+      database.prepare('INSERT INTO moz_icons VALUES (?, ?, ?, ?)').run(id, `https://icons.example/${id}`, row.width, row.bytes);
+    } else {
+      database.prepare('INSERT INTO icon_mapping VALUES (?, ?, ?)').run(id, row.url, id);
+      database.prepare('INSERT INTO favicons VALUES (?, ?)').run(id, `https://icons.example/${id}`);
+      database.prepare('INSERT INTO favicon_bitmaps VALUES (?, ?, ?, ?, ?)').run(id, id, row.width, row.width, row.bytes);
+    }
+  }
+  database.exec('COMMIT');
+  return database;
 }
 
 function firefoxDatabase(path, { walMode = false } = {}) {
@@ -208,6 +246,91 @@ module.exports = ({ temporaryDirectory, authenticatedCipher }) => {
     const cycle = [{ id: 1, parent: 0, position: 0, type: 2, title: '', added: NOW, guid: 'root________', url: null }, { id: 3, parent: 1, position: 0, type: 2, title: 'bar', added: NOW, guid: 'toolbar_____', url: null }, { id: 9, parent: 3, position: 0, type: 2, title: 'loop', added: NOW, guid: 'x', url: null }, { id: 3, parent: 9, position: 0, type: 2, title: 'again', added: NOW, guid: 'y', url: null }];
     assert.throws(() => parseFirefoxBookmarks(cycle, labels, NOW), /IMPORT_FILE_TOO_LARGE/);
     assert.throws(() => parseFirefoxBookmarks(new Array(BOOKMARK_NODE_LIMIT + 1).fill(cycle[0]), labels, NOW), /IMPORT_FILE_TOO_LARGE/);
+  });
+
+  test('Chromium Favicons import picks the smallest raster of at least 16px for favorite origins only and leaves the source untouched', async t => {
+    const fixture = profileFixture(temporaryDirectory(t, 'import-chromium-favicons')), source = join(fixture.edge, 'Default', 'Favicons');
+    const small = faviconPNG(16, [255, 0, 0]), medium = faviconPNG(24, [0, 255, 0]), large = faviconPNG(32, [0, 0, 255]);
+    const oversized = Buffer.alloc(FAVICON_LIMIT + 1); small.copy(oversized);
+    const truncated = small.subarray(0, 8);
+    writeFileSync(join(fixture.edge, 'Default', 'Bookmarks'), bookmarks([
+      link('Example', 'https://example.com/favorite'), link('Bank', 'https://bank.example/'), link('Corrupt', 'https://corrupt.example/'),
+      link('Oversized', 'https://oversized.example/'), link('HTTP', 'http://example.com/favorite'), link('Port', 'https://example.com:8443/favorite'),
+      link('Decode fallback', 'https://decode-fallback.example/favorite'),
+    ]));
+    const database = faviconDatabase(source, false, [
+      { url: 'https://example.com/old-page', width: 32, bytes: large }, { url: 'https://example.com/another-page', width: 16, bytes: small },
+      { url: 'https://example.com/favorite', width: 8, bytes: faviconPNG(8, [0, 0, 0]) },
+      { url: 'https://bank.example/', width: 16, bytes: Buffer.from('corrupt raster') }, { url: 'https://bank.example/', width: 24, bytes: medium },
+      { url: 'https://corrupt.example/', width: 16, bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>') },
+      { url: 'https://oversized.example/', width: 16, bytes: oversized }, { url: 'https://history-only.example/', width: 16, bytes: small },
+      { url: 'https://example.com.evil/', width: 16, bytes: medium }, { url: 'http://example.com/page', width: 16, bytes: medium },
+      { url: 'https://example.com:8443/page', width: 16, bytes: large },
+      { url: 'https://decode-fallback.example/page', width: 16, bytes: truncated }, { url: 'https://decode-fallback.example/page', width: 32, bytes: large },
+    ]);
+    database.prepare('INSERT INTO icon_mapping (page_url, icon_id) SELECT ?, icon_id FROM icon_mapping WHERE page_url = ?').run('https://decode-fallback.example/duplicate', 'https://decode-fallback.example/page');
+    database.close();
+    const before = sha(source), data = await everything(fixture, selection('edge', 'Default'));
+    assert.equal(sha(source), before);
+    assert.deepEqual(data.favicons.map(icon => [icon.origin, Buffer.from(icon.bytes)]), [
+      ['https://example.com', small], ['https://bank.example', medium], ['http://example.com', medium], ['https://example.com:8443', large],
+      ['https://decode-fallback.example', truncated],
+    ]);
+    assert.deepEqual(data.favicons.at(-1).alternatives.map(bytes => Buffer.from(bytes)), [large]);
+    assert.deepEqual(readdirSync(fixture.scratch), []);
+    const historyOnly = await everything(fixture, selection('edge', 'Default', { favorites: false }));
+    assert.equal(historyOnly.favicons, undefined);
+  });
+
+  test('Firefox favicons.sqlite import reads its WAL copy, skips corrupt and oversized blobs, and imports favorite origins only', async t => {
+    const fixture = profileFixture(temporaryDirectory(t, 'import-firefox-favicons')), profile = join(fixture.firefox, 'Profiles', 'abc.default-release');
+    const source = join(profile, 'favicons.sqlite'), small = faviconPNG(16, [255, 0, 0]), large = faviconPNG(32, [0, 255, 0]);
+    const oversized = Buffer.alloc(FAVICON_LIMIT + 1); small.copy(oversized);
+    const truncated = small.subarray(0, 8);
+    const places = new DatabaseSync(join(profile, 'places.sqlite'));
+    for (const [id, url] of [[100, 'https://corrupt.example/'], [101, 'https://oversized.example/'], [102, 'https://bank.example/'], [103, 'https://decode-fallback.example/favorite']]) {
+      places.prepare('INSERT INTO moz_places (id, url, title) VALUES (?, ?, ?)').run(id, url, 'Favorite');
+      places.prepare('INSERT INTO moz_bookmarks (id, type, fk, parent, position, title, dateAdded, guid) VALUES (?, 1, ?, 3, ?, ?, ?, ?)').run(id, id, id, 'Favorite', BigInt(NOW) * 1000n, `fixture-${id}`);
+    }
+    places.close();
+    const database = faviconDatabase(source, true, [
+      { url: 'https://example.com/ff-one', width: 32, bytes: large }, { url: 'https://example.com/ff-two', width: 16, bytes: small },
+      { url: 'https://example.com/ff-one', width: 8, bytes: faviconPNG(8, [0, 0, 0]) },
+      { url: 'https://example.com/ff-one', width: 16, bytes: Buffer.from('<svg/>') }, { url: 'https://example.com/ff-one', width: 16, bytes: oversized },
+      { url: 'https://corrupt.example/', width: 16, bytes: Buffer.from('corrupt raster') }, { url: 'https://oversized.example/', width: 16, bytes: oversized },
+      { url: 'https://bank.example/', width: 16, bytes: Buffer.from('<svg/>') }, { url: 'https://bank.example/', width: 32, bytes: large },
+      { url: 'https://history-only.example/', width: 16, bytes: small }, { url: 'http://example.com/', width: 16, bytes: large },
+      { url: 'https://example.com:8443/', width: 16, bytes: large }, { url: 'https://example.com.evil/', width: 16, bytes: large },
+      { url: 'https://decode-fallback.example/page', width: 16, bytes: truncated }, { url: 'https://decode-fallback.example/page', width: 32, bytes: large },
+    ], true);
+    database.prepare('INSERT INTO moz_pages_w_icons VALUES (?, ?)').run(1000, 'https://decode-fallback.example/duplicate');
+    database.prepare('INSERT INTO moz_icons_to_pages SELECT ?, m.icon_id FROM moz_icons_to_pages m JOIN moz_pages_w_icons p ON p.id = m.page_id WHERE p.page_url = ?').run(1000, 'https://decode-fallback.example/page');
+    try {
+      assert.ok(statSync(`${source}-wal`).size > 0);
+      const before = [source, `${source}-wal`].map(sha), data = await everything(fixture, selection('firefox', 'abc.default-release'));
+      assert.deepEqual([source, `${source}-wal`].map(sha), before);
+      assert.deepEqual(data.favicons.map(icon => [icon.origin, Buffer.from(icon.bytes)]), [['https://example.com', small], ['https://bank.example', large], ['https://decode-fallback.example', truncated]]);
+      assert.deepEqual(data.favicons.at(-1).alternatives.map(bytes => Buffer.from(bytes)), [large]);
+      assert.deepEqual(readdirSync(fixture.scratch), []);
+    } finally { database.close(); }
+  });
+
+  test('missing, corrupt and oversized favicon databases are optional and never prevent favorites import or leave a copy behind', async t => {
+    const fixture = profileFixture(temporaryDirectory(t, 'import-optional-favicons'));
+    for (const [browser, profile, source] of [
+      ['edge', 'Default', join(fixture.edge, 'Default', 'Favicons')],
+      ['firefox', 'abc.default-release', join(fixture.firefox, 'Profiles', 'abc.default-release', 'favicons.sqlite')],
+    ]) {
+      const missing = await everything(fixture, selection(browser, profile));
+      assert.ok(missing.favorites.bar.length); assert.deepEqual(missing.favicons, []);
+      writeFileSync(source, 'this is not SQLite');
+      const corrupt = await everything(fixture, selection(browser, profile));
+      assert.ok(corrupt.favorites.bar.length); assert.deepEqual(corrupt.favicons, []);
+      const handle = openSync(source, 'r+'); ftruncateSync(handle, 1024 * 1024 * 1024 + 1); closeSync(handle);
+      const oversized = await everything(fixture, selection(browser, profile));
+      assert.ok(oversized.favorites.bar.length); assert.deepEqual(oversized.favicons, []);
+      assert.deepEqual(readdirSync(fixture.scratch), []);
+    }
   });
 
   test('search engines are recognised only when Horizon offers them, in Chromium templates and in Firefox LZ4 files', () => {

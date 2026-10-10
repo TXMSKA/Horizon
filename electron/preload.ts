@@ -18,6 +18,7 @@ const api: HorizonAPI = Object.freeze({
   getState: () => ipcRenderer.invoke('horizon:state') as Promise<BrowserState>,
   capture: () => ipcRenderer.invoke('horizon:capture') as Promise<Uint8Array | null>,
   getFavicon: (id: string, hash: string) => ipcRenderer.invoke('horizon:favicon', id, hash) as Promise<Uint8Array | null>,
+  getFavoriteFavicons: (origins: string[]) => ipcRenderer.invoke('horizon:favorite-favicons', origins) as Promise<Record<string, string>>,
   getProject: (id: string) => ipcRenderer.invoke('horizon:project', id) as Promise<ProjectContent>,
   getCaptures: () => ipcRenderer.invoke('horizon:captures') as Promise<DesktopItemContent[]>,
   getCaptureImage: (project: string | null, item: string) => ipcRenderer.invoke('horizon:capture-image', project, item) as Promise<Uint8Array | null>,
