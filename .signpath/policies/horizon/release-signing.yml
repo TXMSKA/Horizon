@@ -1,0 +1,19 @@
+# SignPath pipeline policy for the signing policy "release-signing" of the project "horizon"
+# (.signpath/policies/<project slug>/<signing policy slug>.yml).
+# Horizon releases use GitHub-hosted runners and cannot be signed again by rerunning a build.
+# Repository branch and tag rulesets must forbid deleting and rewriting refs. The signing
+# policy's "Allowed branch names" must allow only the default branch; the release workflow
+# also checks that the version tag points to a commit on that branch before building.
+github-build-policies:
+  version: '1.0'
+  disallow_reruns: true
+  runners:
+    require_github_hosted: true
+github-scm-policies:
+  version: '1.0'
+  ruleset_constraints:
+    - enforced_from: CURRENT_BUILD
+      allow_bypass_actors: true
+      rules:
+        - type: non_fast_forward
+        - type: deletion

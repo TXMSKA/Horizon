@@ -1,5 +1,6 @@
 const { existsSync } = require('node:fs');
 const { join } = require('node:path');
+const { writeSignedAppUpdate } = require('./signpath-app-update.cjs');
 
 // Flips the Electron fuses on the packed binary before code signing, with the same values as scripts/fuses.mjs.
 exports.default = async function afterPack(context) {
@@ -20,4 +21,5 @@ exports.default = async function afterPack(context) {
     [FuseV1Options.GrantFileProtocolExtraPrivileges]: false,
     [FuseV1Options.WasmTrapHandlers]: true,
   });
+  await writeSignedAppUpdate(context);
 };

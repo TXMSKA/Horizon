@@ -98,7 +98,8 @@ applied for. Until it is granted, the builds are unsigned and the release notes 
 - Authors, reviewers and approvers: [TXMSKA](https://github.com/orgs/TXMSKA/people).
 - Every release is approved by hand before it is signed and published.
 - Only releases built by the release workflow from a tag on the default branch, on a
-  GitHub-hosted runner, are submitted for signing.
+  GitHub-hosted runner, are submitted for signing; the policy is in
+  `.signpath/policies/horizon/release-signing.yml`.
 
 ## Privacy
 

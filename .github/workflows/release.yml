@@ -6,14 +6,50 @@ on:
 permissions:
   contents: read
 jobs:
+  prepare:
+    if: github.repository == 'TXMSKA/Horizon'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: vars.SIGNPATH_ENABLED == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the tag
+        if: vars.SIGNPATH_ENABLED == 'true'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "v$version"
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"
+      # Create the draft once so both platforms upload to it and keep these notes.
+      - name: Prepare the draft release notes
+        if: vars.SIGNPATH_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          note='Free code signing provided by SignPath.io, certificate by SignPath Foundation'
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,body > draft.json; then
+            export SIGNING_NOTE="$note"
+            node -e "const fs = require('node:fs'), draft = require('./draft.json'); if (!draft.isDraft) process.exit(1); const body = (draft.body || '').split('\n').filter(line => !['Free code signing provided by SignPath.io, certificate by SignPath Foundation', 'This build is not code-signed yet'].includes(line)).join('\n').trim(); fs.writeFileSync('release-notes.md', (body ? body + '\n\n' : '') + process.env.SIGNING_NOTE + '\n');"
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Horizon ${GITHUB_REF_NAME#v}" --notes "$note"
+          fi
   release:
+    needs: prepare
     if: github.repository == 'TXMSKA/Horizon'
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     permissions:
+      # Publishing needs contents: write; SignPath needs actions: read for this run's artifacts.
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -30,6 +66,95 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run test:security
+      # The existing unsigned Windows and Linux packaging/publishing path is unchanged.
       - run: npx electron-builder --publish always
+        if: runner.os != 'Windows' || vars.SIGNPATH_ENABLED != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Add the unsigned release notice
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $draft = gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --json isDraft,body | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$draft.isDraft) { throw 'Expected the draft release created by electron-builder.' }
+          $notice = 'This build is not code-signed yet'
+          $lines = @($draft.body -split "`n" | Where-Object { $_.Trim() -notin @($notice, 'Free code signing provided by SignPath.io, certificate by SignPath Foundation') })
+          $body = ($lines -join "`n").Trim()
+          Set-Content -LiteralPath release/release-notes.md -Encoding utf8 -Value (($body + "`n`n" + $notice).Trim())
+          gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --notes-file release/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'The unsigned release notice was not added.' }
+
+      # SignPath is opt-in and only runs on a tag push in this repository, never a PR or fork.
+      - name: Build the Windows folder for signing
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED == 'true'
+        run: npx electron-builder --win --dir --publish never --config build/electron-builder.signpath.yml
+      - name: Upload the Windows folder to sign
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED == 'true'
+        id: programs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: horizon-programs-unsigned
+          path: release/win-unpacked
+          if-no-files-found: error
+      - name: Sign the executables
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: horizon
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: executables
+          github-artifact-id: ${{ steps.programs.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: release/programs-signed
+      # --prepackaged preserves the app's signature and the fuses flipped before signing.
+      - name: Build the installer from the signed folder
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED == 'true'
+        run: |
+          $signature = Get-AuthenticodeSignature release/programs-signed/Horizon.exe
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo('SimpleName', $false) -ne 'SignPath Foundation') { throw 'Horizon.exe does not carry a valid SignPath Foundation signature.' }
+          npx electron-builder --win nsis --prepackaged release/programs-signed --publish never --config build/electron-builder.signpath.yml
+          if ($LASTEXITCODE -ne 0) { throw 'The installer was not built.' }
+      - name: Upload the installer to sign
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED == 'true'
+        id: installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: horizon-installer-unsigned
+          path: release/*.exe
+          if-no-files-found: error
+      - name: Sign the installer
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: horizon
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.installer.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: release/installer-signed
+      - name: Recompute the signed installer metadata
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED == 'true'
+        run: |
+          $files = @(Get-ChildItem release/installer-signed -Filter *.exe -File)
+          if ($files.Count -ne 1) { throw 'Expected one signed installer.' }
+          $signature = Get-AuthenticodeSignature $files[0].FullName
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo('SimpleName', $false) -ne 'SignPath Foundation') { throw 'The installer does not carry a valid SignPath Foundation signature.' }
+          Copy-Item -LiteralPath $files[0].FullName -Destination (Join-Path release $files[0].Name) -Force
+          node scripts/signed-update-metadata.cjs release
+          if ($LASTEXITCODE -ne 0) { throw 'The signed update metadata was not regenerated.' }
+      - name: Upload the signed Windows release files
+        if: runner.os == 'Windows' && vars.SIGNPATH_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $files = @(Get-ChildItem release -File | Where-Object { $_.Name -match '\.exe(\.blockmap)?$|^latest\.yml$' } | ForEach-Object { $_.FullName })
+          if ($files.Count -ne 3) { throw 'Expected the signed installer, blockmap and latest.yml.' }
+          gh release upload $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --clobber $files
+          if ($LASTEXITCODE -ne 0) { throw 'The signed release files were not uploaded.' }
