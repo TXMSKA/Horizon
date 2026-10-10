@@ -4,6 +4,9 @@ import { resolve } from 'node:path';
 import type { BrowserWindow, WebContents } from 'electron';
 import type { Client, EntryRow, ImportCount } from 'vault-client' with { 'resolution-mode': 'import' };
 import type { ImportPasswordsResult, VaultCommand, VaultLogin, VaultState, VaultTimeout } from '../src/shared/api';
+import { serviceReason } from '../src/shared/services';
+import type { ServiceReason } from '../src/shared/services';
+import type { ReachAnswer } from './services-install';
 import { assertVaultPage, fillLogin, inspectLogin, vaultOrigin } from './vault-page';
 import type { LoginFields } from './vault-page';
 import { vaultClipboard, vaultTokenStore } from './vault-storage';
@@ -18,6 +21,8 @@ interface Options {
   page(): VaultPage | null; covered(): boolean; changed(): void; timeout(): VaultTimeout; saveTimeout(value: VaultTimeout): void;
   revealPage(): void;
   connect?: () => Promise<Client>;
+  // Called when the person reached a Vault feature and the client says Vault is missing or did not start (never from a sign-in field).
+  unavailable?(reason: ServiceReason): void;
 }
 const connections = new Map<string, { promise: Promise<Client>; users: number }>();
 const auditEvents: Partial<Record<VaultCommand['type'], Parameters<typeof vaultAudit>[0]>> = { 'vault-unlock': 'unlock', 'vault-hello': 'hello', 'vault-lock': 'lock', 'vault-fill': 'fill', 'vault-copy': 'copy', 'vault-add': 'add', 'vault-import-permission': 'permission', 'vault-import-permission-hello': 'permission' };
@@ -71,11 +76,18 @@ function removeLegacyIndex(directory: string): void {
   // Only the fixed event reaches the log, never a path or a name.
   if (failed) vaultAudit('cleanup', 'denied');
 }
+// The service's own answer to a connect, kept with the failure so the reason (missing or did not start) can reach the person; the message stays the fixed code.
+class Unreachable extends Error {
+  readonly reason: ServiceReason | null;
+  constructor(reason: ServiceReason | null) { super('VAULT_UNAVAILABLE'); this.reason = reason; }
+}
+// The commands of a feature the person reached; a sign-in field's background connect is not one of them.
+const offerCommands = new Set<VaultCommand['type']>(['vault-refresh', 'vault-add', 'vault-unlock', 'vault-hello', 'vault-import-permission', 'vault-import-permission-hello']);
 function errorCode(error: unknown): 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAILABLE' {
   return error instanceof Error && error.message === 'VAULT_STORAGE_UNAVAILABLE' ? 'VAULT_STORAGE_UNAVAILABLE' : 'VAULT_UNAVAILABLE';
 }
 export function createVault(options: Options) {
-  const state: VaultState = { available: false, created: false, unlocked: false, importAllowed: false, unlockMethod: null, timeout: options.timeout(), logins: [], suggestion: null, error: null, windows: process.platform === 'win32' };
+  const state: VaultState = { available: false, created: false, unlocked: false, importAllowed: false, unlockMethod: null, timeout: options.timeout(), logins: [], suggestion: null, error: null, reason: null, windows: process.platform === 'win32' };
   removeLegacyIndex(options.directory);
   // The sign-ins found for the field in view exist only here, only while Vault is unlocked.
   let found: VaultLogin[] = [], client: Client | undefined, connection: Promise<Client> | undefined;
@@ -103,11 +115,11 @@ export function createVault(options: Options) {
         }
         shared.users++;
         try { return await shared.promise; }
-        catch { if (--shared.users === 0) connections.delete(options.directory); throw new Error('VAULT_UNAVAILABLE'); }
+        catch (error) { if (--shared.users === 0) connections.delete(options.directory); throw new Unreachable(serviceReason(error)); }
       })();
     }
-    try { client = await connection; return client; }
-    catch (error) { connection = undefined; throw error; }
+    try { client = await connection; state.reason = null; return client; }
+    catch (error) { connection = undefined; state.reason = error instanceof Unreachable ? error.reason : serviceReason(error); throw error; }
   };
   const updateStatus = async (service: Client) => {
     const status = await service.status();
@@ -283,6 +295,7 @@ export function createVault(options: Options) {
       state.error = errorCode(error);
       epoch++; state.unlocked = false; state.unlockMethod = null; forget();
       if (event) vaultAudit(event, 'denied');
+      if (state.reason && offerCommands.has(command.type)) options.unavailable?.(state.reason);
       if (command.type === 'vault-fill') dismiss();
       if (command.type === 'vault-unlock') command.password = '';
       publish();
@@ -302,7 +315,11 @@ export function createVault(options: Options) {
     try {
       let service: Client;
       try { service = await getClient(); await updateStatus(service); }
-      catch (error) { state.error = errorCode(error); epoch++; state.unlocked = false; state.unlockMethod = null; forget(); publish(); throw new Error(state.error); }
+      catch (error) {
+        state.error = errorCode(error); epoch++; state.unlocked = false; state.unlockMethod = null; forget(); publish();
+        if (state.reason) options.unavailable?.(state.reason);
+        throw new Error(state.error);
+      }
       if (!state.unlocked) throw new Error('VAULT_LOCKED');
       if (!await askImportPermission(service)) { state.importAllowed = false; throw new Error('VAULT_IMPORT_PERMISSION'); }
       let source: string | undefined = read();
@@ -329,8 +346,14 @@ export function createVault(options: Options) {
     if (client && !working && !closed) void updateStatus(client).then(reveal).then(publish).catch(() => { state.unlocked = false; forget(); state.error = 'VAULT_UNAVAILABLE'; epoch++; publish(); });
   }, 20000);
   statusTimer?.unref();
+  // Asks the client once more without touching the unlock state: used by the install offer after an install and by Settings.
+  const reach = async (): Promise<ReachAnswer> => {
+    if (closed || options.privateWindow) return 'did_not_start';
+    try { const service = await getClient(); await updateStatus(service); publish(); return state.created ? 'ready' : 'setup'; }
+    catch { publish(); return state.reason ?? 'did_not_start'; }
+  };
   return {
-    state: () => structuredClone(state), run, scan, importPasswords, hasSession: () => Boolean(connection),
+    state: () => structuredClone(state), status: () => ({ available: state.available, reason: state.reason }), run, scan, importPasswords, reach, hasSession: () => Boolean(connection),
     invalidate() { epoch++; dismiss(); publish(); },
     close(): Promise<void> {
       if (closeTask) return closeTask;

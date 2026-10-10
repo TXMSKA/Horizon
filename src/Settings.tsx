@@ -4,12 +4,14 @@ import { Check, ChevronDown, ChevronLeft, Folder, LoaderCircle, Palette, Puzzle,
 import { copy, text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS, SEARCH_ENGINES, SITE_PERMISSIONS } from './shared/api';
+import { SERVICE_IDS } from './shared/services';
 import type { BrowserCommand, BrowserState, ClearedBrowsingData, ImportSource, Language, SettingsSection, SitePermission, SiteSettingsEntry } from './shared/api';
 import { HorizonMark } from './HorizonMark';
 import { ImportDialog, importProgressLabel } from './Import';
 import { Menu } from './Menu';
 import { PopupAnchor } from './PopupAnchor';
 import { ProfilesSettings } from './Profiles';
+import { serviceName, serviceStatusText } from './Services';
 import { Switch } from './Switch';
 import { ExtensionsSettings } from './Extensions';
 import { syncConflictTitle, syncErrorKey, syncFocusTarget, syncItemHints, syncItemLabels, syncRelativeTime } from './shared/sync-display';
@@ -127,6 +129,23 @@ function ImportSettings({ state, language }: { state: BrowserState; language: La
     {sources !== null && sources.length > 0 && <button className="settings-button" ref={opener} type="button" disabled={importing} aria-describedby={`${id}-hint`} onClick={() => setOpen(true)}>{importing && <LoaderCircle className="spinner" aria-hidden="true" />}{importing ? importProgressLabel(state.importProgress, language) : t('importButton')}</button>}
     {open && sources && <ImportDialog sources={sources} language={language} profileName={state.profiles.find(profile => profile.id === state.activeProfileId)?.name ?? ''} firstRun={false} vault={state.vault} progress={state.importProgress} opener={opener} describe={reason => settingsError(reason, language)} onClose={() => setOpen(false)} />}
   </>}</SettingRow>;
+}
+
+// Vault and Lyra are shared by the Cosmic apps. A missing one is offered again here, and one that is installed but did not start can be asked again or reinstalled.
+// Neither client says where the service's app is, and Horizon never reads the service's records, so there is no Open button.
+function SharedServices({ state, language }: { state: BrowserState; language: Language }) {
+  const t = (key: CopyKey) => text(key, language);
+  useEffect(() => { void window.horizon.command({ type: 'service-check' }).catch(() => undefined); }, []);
+  return <SettingsGroup title="serviceSharedGroup" language={language}>{SERVICE_IDS.map(service => {
+    const status = state.services.entries[service];
+    return <SettingRow key={service} title={service === 'vault' ? 'serviceVault' : 'lyra'} hint={serviceStatusText(service, status, language)} language={language}>{(id, apply, pending) => <>
+      {status === 'not_installed' && <button className="settings-button" type="button" disabled={pending || state.services.dialog !== null} aria-describedby={`${id}-hint`} onClick={() => { void apply({ type: 'service-offer', service }, ''); }}>{t('serviceInstall')}</button>}
+      {status === 'did_not_start' && <>
+        <button className="settings-button" type="button" disabled={pending || state.services.dialog !== null} aria-label={`${t('serviceReinstall')} ${serviceName(service, language)}`} aria-describedby={`${id}-hint`} onClick={() => { void apply({ type: 'service-offer', service }, ''); }}>{t('serviceReinstall')}</button>
+        <button className="settings-button" type="button" disabled={pending} aria-label={`${t('serviceRetry')} ${serviceName(service, language)}`} aria-describedby={`${id}-hint`} onClick={() => { void apply({ type: 'service-check' }, ''); }}>{t('serviceRetry')}</button>
+      </>}
+    </>}</SettingRow>;
+  })}</SettingsGroup>;
 }
 
 function GeneralSettings({ state, language }: { state: BrowserState; language: Language }) {
@@ -389,6 +408,7 @@ export function Settings({ state, section, language, onOpen, openClearDialog, on
     {SETTINGS_SECTIONS.filter(({ section }) => !state.privateWindow || section !== 'profiles' && section !== 'extensions' && section !== 'sync').map(({ section: target, label, icon: Icon }) => <button className={`settings-rail-row${target === current ? ' selected' : ''}`} type="button" key={target} aria-label={target === 'sync' && state.sync.conflicts.length ? `${t(label)}. ${t('syncConflictNotice')}` : t(label)} title={t(label)} aria-current={target === current ? 'page' : undefined} onClick={() => onOpen(target)}><Icon aria-hidden="true" /><span>{t(label)}</span>{target === 'sync' && state.sync.conflicts.length > 0 && <i className="sync-notice-dot" aria-hidden="true" />}</button>)}
   </nav><div className="settings-content"><div className="settings-column"><div className="settings-page-heading">{section === 'privacy/sites' && <button className="settings-back" type="button" onClick={() => onOpen('privacy')}><ChevronLeft aria-hidden="true" />{t('privacy')}</button>}<h1 id="settings-title" tabIndex={-1}>{t(section === 'privacy/sites' ? 'sitesOwnSettings' : current)}</h1></div>
     {section === 'general' && <GeneralSettings state={state} language={language} />}
+    {section === 'general' && !state.privateWindow && <SharedServices state={state} language={language} />}
     {section === 'appearance' && <AppearanceSettings state={state} language={language} />}
     {section === 'privacy' && <PrivacySettings state={state} language={language} onOpen={onOpen} openClearDialog={openClearDialog} onClearDialogOpened={onClearDialogOpened} />}
     {section === 'privacy/sites' && <SitesSettings state={state} language={language} />}

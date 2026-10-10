@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 require('./vault.test.cjs');
 require('./horizon-lyra.test.cjs');
+require('./services-install.test.cjs');
 const assert = require('node:assert/strict');
 const { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, mkdirSync, symlinkSync, rmSync } = require('node:fs');
 const { resolve, join, dirname } = require('node:path');
@@ -1462,7 +1463,7 @@ test('profiles are managed in settings and the profiles panel route is removed',
 });
 
 function settingsInterface(react = {}) {
-  const exported = interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './shared/sync-display': require('../dist/src/shared/sync-display.js'), './sync.css': {}, './HorizonMark': {}, './Import': {}, './Menu': {}, './PopupAnchor': {}, './Extensions': { ExtensionsSettings: 'extension-settings' }, './Profiles': {}, './Switch': {} });
+  const exported = interfaceModule('src/Settings.tsx', { react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './shared/sync-display': require('../dist/src/shared/sync-display.js'), './shared/services': require('../dist/src/shared/services.js'), './sync.css': {}, './HorizonMark': {}, './Import': {}, './Services': {}, './Menu': {}, './PopupAnchor': {}, './Extensions': { ExtensionsSettings: 'extension-settings' }, './Profiles': {}, './Switch': {} });
   const Settings = exported.Settings;
   return { ...exported, Settings: props => Settings({ ...props, state: { ...props.state, sync: props.state.sync ?? { conflicts: [] } } }) };
 }

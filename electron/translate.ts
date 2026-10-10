@@ -1,4 +1,6 @@
 import type { Client } from 'horizon-lyra' with { 'resolution-mode': 'import' };
+import { serviceReason } from '../src/shared/services';
+import type { ServiceReason } from '../src/shared/services';
 import type { Language } from '../src/shared/api';
 import { pageLanguage } from '../src/shared/translate';
 import type { TranslateCommand, TranslateState } from '../src/shared/translate';
@@ -15,6 +17,8 @@ export interface TranslateHost {
   never(): boolean; always(source: string): Language | null;
   remember(choice: 'always' | 'never', source: string | null, target: Language, enabled: boolean): void;
   connect(): Promise<Client>;
+  // Called when the client says Lyra is missing or did not start, for a translation the person asked for (never an automatic one).
+  unreachable?(reason: ServiceReason): void;
   // Both only look and never start the service, so nothing automatic can wake Lyra up.
   // installed: Lyra has a valid install record, so a click can start it. available: its service is already running.
   installed(): Promise<boolean>; available(): Promise<boolean>;
@@ -60,7 +64,7 @@ const errorCode = (error: unknown) => {
 export function createTranslation(host: TranslateHost) {
   const state = initial(host.language());
   let generation = 0, controller: AbortController | undefined, detected: number | undefined;
-  let pending = false;
+  let pending = false, automatic = false;
   const publish = () => { if (host.alive()) host.changed(); };
   const assertPublic = () => { if (host.privateWindow) throw new Error('TRANSLATE_PRIVATE'); if (!host.alive()) throw new Error('TRANSLATE_PAGE_CHANGED'); };
   const stop = () => { generation++; controller?.abort(); controller = undefined; pending = false; };
@@ -71,9 +75,9 @@ export function createTranslation(host: TranslateHost) {
     if (id !== generation || live.contents !== page.contents || live.url !== page.url || live.generation !== page.generation) throw new Error('TRANSLATE_PAGE_CHANGED');
     if (host.never()) throw new Error('TRANSLATE_EXCLUDED');
   };
-  const launch = (work: (page: TranslationPage, id: number, signal: AbortSignal) => Promise<void>) => {
+  const launch = (work: (page: TranslationPage, id: number, signal: AbortSignal) => Promise<void>, quiet = false) => {
     assertPublic(); if (pending) throw new Error('TRANSLATE_BUSY');
-    stop(); controller = new AbortController(); const id = generation, signal = AbortSignal.any([controller.signal, AbortSignal.timeout(5 * 60 * 1000)]), page = { ...host.page() };
+    stop(); automatic = quiet; controller = new AbortController(); const id = generation, signal = AbortSignal.any([controller.signal, AbortSignal.timeout(5 * 60 * 1000)]), page = { ...host.page() };
     pending = true;
     void work(page, id, signal).catch(error => {
       if (id !== generation || !host.alive()) return;
@@ -91,7 +95,10 @@ export function createTranslation(host: TranslateHost) {
     try {
       const context = JSON.stringify({ kind: 'untrusted-page-data', data });
       if (Buffer.byteLength(context, 'utf8') > 12000) throw new Error('TRANSLATE_LIMIT');
-      const client = await host.connect(); checkPage(page, id, signal);
+      let client: Client;
+      try { client = await host.connect(); }
+      catch (error) { const reason = serviceReason(error); if (reason && !automatic && host.alive()) host.unreachable?.(reason); throw error; }
+      checkPage(page, id, signal);
       // Lyra's fast runtime sets maxOutputTokens to 2,048; the 007 client has no per-call override.
       const events = client.chat({ mode: 'fast', priority: 'interactive', context, messages: [{ role: 'user', content: instruction }] }, { signal });
       let output = '', done = false;
@@ -171,7 +178,7 @@ export function createTranslation(host: TranslateHost) {
         }
         const target = state.source && host.always(state.source);
         if (target && target !== state.source) { state.target = target; await translate(page, id, signal); }
-      });
+      }, true);
     },
     run(command: TranslateCommand) {
       assertPublic();

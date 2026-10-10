@@ -3,6 +3,8 @@ import type { Client } from 'horizon-lyra' with { 'resolution-mode': 'import' };
 import type { DesktopItem, Language, PermissionDecision, ProjectContent } from '../src/shared/api';
 import type { LyraCommand, LyraSource, LyraState } from '../src/shared/lyra';
 import { text } from '../src/copy';
+import { serviceReason } from '../src/shared/services';
+import type { ServiceReason } from '../src/shared/services';
 import { lyraContext, lyraPlainText, readLyraPage } from './lyra-context';
 import { siteOrigin } from './site-settings';
 
@@ -17,6 +19,8 @@ export interface LyraHost {
   project(id: string): ProjectContent; item(project: string | null, id: string): DesktopItem;
   save(project: string, title: string, answer: string, sources: LyraSource[]): void;
   connect(): Promise<Client>;
+  // Called when the client says Lyra is missing or did not start, for a feature the person reached.
+  unreachable?(reason: ServiceReason): void;
 }
 const initial = (): LyraState => ({ open: false, phase: 'home', task: 'question', question: '', answer: '', sources: [], permission: null, attachment: null, error: null, progress: null });
 const failureCode = (error: unknown): string => {
@@ -25,6 +29,10 @@ const failureCode = (error: unknown): string => {
 };
 export function createLyra(host: LyraHost) {
   const state = initial();
+  const connect = async (): Promise<Client> => {
+    try { return await host.connect(); }
+    catch (error) { const reason = serviceReason(error); if (reason && host.alive()) host.unreachable?.(reason); throw error; }
+  };
   let generation = 0, controller: AbortController | undefined, request: Ask | undefined;
   let pages: LyraPage[] = [];
   let previousAnswer = '';
@@ -69,7 +77,7 @@ export function createLyra(host: LyraHost) {
     }
     state.phase = 'running'; state.permission = null; state.error = null; publish();
     // Connect first so an unavailable service never causes an unnecessary page read.
-    const client = await host.connect(); current(id, signal); checkPages();
+    const client = await connect(); current(id, signal); checkPages();
     const documents = [];
     for (const page of pages) {
       const origin = siteOrigin(page.url)!;
@@ -126,7 +134,7 @@ export function createLyra(host: LyraHost) {
   };
   const readiness = async (id: number, signal: AbortSignal) => {
     state.phase = 'checking'; state.error = null; publish();
-    const client = await host.connect(); current(id, signal);
+    const client = await connect(); current(id, signal);
     const models = await client.models.status(); current(id, signal);
     if (!models.ollama.installed) throw { code: 'ollama_missing' };
     if (!models.ollama.running) throw { code: 'ollama_unavailable' };
@@ -168,7 +176,7 @@ export function createLyra(host: LyraHost) {
           if (pendingWork || state.phase === 'permission') throw new Error('LYRA_BUSY');
           launch(async (id, signal) => {
             state.phase = 'installing'; state.error = null; publish();
-            const client = await host.connect(); current(id, signal);
+            const client = await connect(); current(id, signal);
             if (command.type === 'lyra-start-ollama') await client.ollama.start();
             else for await (const event of client.models.install('light')) {
               current(id, signal);

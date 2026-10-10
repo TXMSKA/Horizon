@@ -1,5 +1,6 @@
 import { IMPORT_BROWSERS, SYNC_ITEMS } from '../src/shared/api';
 import { validateLyraCommand } from '../src/shared/lyra';
+import { validateServicesCommand } from '../src/shared/services';
 import { validateTranslateCommand } from '../src/shared/translate';
 import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
 import { isWebURL } from './browsing';
@@ -57,6 +58,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
   }
   if (typeof type === 'string' && type.startsWith('translate-')) return validateTranslateCommand(value);
   if (typeof type === 'string' && type.startsWith('lyra-')) return validateLyraCommand(value);
+  if (typeof type === 'string' && type.startsWith('service-')) return validateServicesCommand(value);
   if (typeof type === 'string' && (type.startsWith('vault-') || type === 'set-vault-timeout')) {
     let fields: string[] = [], valid = false;
     switch (type) {
