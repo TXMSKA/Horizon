@@ -1345,8 +1345,8 @@ test('settings fixes keep the approved hints and history failure in both languag
   const expected = {
     sitesOwnSettingsNone: ['None yet', 'Ninguno todavía'],
     blockingOffSettings: ['Off for every site in Settings', 'Desactivado para todos los sitios en Configuración'],
-    defaultBrowserDevelopment: ['Horizon is not your default browser. This works in the installed app.', 'Horizon no es tu navegador predeterminado. Funciona en la aplicación instalada.'],
-    CLEAR_HISTORY_FAILED: ['Browsing history could not be cleared. Try again.', 'No se pudo borrar el historial de navegación. Probá de nuevo.'],
+    defaultBrowserDevelopment: ['Horizon is not your default browser. This works in the installed app.', 'Horizon no es el navegador predeterminado. Funciona en la aplicación instalada.'],
+    CLEAR_HISTORY_FAILED: ['Browsing history could not be cleared. Try again.', 'No se pudo borrar el historial de navegación. Volver a intentarlo.'],
   };
   for (const [key, [en, es]] of Object.entries(expected)) assert.deepEqual(copy[key], { en, es });
 });
@@ -1497,14 +1497,14 @@ test('settings sites count each host once and preserve permissions from every or
   }
 });
 
-test('dark page copy includes the approved English and Rioplatense Spanish labels, hints and announcements', () => {
+test('dark page copy includes the approved English and neutral Spanish labels, hints and announcements', () => {
   const { copy, text } = interfaceModule('src/copy.ts');
   const expected = {
     darkPages: ['Dark pages', 'Páginas oscuras'], off: ['Off', 'No'], on: ['On', 'Sí'],
     darkStrength: ['Strength', 'Intensidad'], soft: ['Soft', 'Suave'], standard: ['Standard', 'Normal'], deep: ['Deep', 'Fuerte'],
     darkTone: ['Tone', 'Tono'], neutral: ['Neutral', 'Neutro'], warm: ['Warm', 'Cálido'],
     darkModeOnSite: ['Dark mode on this site', 'Modo oscuro en este sitio'],
-    darkPagesOff: ['Dark pages are off. Turn them on in Settings, Appearance.', 'Las páginas oscuras están apagadas. Activalas en Configuración, Apariencia.'],
+    darkPagesOff: ['Dark pages are off. Turn them on in Settings, Appearance.', 'Las páginas oscuras están apagadas. Se activan en Configuración, Apariencia.'],
     darkPagesSystemLight: ['Dark pages follow the system, which is light now.', 'Las páginas oscuras siguen al sistema, que ahora está en claro.'],
     darkModeEnabled: ['Dark mode on for {host}', 'Modo oscuro activado en {host}'],
     darkModeDisabled: ['Dark mode off for {host}', 'Modo oscuro desactivado en {host}'],
@@ -5466,7 +5466,7 @@ test('About shows one polite update line that stays empty while idle and restart
   }
   assert.equal(line(render('es', { status: 'downloading', percent: 7 })).props.children, 'Descargando la actualización (7%)');
   let restarts = 0; const ready = render('es', { status: 'ready' }, () => restarts++), buttons = notebookNodes(ready, node => node.type === 'button');
-  assert.equal(buttons.length, 2); assert.equal(buttons[0].props.children, 'Reiniciar'); assert.equal(notebookNodes(ready, node => node.type === 'span')[0].props.children, 'Reiniciá Horizon para terminar de actualizar');
+  assert.equal(buttons.length, 2); assert.equal(buttons[0].props.children, 'Reiniciar'); assert.equal(notebookNodes(ready, node => node.type === 'span')[0].props.children, 'Reiniciar Horizon para terminar de actualizar');
   buttons[0].props.onClick(); assert.equal(restarts, 1);
 });
 
