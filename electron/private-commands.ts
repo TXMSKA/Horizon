@@ -8,6 +8,7 @@ export function assertPrivateCommand(command: BrowserCommand): void {
   if (command.type.includes('extension') || command.type === 'open-settings' && command.section === 'extensions') throw new Error('EXTENSIONS_UNAVAILABLE');
   if (command.type.startsWith('translate-')) throw new Error('TRANSLATE_PRIVATE');
   if (command.type.startsWith('lyra-')) throw new Error('LYRA_PRIVATE');
+  if (command.type.startsWith('service-')) throw new Error('SERVICES_PRIVATE');
   if (favoriteWrites.has(command.type) || command.type === 'restore' && command.kind === 'bookmarks') throw new Error('Private window favorites are read-only');
   if (command.type === 'import-browser-data' || command.type === 'choose-import-passwords-file' || command.type === 'import-passwords' || command.type === 'delete-import-passwords-file') throw new Error('Private window import is unavailable');
   if (desktopWrites.has(command.type) || command.type === 'restore' && command.kind === 'desktop'

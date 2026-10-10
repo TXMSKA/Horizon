@@ -40,5 +40,11 @@
     "letter": "SE",
     "short": "Settings",
     "title": "Settings: one page in a tab"
+  },
+  {
+    "id": "services",
+    "letter": "SV",
+    "short": "Services",
+    "title": "Installing Vault and Lyra when a feature needs them"
   }
 ]

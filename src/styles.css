@@ -877,3 +877,9 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .vault-suggestion > .vault-note { padding: var(--space-4) var(--space-10); }
 .vault-suggestion .vault-status > svg { color: var(--text-secondary); }
 .vault-badge > svg { width: var(--icon-control); height: var(--icon-control); }
+/* The install dialog of a shared service: one progress line, a link to the service's page and the safe action first. */
+.service-dialog progress { display: block; width: 100%; height: var(--space-4); appearance: none; border: 0; border-radius: var(--radius-pill); overflow: hidden; background: var(--surface-pressed); accent-color: var(--accent); }
+.service-dialog progress::-webkit-progress-bar { background: var(--surface-pressed); }
+.service-dialog progress::-webkit-progress-value { background: var(--accent); }
+.service-dialog progress:indeterminate { background: var(--accent); }
+.service-dialog .service-link { align-self: flex-start; padding-inline: 0; }

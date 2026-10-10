@@ -77,7 +77,8 @@ export function PasswordsPanel({ state, language, opener, run, describe, onDismi
   useEffect(() => { void run({ type: 'vault-refresh' }); }, [run]);
   useEffect(() => { (search.current ?? panel.current?.querySelector<HTMLButtonElement>('button:not(:disabled)'))?.focus(); }, [state.vault.unlocked]);
   useEffect(() => {
-    const outside = (event: PointerEvent) => { if (!panel.current?.contains(event.target as Node) && !opener.current?.contains(event.target as Node)) onDismiss(false); };
+    // The install offer is a dialog of its own, outside the panel; answering it must not close the Passwords panel it came from.
+    const outside = (event: PointerEvent) => { if (!panel.current?.contains(event.target as Node) && !opener.current?.contains(event.target as Node) && !(event.target as Element).closest?.('.service-dialog')) onDismiss(false); };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
   }, [run, onDismiss, opener]);

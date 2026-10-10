@@ -40,6 +40,7 @@ import { DESKTOP_TAB_DRAG, parseDesktopDrag } from './shared/desktop-drag';
 import { Settings, settingsError } from './Settings';
 import { FirstRunImport } from './FirstRunImport';
 import { ExtensionAction, ExtensionInstallDialog, ExtensionsPopover } from './Extensions';
+import { ServiceDialog } from './Services';
 const LyraPanel = lazy(() => import('./Lyra').then(module => ({ default: module.LyraPanel })));
 
 type Panel = LibraryPanel | 'passwords' | null;
@@ -168,9 +169,10 @@ export function App({ language: initialLanguage }: { language: Language }) {
   useLayoutEffect(() => { currentSiteScope.current = siteScope; }, [siteScope]);
   const shieldOpen = shieldScope !== null && shieldScope === siteScope;
   const permissionPrompt = state?.privateWindow ? null : state?.permissionPrompt;
-  const permissionOpen = Boolean(!extensionsOpen && !state?.extensionWarning && !groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && !translateOptions && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
+  const serviceDialog = state?.privateWindow ? null : state?.services.dialog ?? null;
+  const permissionOpen = Boolean(!extensionsOpen && !state?.extensionWarning && !serviceDialog && !groupEditor && !favoritesOpen && !desktopModalOpen && !aboutOpen && !firstRunOpen && !hubPage && !lyraOpen && !translateOptions && permissionPrompt?.permissions.length && !pageCapturePending && !menuOpen && !profileOpen && !desktopMode && !suggestionsOpen && !contextMenu && !tabMenu && !shieldOpen && !panel && !findOpen);
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
-  const popover = extensionsOpen || Boolean(state?.extensionWarning) || Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
+  const popover = extensionsOpen || Boolean(state?.extensionWarning) || Boolean(serviceDialog) || Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
   const translationMenuShowing = translateOptions && Boolean(translation) && !popover;
   const vaultSuggestion = !state?.privateWindow && !popover && !translationMenuShowing && !findOpen ? state?.vault.suggestion : null;
   const covered = popover || translationMenuShowing || Boolean(vaultSuggestion);
@@ -764,6 +766,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     {groupEditor && <GroupEditor key={`${state?.activeProfileId}:${groupEditor.id}`} group={groupEditor} language={language} palette={groupPalette} opener={groupOpener} run={run} onDismiss={closeGroupEditor} />}
     {extensionsOpen && state && !state.privateWindow && <ExtensionsPopover key={state.activeProfileId} state={state} language={language} opener={extensionsButtonRef} onDismiss={focus => { setExtensionsOpen(false); if (focus) extensionsButtonRef.current?.focus(); }} onManage={() => { setExtensionsOpen(false); openSettings('extensions'); }} run={run} />}
     {state?.extensionWarning && !state.privateWindow && <ExtensionInstallDialog key={state.extensionWarning.requestId} warning={state.extensionWarning} language={language} onAnswer={allow => run({ type: 'answer-extension-install', id: state.extensionWarning!.requestId, allow })} />}
+    {serviceDialog && <ServiceDialog key={serviceDialog.service} dialog={serviceDialog} language={language} />}
     {showCaptureHint && <ToolbarPopover opener={desktopButtonRef}><span className="capture-shortcut-tooltip" id="capture-shortcut" role="tooltip">{t('captureShortcut')}</span></ToolbarPopover>}
     {desktopMode === 'capture' && state && <CapturePreview state={state} language={language} shot={captureShot} header={headerRef} opener={desktopButtonRef} onClose={closeCapture} onSave={saveDesktopCapture} onVisible={captureVisible} onShot={setCaptureShot} />}
     {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} privateWindow={state.privateWindow} counts={active.blocked} ready={state.blockingReady} blockAds={state.blockAds} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}

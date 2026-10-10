@@ -260,3 +260,23 @@ test('translation commands accept only trusted target and choice values, with no
   assert.deepEqual(validateCommand({ type: 'translate-target', value: 'es' }), { type: 'translate-target', value: 'es' });
   assert.doesNotMatch(readFileSync('electron/translate.ts', 'utf8'), /fetch\(|11434|console\./);
 });
+
+test('a translation the person asks for offers the Lyra install, an automatic one stays silent', async t => {
+  const asked = [];
+  const missing = options => { const fixture = pageFixture({ lang: 'es', ...options }); t.after(fixture.close); fixture.host.unreachable = reason => asked.push(reason); return fixture; };
+  // Detection and the offer of a known language need no Lyra and ask nothing; so does an always-translate choice, which nobody asked for right now.
+  const automatic = missing({ lyraMissing: true }); automatic.translation.probe(); await new Promise(setImmediate); await new Promise(setImmediate);
+  const always = missing({ connectError: 'not_installed' }); always.host.always = () => 'en'; always.translation.probe();
+  assert.equal((await settled(always.translation, 'failed')).error, 'not_installed');
+  assert.deepEqual(asked, []);
+  // The person's own request reaches the offer, whichever command it was.
+  const started = missing({ lyraMissing: true }); started.translation.run({ type: 'translate-start' });
+  await settled(started.translation, 'failed'); assert.deepEqual(asked, ['not_installed']);
+  const opened = missing({ lyraMissing: true, lang: '', header: null }); opened.translation.run({ type: 'translate-open' });
+  await settled(opened.translation, 'failed'); assert.deepEqual(asked, ['not_installed', 'not_installed']);
+  // A Lyra that is installed but did not start is the other reason; any other failure offers nothing.
+  const stopped = missing({ connectError: 'invalid_install' }); stopped.translation.run({ type: 'translate-start' });
+  await settled(stopped.translation, 'failed'); assert.deepEqual(asked.slice(2), ['did_not_start']);
+  const model = missing({ connectError: 'model_missing' }); model.translation.run({ type: 'translate-start' });
+  await settled(model.translation, 'failed'); assert.equal(asked.length, 3);
+});

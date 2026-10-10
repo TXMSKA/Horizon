@@ -9,6 +9,9 @@ import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
 import { createLyra } from './lyra';
+import { createServices } from './services-install';
+import { serviceReason } from '../src/shared/services';
+import type { ServicesCommand } from '../src/shared/services';
 import { createTranslation } from './translate';
 import type { TranslateHost } from './translate';
 import type { TranslateCommand } from '../src/shared/translate';
@@ -191,12 +194,17 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     extensionWarning: extensionDecision?.warning ?? null,
     profiles: registry.profiles.map(({ id, name, color }) => ({ id, name, color, tabCount: runtimes.get(id)?.tabs.length ?? 0 })),
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast, installedThemes: settings.installedThemes,
-    vault: vault.state(), quickAccess: settings.quickAccess, showCapture: settings.showCapture,
+    vault: vault.state(), services: servicesState(), quickAccess: settings.quickAccess, showCapture: settings.showCapture,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
     onStart: settings.onStart, searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
     ...resolvedDownloadsFolder(settings, downloads), askWhereToSave: settings.askWhereToSave,
     blockAds: privateWindow || settings.blockAds, blockThirdPartyCookies: privateWindow || settings.blockThirdPartyCookies, clearingBrowsingData, defaultBrowser: defaultBrowser.status,
   });
+  // What the clients answered decides the entries; Vault's own state is the passive source for Vault.
+  const servicesState = () => {
+    const value = services.state(), seen = vault.status();
+    return { dialog: value.dialog, entries: { ...value.entries, vault: seen.available ? 'installed' as const : seen.reason ?? value.entries.vault } };
+  };
   const publish = () => {
     if (!current() || closing || window.isDestroyed() || window.webContents.isDestroyed()) return;
     const tab = current().active()?.state;
@@ -206,12 +214,33 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const vault = createVault({ window, directory: userData, privateWindow, cipher: safeStorage, clipboard,
     timeout: () => settings.vaultTimeout ?? 'close', saveTimeout: value => settings.setVaultTimeout(value), changed: publish,
     covered: () => area.hidden,
+    unavailable: reason => services.unavailable('vault', reason, () => { void vault.run({ type: 'vault-refresh' }).catch(() => undefined); }),
     revealPage: () => { area = { ...area, hidden: false }; layout(); },
     page: () => {
       const runtime = current(), tab = runtime?.active(), contents = runtime?.page(tab?.view);
       if (!tab?.view || !contents || tab.navigating || tab.state.loading || tab.state.error || tab.state.settings || tab.state.desktop || tab.state.fullscreen) return null;
       return { contents, generation: tab.pageLoad, id: tab.state.id, bounds: tab.view.getBounds(), zoom: contents.getZoomFactor(), pixels: screen.getDisplayMatching(window.getContentBounds()).scaleFactor };
     },
+  });
+  const connectLyra = async () => {
+    const { connect } = await import('horizon-lyra');
+    return connect({ app: { id: 'horizon', name: 'Horizon', kind: 'cosmic' }, tokens: sealedLyraTokens(resolve(userData, 'lyra.token'), safeStorage) });
+  };
+  // Looks for a running Lyra without starting it, so nothing automatic can wake the service.
+  const lyraRunning = async () => {
+    try { return await (await import('horizon-lyra')).isRunning(); } catch { return false; }
+  };
+  const lyraInstalled = async () => {
+    try { return await (await import('horizon-lyra')).isInstalled(); } catch { return false; }
+  };
+  // The offer to install a shared service (task 031): it follows the clients' answers only, and the page can only send validated commands.
+  const services = createServices({
+    privateWindow, alive: () => !closing && !window.isDestroyed() && !window.webContents.isDestroyed(), changed: publish,
+    reach: async service => {
+      if (service === 'vault') return vault.reach();
+      try { await connectLyra(); return 'ready'; } catch (error) { return serviceReason(error) ?? 'did_not_start'; }
+    },
+    open: url => shell.openExternal(url),
   });
   const blocker = createBlockingEngine(userData, publish);
   const defaultBrowser = defaultBrowserOverride ?? createDefaultBrowser({ platform: process.platform, isPackaged: app.isPackaged, execPath: process.execPath, openExternal: url => shell.openExternal(url), changed: publish });
@@ -255,6 +284,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (command.type.startsWith('vault-') || command.type === 'set-vault-timeout') return vault.run(command as VaultCommand);
     if (['navigate', 'activate-tab', 'close-tab', 'switch-profile', 'home', 'back', 'forward', 'reload', 'new-tab', 'open-settings', 'zoom', 'fullscreen', 'move-tab-to-window'].includes(command.type)) vault.invalidate();
     if (privateWindow) assertPrivateCommand(command);
+    if (command.type.startsWith('service-')) return services.run(command as ServicesCommand);
     if (command.type.startsWith('sync-')) {
       const sync = shared.sync!;
       switch (command.type) {
@@ -445,17 +475,6 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let storageError = false;
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
-    const connectLyra = async () => {
-      const { connect } = await import('horizon-lyra');
-      return connect({ app: { id: 'horizon', name: 'Horizon', kind: 'cosmic' }, tokens: sealedLyraTokens(resolve(userData, 'lyra.token'), safeStorage) });
-    };
-    // Looks for a running Lyra without starting it, so nothing automatic can wake the service.
-    const lyraRunning = async () => {
-      try { return await (await import('horizon-lyra')).isRunning(); } catch { return false; }
-    };
-    const lyraInstalled = async () => {
-      try { return await (await import('horizon-lyra')).isInstalled(); } catch { return false; }
-    };
     const lyra = createLyra({
       privateWindow, alive: () => !disposed && !closing && isCurrent(), language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { layout(); publish(); },
       page: id => {
@@ -475,6 +494,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         desktop.addLyra(project, title, answer, sources); desktopPanel.open = true; desktopPanel.page = { kind: 'project', project };
       },
       connect: connectLyra,
+      unreachable: reason => services.unavailable('lyra', reason, () => { void lyra.run({ type: 'lyra-retry' }).catch(() => undefined); }),
     });
     let clearingData = false;
     let captureGeneration = 0;
@@ -786,6 +806,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         for (const owner of shared.owners.values()) owner.publish();
       },
       connect: connectLyra, available: lyraRunning, installed: lyraInstalled,
+      unreachable: reason => services.unavailable('lyra', reason, () => { void Promise.resolve().then(() => tab.translation?.run({ type: 'translate-retry' })).catch(() => undefined); }),
     }), alive: tab => !disposed && !closing && tabs.includes(tab), update, publish, fail: (tab, description) => fail(tab, description), close: tab => closeTab(tab), count: () => tabs.length };
     const downloadBindings = new Map<string, DownloadBinding>();
     const downloadOwner: DownloadOwner = { disposed: () => disposed, store, items, reserved, bindings: downloadBindings, trusted: trustedDownloads, persist, publish };
@@ -1952,7 +1973,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const chromeContents = window.webContents;
   window.on('closed', () => {
     cancelExtensionDecision();
-    closing = true; invalidateMenu(); void vault.close().catch(() => undefined);
+    closing = true; invalidateMenu(); services.close(); void vault.close().catch(() => undefined);
     blocker.stop();
     nativeTheme.removeListener('updated', systemDarkPages);
     for (const runtime of runtimes.values()) runtime.dispose();
@@ -1988,7 +2009,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     })();
     shared.privateCleanup.add(cleanup); void cleanup.finally(() => shared.privateCleanup.delete(cleanup));
   };
-  const owner: BrowserOwner = { window, privateWindow, activeProfile: () => selectedProfile, publish, flush, stop: () => { closing = true; blocker.stop(); for (const runtime of runtimes.values()) runtime.stopForClear(); },
+  const owner: BrowserOwner = { window, privateWindow, activeProfile: () => selectedProfile, publish, flush, stop: () => { closing = true; services.close(); blocker.stop(); for (const runtime of runtimes.values()) runtime.stopForClear(); },
     releasePrivate: cleanupPrivate, closeVault: () => vault.close(),
     syncReady: () => [...runtimes.values()].every(runtime => !runtime.state().storageError && !runtime.desktop.state().desktopStorageError),
     syncApplied: () => { for (const runtime of runtimes.values()) { runtime.permissions.reconcile(); for (const tab of runtime.tabs) runtime.applyDarkCSS(tab); } },
