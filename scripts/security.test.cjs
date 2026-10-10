@@ -2,6 +2,7 @@ const { test } = require('node:test');
 require('./vault.test.cjs');
 require('./horizon-lyra.test.cjs');
 require('./services-install.test.cjs');
+require('./favorite-favicons-ui.test.cjs');
 const assert = require('node:assert/strict');
 const { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, mkdirSync, symlinkSync, rmSync } = require('node:fs');
 const { resolve, join, dirname } = require('node:path');
@@ -636,6 +637,7 @@ require('./tab-drag.test.cjs');
 require('./import.test.cjs')({ temporaryDirectory, authenticatedCipher });
 require('./import-settings.test.cjs')({ temporaryDirectory, authenticatedCipher, notebookBrowser });
 require('./import-passwords.test.cjs')({ temporaryDirectory, authenticatedCipher, notebookBrowser });
+require('./favorite-favicons.test.cjs')({ temporaryDirectory, authenticatedCipher, notebookBrowser, fireTimers });
 
 test('Desktop paste uses drop validation and saves a link or text in the chosen project folder', t => {
   const { readDesktopTransfer } = require('../dist/src/shared/desktop-drag.js');
@@ -2146,7 +2148,7 @@ test('browser lifecycle keeps pages isolated, scales bounds, records visits and 
   const electron = {
     nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }),
     app: Object.assign(new EventEmitter(), { commandLine: { appendSwitch() {}, removeSwitch() {} }, getLocale: () => 'en', getVersion: () => '0.1.0-test', getPath: () => directory }),
-    nativeImage: { createFromBuffer() { assert.fail('Privileged favicon decoding is forbidden'); } },
+    nativeImage: { createFromBuffer: () => ({ isEmpty: () => true }) },
     ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
     session: { fromPartition(name) { if (!sessions.has(name)) sessions.set(name, prepareMockSession(new EventEmitter())); return sessions.get(name); } },
     safeStorage: { isEncryptionAvailable: () => false },
@@ -3439,11 +3441,13 @@ test('sandboxed preload validates the startup theme and exposes only the frozen 
     assert.equal(exposed.initialContrast, contrast === 'high' ? 'high' : 'standard');
     assert.equal(exposed.themeMigration, true);
     assert.equal(Object.isFrozen(exposed), true);
-    assert.deepEqual(Object.keys(exposed).sort(), ['capture', 'command', 'getCaptureImage', 'getCaptures', 'getFavicon', 'getLanguage', 'getProject', 'getState', 'initialContrast', 'initialTheme', 'onContextMenu', 'onShortcut', 'onState', 'setContentArea', 'themeMigration', 'windowAction']);
+    assert.deepEqual(Object.keys(exposed).sort(), ['capture', 'command', 'getCaptureImage', 'getCaptures', 'getFavicon', 'getFavoriteFavicons', 'getLanguage', 'getProject', 'getState', 'initialContrast', 'initialTheme', 'onContextMenu', 'onShortcut', 'onState', 'setContentArea', 'themeMigration', 'windowAction']);
     await exposed.getFavicon('tab', 'a'.repeat(32));
     assert.deepEqual(invocations, [['horizon:favicon', 'tab', 'a'.repeat(32)]]);
     await exposed.getProject('notebook'); await exposed.getCaptureImage('notebook', 'item');
     assert.deepEqual(invocations.slice(1), [['horizon:project', 'notebook'], ['horizon:capture-image', 'notebook', 'item']]);
+    await exposed.getFavoriteFavicons(['https://example.com']);
+    assert.deepEqual(invocations.at(-1), ['horizon:favorite-favicons', ['https://example.com']]);
   }
 });
 
@@ -4570,7 +4574,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   app.quit = () => { app.quits = (app.quits || 0) + 1; };
   const electron = { app, nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: false }), safeStorage: cipher, WebContentsView: View,
     ClipboardItem: class { constructor(data) { this.data = data; } }, clipboard: { async write(items) { if (options.clipboardError) throw new Error('Synthetic clipboard refusal'); options.copiedItems = items; } },
-    nativeImage: { createFromBuffer: () => ({ crop(rect) { options.cropRect = rect; return { toPNG: () => capturePNG(rect.width, rect.height) }; } }) },
+    nativeImage: { createFromBuffer: bytes => options.faviconDecode ? options.faviconDecode(bytes) : ({ crop(rect) { options.cropRect = rect; return { toPNG: () => capturePNG(rect.width, rect.height) }; } }) },
     screen: { getDisplayMatching: () => ({ scaleFactor: 2 }) },
     ipcMain: { handle(name, handler) { handlers.set(name, handler); }, removeHandler(name) { handlers.delete(name); } },
     session: { fromPartition(partition) {
@@ -4587,7 +4591,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
-    name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './lyra' && options.lyraConnect ? { ...localRequire(name), createLyra: host => localRequire(name).createLyra({ ...host, connect: options.lyraConnect }) } : name === './vault' && options.vaultConnect ? { ...localRequire(name), createVault: host => localRequire(name).createVault({ ...host, connect: options.vaultConnect }) } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
+    name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './favicon-cache' ? timedModule('favicon-cache', timers) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './lyra' && options.lyraConnect ? { ...localRequire(name), createLyra: host => localRequire(name).createLyra({ ...host, connect: options.lyraConnect }) } : name === './vault' && options.vaultConnect ? { ...localRequire(name), createVault: host => localRequire(name).createVault({ ...host, connect: options.vaultConnect }) } : name === './sync-browser' && options.syncHostCapture ? { ...localRequire(name), browserSyncHost(...args) { const host = localRequire(name).browserSyncHost(...args); options.syncHostCapture(host); return host; } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: () => options.blocker ?? ({ ready: false, start: async () => {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
   electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialog: async (...args) => { options.captureSaveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.captureSaveChoice ?? { canceled: true }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };

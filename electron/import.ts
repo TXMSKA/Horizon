@@ -7,7 +7,7 @@ import { pageLanguage } from '../src/shared/translate';
 import { isWebURL } from './browsing';
 import { isDownloadsFolder } from './settings';
 import { SITE_SETTINGS_LIMIT, siteHost, validHost, validOrigin } from './site-settings';
-import type { HistoryRow, MarkRow, PermissionRow, WorkerReply, WorkerRequest } from './import-worker';
+import type { FaviconRow, HistoryRow, MarkRow, PermissionRow, WorkerReply, WorkerRequest } from './import-worker';
 
 export interface ImportedLink { kind: 'link'; url: string; title: string; createdAt: number }
 export interface ImportedFolder { kind: 'folder'; name: string; createdAt: number; children: ImportedItem[] }
@@ -23,7 +23,7 @@ export interface ImportedSettings {
   darkPages?: true; clearHistoryOnClose?: true; clearCacheOnClose?: true;
   sitePermissions: ImportedPermission[]; translationAlways: ImportedTranslation[]; translationNever: string[];
 }
-export interface ImportedData { favorites: ImportedFavorites | null; history: ImportedHistory | null; searchEngine: SearchEngine | null; settings: ImportedSettings | null }
+export interface ImportedData { favorites: ImportedFavorites | null; history: ImportedHistory | null; searchEngine: SearchEngine | null; settings: ImportedSettings | null; favicons?: FaviconRow[] }
 export interface ImportEnvironment { local: string | undefined; roaming: string | undefined }
 export interface ImportSelection { browser: ImportBrowser; profile: string; favorites: boolean; history: boolean; searchEngine: boolean; settings: boolean }
 export interface ImportLabels { mobile: string; menu: string }
@@ -466,6 +466,22 @@ async function readDatabase(source: string, scratch: string, request: Omit<Worke
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
+async function importedFavicons(profile: string, firefox: boolean, favorites: ImportedFavorites, scratch: string): Promise<FaviconRow[]> {
+  const origins = new Set<string>();
+  const walk = (items: ImportedItem[]): void => {
+    for (const item of items) {
+      if (origins.size >= 2000) return;
+      if (item.kind === 'folder') walk(item.children); else origins.add(new URL(item.url).origin);
+    }
+  };
+  walk([...favorites.bar, ...favorites.other]);
+  const source = join(profile, firefox ? 'favicons.sqlite' : 'Favicons');
+  if (!origins.size || !realFile(source)) return [];
+  try {
+    return (await readDatabase(source, scratch, { kind: firefox ? 'firefox' : 'chromium', bookmarks: false, history: false, permissions: false, scan: HISTORY_SCAN_LIMIT, nodes: 0, faviconOrigins: [...origins] }, ['-wal'])).favicons;
+  } catch { return []; } // Optional local icons never prevent the favorites themselves from being imported.
+}
+
 export async function readImport(environment: ImportEnvironment, selection: ImportSelection, labels: ImportLabels, scratch: string, progress: (current: number, total: number) => void, now = Date.now()): Promise<ImportedData> {
   const { definition, root, path, profile } = await profileFolder(environment, selection, scratch);
   const firefox = definition.layout === 'firefox';
@@ -489,6 +505,7 @@ export async function readImport(environment: ImportEnvironment, selection: Impo
       data.history = importedHistory((await readDatabase(join(path, 'History'), scratch, { kind: 'chromium', bookmarks: false, history: true, permissions: false, scan: HISTORY_SCAN_LIMIT, nodes: 0 }, [])).history, now);
     }
   }
+  if (data.favorites) data.favicons = await importedFavicons(path, firefox, data.favorites, scratch);
   if (wantsSettings) { progress(++step, total); data.settings = await readSourceSettings(definition, path, root, scratch); }
   if (engine) { progress(++step, total); data.searchEngine = engine; }
   return data;

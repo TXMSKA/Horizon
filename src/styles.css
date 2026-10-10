@@ -550,6 +550,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .favorite-bar-item[aria-expanded=true] { background: var(--surface-pressed); }
 .favorite-label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: start; }
 .favorite-badge { display: grid; place-items: center; flex: none; width: var(--size-16); height: var(--size-16); border-radius: var(--radius-badge); background: var(--profile-color); color: var(--on-accent); font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--size-16); }
+.favorite-favicon { display: block; object-fit: contain; background: var(--surface-transparent); }
 .favorites-spacer { flex: 1; min-width: 0; height: var(--size-28); }
 .favorite-overflow { width: var(--size-28); padding: 0; justify-content: center; }
 .favorite-other { max-width: min(var(--width-favorite-item), 50%); }
