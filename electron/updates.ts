@@ -14,6 +14,7 @@ export interface UpdatesOptions {
   load: () => Promise<AppUpdater>;
   firstCheckDelay?: number;
   checkInterval?: number;
+  automaticEnabled?: boolean;
 }
 export type Updates = ReturnType<typeof createUpdates>;
 
@@ -31,6 +32,8 @@ const supported = (options: UpdatesOptions) => options.packaged && (options.plat
 export function createUpdates(options: UpdatesOptions) {
   let state: UpdateState = { status: supported(options) ? 'idle' : 'unavailable' };
   let updater: AppUpdater | undefined, checking = false, started = false;
+  let automaticEnabled = options.automaticEnabled ?? true;
+  let firstCheck: ReturnType<typeof setTimeout> | undefined, interval: ReturnType<typeof setInterval> | undefined;
   const listeners = new Set<() => void>();
   const set = (next: UpdateState) => { state = next; for (const listener of listeners) listener(); };
   const prepare = async () => {
@@ -47,18 +50,26 @@ export function createUpdates(options: UpdatesOptions) {
     autoUpdater.on('error', () => set({ status: 'error' }));
     return autoUpdater;
   };
-  const check = async () => {
+  const check = async (automatic = false) => {
+    if (automatic && (!automaticEnabled || !started)) return;
     if (checking || state.status === 'unavailable' || state.status === 'downloading' || state.status === 'ready') return;
     checking = true;
     try {
       updater ??= await prepare();
+      if (automatic && (!automaticEnabled || !started)) return;
       set({ status: 'checking' });
-      // Builds are unsigned: electron-updater's NsisUpdater.verifySignature returns null when app-update.yml carries no publisherName, so the update installs without a signature check.
+      // Signed builds carry publisherName in app-update.yml; unsigned builds omit it so their updates remain reachable.
       if (await updater.checkForUpdates() === null) set({ status: 'unavailable' });
     } catch (error) {
       console.error('Update check failed', error);
       set({ status: 'error' });
     } finally { checking = false; }
+  };
+  const cancelAutomatic = () => { clearTimeout(firstCheck); clearInterval(interval); firstCheck = undefined; interval = undefined; };
+  const scheduleAutomatic = () => {
+    if (!started || !automaticEnabled || state.status === 'unavailable') return;
+    firstCheck = setTimeout(() => { firstCheck = undefined; void check(true); }, options.firstCheckDelay ?? FIRST_CHECK_DELAY); firstCheck.unref();
+    interval = setInterval(() => { void check(true); }, options.checkInterval ?? CHECK_INTERVAL); interval.unref();
   };
   return {
     get state() { return state; },
@@ -66,10 +77,14 @@ export function createUpdates(options: UpdatesOptions) {
     start() {
       if (started || state.status === 'unavailable') return;
       started = true;
-      setTimeout(() => { void check(); }, options.firstCheckDelay ?? FIRST_CHECK_DELAY).unref();
-      setInterval(() => { void check(); }, options.checkInterval ?? CHECK_INTERVAL).unref();
+      scheduleAutomatic();
     },
-    check,
+    setAutomatic(enabled: boolean) {
+      if (automaticEnabled === enabled) return;
+      automaticEnabled = enabled; cancelAutomatic(); scheduleAutomatic();
+    },
+    stop() { started = false; cancelAutomatic(); },
+    check: () => check(),
     restart() {
       if (state.status !== 'ready' || !updater) throw new Error('No update is ready');
       // Silent and forced relaunch: the installer runs without its wizard and Horizon opens again when it finishes.

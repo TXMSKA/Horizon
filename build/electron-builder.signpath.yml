@@ -1,0 +1,10 @@
+extends: electron-builder.yml
+nsis:
+  # Match the GitHub-safe metadata name when uploading directly with gh.
+  artifactName: Horizon-Setup-${version}.${ext}
+win:
+  # electron-builder 26 moved win.publisherName into signtoolOptions. This writes
+  # publisherName into app-update.yml so electron-updater verifies signed updates.
+  # Unsigned builds must omit it, or their unsigned installers would be refused.
+  signtoolOptions:
+    publisherName: "SignPath Foundation"

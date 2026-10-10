@@ -108,7 +108,7 @@ function SettingsSegmented<T extends string>({ id, value, choices, disabled, onC
 }
 
 function SettingsToggle({ title, hint, value, command, language }: {
-  title: CopyKey; hint?: string; value: boolean; command: 'set-ask-where-to-save' | 'set-block-ads' | 'set-block-third-party-cookies' | 'set-clear-history-on-close' | 'set-clear-cache-on-close' | 'contrast' | 'set-show-capture'; language: Language;
+  title: CopyKey; hint?: string; value: boolean; command: 'set-ask-where-to-save' | 'set-block-ads' | 'set-block-third-party-cookies' | 'set-clear-history-on-close' | 'set-clear-cache-on-close' | 'contrast' | 'set-show-capture' | 'set-check-updates-automatically'; language: Language;
 }) {
   return <SettingRow title={title} hint={hint} language={language}>{(id, apply, pending) => <Switch checked={value} labelledBy={`${id}-title`} describedBy={hint ? `${id}-hint` : undefined} disabled={pending} onChange={value => {
     void apply(command === 'contrast' ? { type: command, value: value ? 'high' : 'standard' } : { type: command, value }, text('settingSaved', language).replace('{setting}', text(title, language)).replace('{value}', text(value ? 'on' : 'off', language)));
@@ -163,6 +163,7 @@ function GeneralSettings({ state, language }: { state: BrowserState; language: L
       <button className="settings-button" type="button" disabled={pending} onClick={() => { void apply({ type: 'choose-downloads-folder' }, ''); }}><Folder aria-hidden="true" />{t('changeFolder')}</button>
     </>}</SettingRow>
     <SettingsToggle title="askWhereToSave" value={state.askWhereToSave} command="set-ask-where-to-save" language={language} />
+    <SettingsToggle title="checkUpdatesAutomatically" hint={t('checkUpdatesAutomaticallyHint')} value={state.checkUpdatesAutomatically} command="set-check-updates-automatically" language={language} />
     <SettingRow title="language" hint={t('languageHint')} language={language}>{(id, apply, pending) => <SettingsDropdown id={id} label="language" value={state.languageSetting} choices={languageChoices} disabled={pending} language={language} onChange={value => { void apply({ type: 'set-language', value }, t('settingSaved').replace('{setting}', t('language')).replace('{value}', languageChoices.find(choice => choice.value === value)!.label)); }} />}</SettingRow>
     {!state.privateWindow && <ImportSettings state={state} language={language} />}
   </div>;

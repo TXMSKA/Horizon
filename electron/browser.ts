@@ -141,7 +141,7 @@ export function restoredWindows(userData: string, registry: ProfileRegistry) {
   }
   return [...windows].map(([id, profileId]) => ({ id, profileId }));
 }
-export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; empty?: boolean; updates?: Pick<Updates, 'state' | 'subscribe' | 'restart'>; extensionURLs?: string[]; moveWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow, adopt: (destinationId: string) => void, point?: { x: number; y: number }) => Promise<void>; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void; extensionWindow?: (profileId: string, details: chrome.windows.CreateData, origin: BrowserWindow) => Promise<BrowserWindow> }
+export interface BrowserOptions { id?: string; profileId?: string; privateWindow?: boolean; fresh?: boolean; empty?: boolean; updates?: Pick<Updates, 'state' | 'subscribe' | 'restart' | 'check' | 'setAutomatic'>; extensionURLs?: string[]; moveWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow, adopt: (destinationId: string) => void, point?: { x: number; y: number }) => Promise<void>; openWindow?: (profileId: string, privateWindow: boolean, origin: BrowserWindow) => void; extensionWindow?: (profileId: string, details: chrome.windows.CreateData, origin: BrowserWindow) => Promise<BrowserWindow> }
 
 // Development builds can point the importers at synthetic browser folders; shipped builds always read the user's own.
 const importEnvironment = () => ({ local: app.isPackaged ? process.env.LOCALAPPDATA : process.env.HORIZON_IMPORT_LOCALAPPDATA ?? process.env.LOCALAPPDATA, roaming: app.isPackaged ? process.env.APPDATA : process.env.HORIZON_IMPORT_APPDATA ?? process.env.APPDATA });
@@ -197,7 +197,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     storageError: registryError || current().state().storageError, theme: settings.theme, contrast: settings.contrast, installedThemes: settings.installedThemes,
     vault: vault.state(), services: servicesState(), quickAccess: settings.quickAccess, showCapture: settings.showCapture,
     darkPages: { mode: settings.darkPages, strength: settings.darkStrength, tone: settings.darkTone, active: darkActive },
-    onStart: settings.onStart, searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
+    onStart: settings.onStart, checkUpdatesAutomatically: settings.checkUpdatesAutomatically, searchEngine: settings.searchEngine, languageSetting: settings.language, language: resolveLanguage(settings.language, app.getLocale()),
     ...resolvedDownloadsFolder(settings, downloads), askWhereToSave: settings.askWhereToSave,
     blockAds: privateWindow || settings.blockAds, blockThirdPartyCookies: privateWindow || settings.blockThirdPartyCookies, clearingBrowsingData, defaultBrowser: defaultBrowser.status,
   });
@@ -243,7 +243,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     },
     open: url => shell.openExternal(url),
   });
-  const blocker = createBlockingEngine(userData, publish);
+  // The app-wide privacy choice controls list traffic for every profile, including private windows.
+  const blocker = createBlockingEngine(userData, publish, { enabled: settings.blockAds });
   const defaultBrowser = defaultBrowserOverride ?? createDefaultBrowser({ platform: process.platform, isPackaged: app.isPackaged, execPath: process.execPath, openExternal: url => shell.openExternal(url), changed: publish });
   const refreshDefaultBrowser = () => { void defaultBrowser.refresh().then(publish); if (!privateWindow) shared.sync?.focus(); };
   window.on('focus', refreshDefaultBrowser);
@@ -359,6 +360,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       case 'pin-app': case 'unpin-app': settings.setAppPinned(command.id, command.type === 'pin-app'); publish(); return;
       case 'register-default-browser': return defaultBrowser.register().then(publish);
       case 'restart-to-update': if (!options.updates) throw new Error('Updates are unavailable'); options.updates.restart(); return;
+      case 'check-updates': if (!options.updates) throw new Error('Updates are unavailable'); return options.updates.check();
+      case 'set-check-updates-automatically': settings.setCheckUpdatesAutomatically(command.value); options.updates?.setAutomatic(command.value); publish(); return;
       case 'set-search-engine': settings.setSearchEngine(command.value); publish(); return;
       case 'set-on-start': settings.setOnStart(command.value); publish(); return;
       case 'set-language': settings.setLanguage(command.value); publish(); return;
@@ -2052,6 +2055,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     persistSessions: () => { for (const runtime of runtimes.values()) runtime.persistSession(); },
     settingsChanged: () => {
       shared.sync?.markDirty('settings');
+      blocker.setEnabled(settings.blockAds);
       updateDarkPages();
       for (const runtime of runtimes.values()) {
         if (blockingEnabled !== settings.blockAds) runtime.resetCounts();

@@ -107,6 +107,7 @@ export async function downloadFilterList(
 ): Promise<string> {
   const url = assertListURL(value);
   const signal = cancelled ? AbortSignal.any([cancelled, AbortSignal.timeout(LIST_TIMEOUT_MS)]) : AbortSignal.timeout(LIST_TIMEOUT_MS);
+  if (signal.aborted) throw new Error('FILTER_TIMEOUT');
   const response = await raceAbort(transport(url, signal), signal);
   if (signal.aborted || response.status !== 200 || !response.body || Number(response.headers.get('content-length')) > LIST_BYTES_LIMIT) {
     void response.body?.cancel().catch(() => undefined); throw new Error('FILTER_RESPONSE_REFUSED');
@@ -168,6 +169,7 @@ export function safeCosmeticCSS(styles: string): { css: string; rules: number } 
 }
 
 export interface BlockingEngineOptions {
+  enabled?: boolean;
   download?: (url: string, signal: AbortSignal) => Promise<string>;
   now?: () => number;
 }
@@ -178,21 +180,25 @@ export function createBlockingEngine(userData: string, onReady: () => void = () 
   const now = options.now ?? Date.now;
   let current: { ads: FiltersEngine; full: FiltersEngine; updatedAt: number } | undefined;
   let stopped = false;
+  let enabled = options.enabled ?? true;
   let refreshPromise: Promise<boolean> | undefined;
   let controller: AbortController | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let retryIndex = 0;
   let started = false;
+  let initialized = false;
   const refresh = (): Promise<boolean> => {
-    if (stopped) return Promise.resolve(false);
+    if (stopped || !enabled) return Promise.resolve(false);
     if (refreshPromise) return refreshPromise;
     clearTimeout(retryTimer); retryTimer = undefined;
-    controller = new AbortController();
-    refreshPromise = (async () => {
+    const request = new AbortController();
+    controller = request;
+    const active = () => enabled && !stopped && !request.signal.aborted;
+    const pending = (async () => {
       try {
-        const pairs = await Promise.all(LIST_URLS.map(async url => [url, await download(url, controller!.signal)] as const));
-        if (stopped) return false;
+        const pairs = await Promise.all(LIST_URLS.map(async url => [url, await download(url, request.signal)] as const));
+        if (!active()) return false;
         const lists = new Map(pairs);
         const ads = FiltersEngine.parse(adsLists.map(url => lists.get(url)!).join('\n'));
         const full = FiltersEngine.parse(adsAndTrackingLists.map(url => lists.get(url)!).join('\n'));
@@ -203,25 +209,46 @@ export function createBlockingEngine(userData: string, onReady: () => void = () 
         const updatedAt = now();
         const bytes = encodeCache(ads, full, updatedAt);
         await mkdir(dirname(cachePath), { recursive: true, mode: 0o700 });
+        if (!active()) return false;
         const temporary = `${cachePath}.${randomUUID()}.tmp`;
-        try { await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 }); await rename(temporary, cachePath); }
+        try {
+          await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
+          if (!active()) return false;
+          await rename(temporary, cachePath);
+        }
         finally { await unlink(temporary).catch(() => undefined); }
-        if (stopped) return false;
+        if (!active()) return false;
         current = { ads, full, updatedAt };
         retryIndex = 0;
         onReady();
         return true;
       } catch {
-        controller?.abort();
-        if (!stopped && !current && retryIndex < 3) {
+        const retry = active() && !current && retryIndex < 3;
+        request.abort();
+        if (retry) {
           retryTimer = setTimeout(() => { retryTimer = undefined; void refresh(); }, [1, 5, 15][retryIndex++]! * 60 * 1000);
           retryTimer.unref();
         }
         return false;
       }
-      finally { refreshPromise = undefined; controller = undefined; }
+      finally {
+        // An aborted request may settle after blocking has already been enabled again.
+        if (controller === request) { refreshPromise = undefined; controller = undefined; }
+      }
     })();
+    refreshPromise = pending;
     return refreshPromise;
+  };
+  const schedule = () => {
+    if (!initialized || stopped || !enabled || timer) return;
+    if (!current || now() - current.updatedAt >= CACHE_AGE_MS) void refresh();
+    timer = setInterval(() => { if (!current || now() - current.updatedAt >= CACHE_AGE_MS) void refresh(); }, 60 * 60 * 1000);
+    timer.unref();
+  };
+  const cancelDownloads = () => {
+    controller?.abort(); controller = undefined; refreshPromise = undefined;
+    clearInterval(timer); timer = undefined;
+    clearTimeout(retryTimer); retryTimer = undefined;
   };
   return {
     get ready() { return current !== undefined; },
@@ -235,12 +262,17 @@ export function createBlockingEngine(userData: string, onReady: () => void = () 
         }
       } catch { /* A missing or corrupt cache leaves pages unblocked until a new engine is built. */ }
       if (stopped) return;
-      if (!current || now() - current.updatedAt >= CACHE_AGE_MS) void refresh();
-      timer = setInterval(() => { if (!stopped && (!current || now() - current.updatedAt >= CACHE_AGE_MS)) void refresh(); }, 60 * 60 * 1000);
-      timer.unref();
+      initialized = true;
+      schedule();
+    },
+    setEnabled(value: boolean): void {
+      if (stopped || enabled === value) return;
+      enabled = value;
+      if (!enabled) cancelDownloads();
+      else { retryIndex = 0; schedule(); }
     },
     refresh,
-    stop(): void { stopped = true; controller?.abort(); clearInterval(timer); clearTimeout(retryTimer); },
+    stop(): void { stopped = true; cancelDownloads(); },
     match(url: string, resourceType: ElectronRequestType, sourceURL: string): BlockMatch | undefined {
       if (!current || !/^(?:https?|wss?):\/\//i.test(url) || !/^https?:\/\//i.test(sourceURL)) return undefined;
       const request = Request.fromRawDetails({ url, type: resourceType, sourceUrl: sourceURL });

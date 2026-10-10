@@ -8,8 +8,8 @@ Horizon keeps each profile's history, favorites, downloads list, site icons and 
 
 Horizon connects to other systems only for these reasons:
 
-- **Update checks.** Horizon reads the releases of TXMSKA/Horizon on GitHub to find a newer version. The request carries nothing but what any download from GitHub carries.
-- **Ad and tracker blocking.** Horizon downloads its filter lists from raw.githubusercontent.com.
+- **Update checks.** Horizon reads the releases of TXMSKA/Horizon on GitHub to find a newer version. The request carries nothing but what any download from GitHub carries. Automatic checks can be turned off in Settings, General; About Horizon then checks only when asked.
+- **Ad and tracker blocking.** Horizon downloads its filter lists from raw.githubusercontent.com. Turning blocking off in Settings, Privacy stops those downloads.
 - **Extensions.** Horizon reaches the Chrome Web Store only when the person opens it, or installs or updates an extension. Google then receives the extension's identifier and the computer's IP address; what an installed extension does is governed by its own developer's policy.
 - **Sync.** When the person sets it up, Horizon writes encrypted copies of the chosen items only to the folder the person picks, and that folder's own service, such as OneDrive or MEGA, carries them. That service cannot read them. Sync is off until it is set up.
 - **Lyra and translation.** The assistant and page translation run on this computer through the local Lyra service; nothing is sent elsewhere for them.

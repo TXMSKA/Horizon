@@ -20,6 +20,7 @@ win:
   signAndEditExecutable: true
   signExecutable: false
 nsis:
+  license: build/privacy.txt
   oneClick: false
   perMachine: false
   allowElevation: true
