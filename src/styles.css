@@ -488,19 +488,21 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .lyra-content { display: flex; justify-content: center; min-height: 0; overflow: hidden; background: var(--surface-raised); }
 .lyra-tab-view { height: 100%; }
 .lyra-tab-view::before { display: none; }
-.hub-popup { position: relative; width: var(--width-hub); height: var(--height-hub); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow: hidden; border-radius: var(--radius-sheet); background: var(--surface-page); color: var(--text-title); outline: none; }
+.hub-popup { position: relative; width: var(--width-hub); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow: hidden; border-radius: var(--radius-sheet); background: var(--surface-page); color: var(--text-title); outline: none; }
 .hub-popup::after { content: ''; position: absolute; inset: 0; border: var(--border-width) solid var(--border-popover); border-radius: inherit; pointer-events: none; }
-.hub-app-page { background: var(--surface-raised); }
-.hub-ground { position: absolute; top: var(--hub-ground-top); left: 0; right: 0; height: calc(var(--height-hub) - var(--hub-ground-top)); background: var(--surface-ground); pointer-events: none; }
+.hub-app-page { height: var(--height-hub); background: var(--surface-raised); }
+.hub-ground { position: absolute; bottom: 0; left: 0; right: 0; height: var(--size-32); background: var(--surface-ground); pointer-events: none; }
 /* The content scrolls inside the popup, so the popup's rim stays put and no scrollbar narrows the theme grid. */
 .hub-content { position: relative; display: flex; flex-direction: column; gap: var(--space-16); height: 100%; overflow-y: auto; scrollbar-width: none; padding: var(--space-16); }
+.hub-popup:not(.hub-app-page) .hub-content { height: auto; max-height: var(--popup-available-height); padding: var(--space-24); padding-bottom: calc(var(--size-32) + var(--height-sun) + var(--space-16)); }
 .hub-dock { display: flex; flex: none; align-items: center; gap: var(--space-8); height: var(--height-hub-dock); padding: var(--space-8); border-radius: var(--radius-panel); background: var(--surface-sunken); }
 .hub-dock .icon-button { width: var(--size-40); height: var(--size-40); }
 .hub-dock .icon-button svg { width: var(--size-18); height: var(--size-18); }
 .hub-dock [aria-current=page] { background: var(--surface-pressed); color: var(--accent); }
 .hub-page { display: flex; flex-direction: column; gap: var(--space-12); }
 .hub-page > h2 { color: var(--text-title); font-size: var(--type-heading); font-weight: var(--weight-heading); line-height: var(--line-heading); }
-.hub-tiles { display: grid; grid-template-columns: repeat(3, var(--size-hub-tile)); column-gap: var(--gap-hub-columns); row-gap: var(--gap-hub-rows); }
+.hub-tiles { display: grid; grid-template-columns: repeat(3, var(--size-hub-tile)); justify-content: center; gap: var(--space-24); }
+.hub-tiles:has(> :only-child) { grid-template-columns: var(--size-hub-tile); }
 .hub-tile { display: flex; flex-direction: column; align-items: center; gap: var(--space-8); width: var(--size-hub-tile); padding: 0; border-radius: var(--radius-panel); font-size: var(--type-caption); line-height: var(--line-caption); color: var(--text-title); }
 .hub-tile-icon { display: grid; place-items: center; width: var(--size-hub-tile); height: var(--size-hub-tile); border: var(--border-width) solid var(--divider); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--accent); }
 .hub-tile-icon svg { width: var(--size-28); height: var(--size-28); }
@@ -508,7 +510,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .hub-tile:hover .hub-tile-icon { background: var(--surface-hover); }
 .hub-tile[aria-expanded=true] .hub-tile-icon, .hub-tile:active .hub-tile-icon { background: var(--surface-pressed); border-color: var(--border-popover); }
 .hub-tile > span:last-child { width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
-.hub-menu-anchor { z-index: calc(var(--layer-overlay) + 2); }
+.hub-menu-anchor { --toolbar-popup-inset: var(--space-24); z-index: calc(var(--layer-overlay) + 2); }
 .hub-tile-menu { position: static; margin: 0; width: var(--width-hub-tile-menu); max-height: var(--popup-available-height); }
 .hub-tile-menu > button:last-child { background: var(--surface-selected); }
 .hub-tile-menu > button:last-child > svg { color: var(--accent); }
