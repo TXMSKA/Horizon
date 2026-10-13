@@ -282,3 +282,66 @@ test('Lyra client rejects malformed completion status', async t => {
   });
   await assert.rejects((await connect({ app, tokens: memoryTokens(fresh), home: bounded.home })).models.status(), { code: 'response_too_large' });
 });
+
+test('Lyra client opens Models with the authenticated app route', async t => {
+  const { connect } = await library();
+  const requests = [];
+  const service = await fakeService(t, (request, response, payload) => {
+    requests.push({ method: request.method, url: request.url, auth: request.headers.authorization, type: request.headers['content-type'], language: request.headers['accept-language'], payload });
+    json(response, 202, { opened: true, extra: false });
+  });
+  const result = await (await connect({ app, tokens: memoryTokens(fresh), home: service.home, language: 'es' })).app.open('models');
+  assert.equal(result, undefined);
+  assert.deepEqual(requests, [{ method: 'POST', url: '/v1/app/open', auth: `Bearer ${fresh}`, type: 'application/json', language: 'es', payload: { section: 'models' } }]);
+});
+
+test('Lyra client retries app opening once after a 401', async t => {
+  const { connect } = await library();
+  const seen = { register: [], open: [] };
+  const service = await fakeService(t, (request, response, payload) => {
+    if (request.url === '/v1/apps/register') { seen.register.push(payload); return json(response, 200, { app: { id: 'horizon' }, token: fresh }); }
+    seen.open.push([request.headers.authorization, payload]);
+    if (request.headers.authorization !== `Bearer ${fresh}`) return json(response, 401, { error: { code: 'unauthorized', message: 'No' } });
+    json(response, 202, { opened: true });
+  });
+  const tokens = memoryTokens(stale), client = await connect({ app, tokens, home: service.home });
+  assert.equal(await client.app.open('models'), undefined);
+  assert.deepEqual(seen.register, [app]);
+  assert.deepEqual(seen.open, [[`Bearer ${stale}`, { section: 'models' }], [`Bearer ${fresh}`, { section: 'models' }]]);
+  assert.deepEqual(tokens.writes, [fresh]);
+  seen.register.length = 0; seen.open.length = 0;
+  const refused = await fakeService(t, (request, response) => {
+    if (request.url === '/v1/apps/register') { seen.register.push(1); return json(response, 200, { app: {}, token: fresh }); }
+    seen.open.push(1); json(response, 401, { error: { code: 'revoked', message: 'Revoked' } });
+  });
+  await assert.rejects(connect({ app, tokens: memoryTokens(), home: refused.home }).then(next => next.app.open('models')), { code: 'revoked', status: 401 });
+  assert.deepEqual([seen.register.length, seen.open.length], [2, 2]);
+});
+
+test('Lyra client reports app_missing when the desktop app is absent', async t => {
+  const { connect } = await library();
+  const missing = await fakeService(t, (request, response) => json(response, 409, { error: { code: 'app_missing', message: 'No app' } }));
+  await assert.rejects((await connect({ app, tokens: memoryTokens(fresh), home: missing.home })).app.open('models'), { code: 'app_missing', status: 409 });
+  const hits = [];
+  const forbidden = await fakeService(t, (request, response) => { hits.push(request.url); json(response, 403, { error: { code: 'forbidden', message: 'No' } }); });
+  await assert.rejects((await connect({ app, tokens: memoryTokens(fresh), home: forbidden.home })).app.open('models'), { code: 'forbidden', status: 403 });
+  assert.equal(hits.includes('/v1/models/install'), false);
+});
+
+test('Lyra client rejects invalid app opening requests and responses', async t => {
+  const { connect } = await library();
+  const hits = [];
+  let opened = true;
+  const service = await fakeService(t, (request, response) => {
+    hits.push(request.url);
+    if (!opened) return json(response, 202, { opened: false });
+    response.writeHead(202, { 'Content-Type': 'application/json' }); response.end('{');
+  });
+  const client = await connect({ app, tokens: memoryTokens(fresh), home: service.home });
+  await assert.rejects(client.app.open('status'), { code: 'invalid_request' });
+  assert.deepEqual(hits, []);
+  await assert.rejects(client.app.open('models'), { code: 'invalid_response' });
+  opened = false;
+  await assert.rejects(client.app.open('models'), { code: 'invalid_response' });
+  assert.deepEqual(hits, ['/v1/app/open', '/v1/app/open']);
+});

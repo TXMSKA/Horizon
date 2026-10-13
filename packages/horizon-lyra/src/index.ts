@@ -53,6 +53,7 @@ export interface Client {
     status(): Promise<ModelsStatus>;
     install(plan: string): AsyncIterable<InstallEvent>;
   };
+  app: { open(section: 'models'): Promise<void> };
   ollama: { start(): Promise<{ running: true; version: string }> };
 }
 
@@ -386,6 +387,13 @@ export async function connect(options: ConnectOptions): Promise<Client> {
         if (typeof plan !== 'string' || !plan || plan.length > 64) throw new LyraError('invalid_request');
         const response = await authed('/v1/models/install', { method: 'POST', body: { plan, confirm: true }, stream: true });
         yield* events(response, installEvent);
+      },
+    },
+    app: {
+      async open(section: string) {
+        if (section !== 'models') throw new LyraError('invalid_request');
+        const body = await readJson(await authed('/v1/app/open', { method: 'POST', body: { section }, timeout: 10000 }));
+        if (!isRecord(body) || body.opened !== true) throw invalid('app opening');
       },
     },
     ollama: {
