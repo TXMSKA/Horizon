@@ -45,6 +45,7 @@ export interface ModelsStatus {
   ready: boolean;
   ollama: { installed: boolean; running: boolean };
   modes: { fast: ModeStatus } & Record<string, ModeStatus>;
+  completion?: { model: string; ready: boolean };
 }
 export interface Client {
   chat(request: ChatRequest, options?: { signal?: AbortSignal }): AsyncIterable<ChatEvent>;
@@ -227,7 +228,11 @@ function modelsStatus(value: unknown): ModelsStatus {
     modes[name] = { ready: mode.ready };
   }
   if (!modes.fast) throw invalid('models status');
-  return { ready: value.ready, ollama: { installed, running }, modes: modes as ModelsStatus['modes'] };
+  const status: ModelsStatus = { ready: value.ready, ollama: { installed, running }, modes: modes as ModelsStatus['modes'] };
+  if (!Object.hasOwn(value, 'completion')) return status;
+  const completion = value.completion;
+  if (!isRecord(completion) || typeof completion.model !== 'string' || !completion.model || typeof completion.ready !== 'boolean') throw invalid('models status');
+  return { ...status, completion: { model: completion.model, ready: completion.ready } };
 }
 
 // ---------------------------------------------------------------- finding and starting the service

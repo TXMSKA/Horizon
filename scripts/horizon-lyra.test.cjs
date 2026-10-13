@@ -225,3 +225,60 @@ test('Lyra client rejects unknown event shapes and oversized or malformed JSON a
   const shapes = await fakeService(t, (request, response) => json(response, 200, { ready: true, ollama: { installed: true, running: true }, modes: { slow: { ready: true } } }));
   await assert.rejects((await connect({ app, tokens: memoryTokens(fresh), home: shapes.home })).models.status(), { code: 'invalid_response' });
 });
+
+test('Lyra client accepts four modes and preserves completion status', async t => {
+  const { connect } = await library();
+  for (const deepReady of [false, true]) {
+    for (const completionReady of [false, true]) {
+      const service = await fakeService(t, (request, response) => json(response, 200, {
+        ready: true, ollama: { installed: true, running: true, version: '0.9.0' },
+        modes: {
+          fast: { model: 'lyra-base', ready: true }, normal: { model: 'lyra-base', ready: true },
+          thinking: { model: 'lyra-thinking', ready: true }, deep: { model: 'lyra-deep', ready: deepReady },
+        },
+        completion: { model: 'qwen2.5-coder:1.5b-base', ready: completionReady, bytes: 1 },
+        installed: ['lyra-base', 'nomic-embed-text'], plans: { light: { fits: true } },
+      }));
+      const status = await (await connect({ app, tokens: memoryTokens(fresh), home: service.home })).models.status();
+      assert.deepEqual(status, {
+        ready: true, ollama: { installed: true, running: true },
+        modes: { fast: { ready: true }, normal: { ready: true }, thinking: { ready: true }, deep: { ready: deepReady } },
+        completion: { model: 'qwen2.5-coder:1.5b-base', ready: completionReady },
+      });
+    }
+  }
+});
+
+test('Lyra client accepts model status without completion', async t => {
+  const { connect } = await library();
+  const legacy = { ready: true, ollama: { installed: true, running: false }, modes: { fast: { ready: true }, deep: { ready: false } } };
+  const service = await fakeService(t, (request, response) => json(response, 200, legacy));
+  assert.deepEqual(await (await connect({ app, tokens: memoryTokens(fresh), home: service.home })).models.status(), legacy);
+  const future = await fakeService(t, (request, response) => json(response, 200, {
+    ready: false, ollama: { installed: true, running: true }, modes: { fast: { model: 'lyra-base', ready: true }, later: { model: 'lyra-later', ready: false } },
+  }));
+  assert.deepEqual(await (await connect({ app, tokens: memoryTokens(fresh), home: future.home })).models.status(), {
+    ready: false, ollama: { installed: true, running: true }, modes: { fast: { ready: true }, later: { ready: false } },
+  });
+});
+
+test('Lyra client rejects malformed completion status', async t => {
+  const { connect } = await library();
+  const base = { ready: true, ollama: { installed: true, running: true }, modes: { fast: { ready: true } } };
+  const cases = [
+    { ...base, completion: null }, { ...base, completion: [] }, { ...base, completion: { ready: true } },
+    { ...base, completion: { model: 5, ready: true } }, { ...base, completion: { model: '', ready: true } },
+    { ...base, completion: { model: 'qwen2.5-coder:1.5b-base' } }, { ...base, completion: { model: 'qwen2.5-coder:1.5b-base', ready: 'yes' } },
+    { ...base, modes: { fast: { ready: true }, deep: { ready: 'no' } } },
+    { ready: true, ollama: { installed: true, running: true }, modes: { slow: { ready: true } } },
+  ];
+  let index = 0;
+  const service = await fakeService(t, (request, response) => json(response, 200, cases[index++]));
+  const client = await connect({ app, tokens: memoryTokens(fresh), home: service.home });
+  for (const item of cases) await assert.rejects(client.models.status(), { code: 'invalid_response' }, JSON.stringify(item));
+  const bounded = await fakeService(t, (request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ ready: true, padding: 'x'.repeat(1024 * 1024 + 1), ollama: { installed: true, running: true }, modes: { fast: { ready: true } }, completion: { model: 'qwen2.5-coder:1.5b-base', ready: true } }));
+  });
+  await assert.rejects((await connect({ app, tokens: memoryTokens(fresh), home: bounded.home })).models.status(), { code: 'response_too_large' });
+});
