@@ -65,7 +65,10 @@ npm run verify:window
 Build checks text and graphic contrast across all four palettes. Security
 tests use temporary stores and mocked Electron sessions. `verify:window`
 launches Electron and captures both themes in `.runtime/screenshots/`;
-it needs an environment that permits Electron to run.
+it needs an environment that permits Electron to run. After the build,
+`./node_modules/.bin/electron.cmd scripts/verify-lyra-models.cjs` checks
+the Lyra model handoff with a synthetic Lyra service only. Its screenshots
+are written under `.runtime/`.
 
 Development data and verification artifacts stay in `.runtime/`. Download
 caches stay in `.npm-cache/`. The app has no application environment
