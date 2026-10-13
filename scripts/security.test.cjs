@@ -7026,7 +7026,7 @@ const { createLyra } = require('../dist/electron/lyra.js');
 const { readLyraPage, lyraContext, LYRA_CONTEXT_LIMIT, LYRA_PAGE_LIMIT } = require('../dist/electron/lyra-context.js');
 const { sealedLyraTokens } = require('../dist/electron/lyra-token.js');
 function lyraFixture(options = {}) {
-  const calls = [], reads = [], decisions = new Map(), pages = new Map();
+  const calls = [], reads = [], decisions = new Map(), pages = new Map(), opens = [], statusCalls = [], ollamaStarts = [];
   let alive = true;
   const host = {
     privateWindow: options.privateWindow ?? false, alive: () => alive, language: () => options.language ?? 'en', changed() {},
@@ -7036,12 +7036,17 @@ function lyraFixture(options = {}) {
     save: (...args) => { calls.push(['save', ...args]); },
     connect: async () => {
       calls.push(['connect']); if (options.connectError) throw { code: options.connectError };
-      return { models: { status: async () => ({ ollama: { installed: true, running: true }, modes: { fast: { ready: !options.missing } } }) },
-        async *chat(request, { signal }) {
-          calls.push(['chat', request]);
-          if (options.chat) { yield* options.chat(request, signal); return; }
-          yield { type: 'text', text: '<script>plain output</script>' }; yield { type: 'done' };
-        } };
+      return { models: { status: async () => {
+        statusCalls.push(1);
+        return { ollama: { installed: options.ollamaInstalled ?? true, running: options.ollamaRunning ?? true }, modes: { fast: { ready: !options.missing } } };
+      } },
+      app: { open: async section => { opens.push(section); if (options.openDelay) await options.openDelay; if (options.openError) throw options.openError; } },
+      ollama: { start: async () => { ollamaStarts.push(1); return { running: true, version: '0.0.0' }; } },
+      async *chat(request, { signal }) {
+        calls.push(['chat', request]);
+        if (options.chat) { yield* options.chat(request, signal); return; }
+        yield { type: 'text', text: '<script>plain output</script>' }; yield { type: 'done' };
+      } };
     },
   };
   const add = (id, url) => {
@@ -7057,7 +7062,7 @@ function lyraFixture(options = {}) {
   };
   const lyra = createLyra(host);
   const ask = (tabs = ['first'], task = tabs.length > 1 ? 'comparison' : 'summary') => lyra.run({ type: 'lyra-ask', task, question: 'Summarise or compare the sources.', tabs, project: null, item: null });
-  return { lyra, host, calls, reads, decisions, add, ask, pages, close: () => { alive = false; lyra.stop(); } };
+  return { lyra, host, calls, reads, decisions, add, ask, pages, opens, statusCalls, ollamaStarts, close: () => { alive = false; lyra.stop(); } };
 }
 async function lyraSettled(lyra, phase = 'answer') {
   for (let attempt = 0; attempt < 100; attempt++) { await new Promise(resolve => setImmediate(resolve)); if (lyra.state().phase === phase) return lyra.state(); }
@@ -7105,12 +7110,12 @@ test('Lyra comparison authorizes every origin before any read and one-time grant
 
 test('Lyra refuses private windows at both command and page extraction boundaries', async t => {
   const fixture = lyraFixture({ privateWindow: true }); t.after(fixture.close); const page = fixture.add('first', 'https://private.example/'); fixture.decisions.set('https://private.example', 'allow');
-  for (const type of ['lyra-open', 'lyra-home', 'lyra-install', 'lyra-retry']) await assert.rejects(fixture.lyra.run({ type }), /LYRA_PRIVATE/);
+  for (const type of ['lyra-open', 'lyra-home', 'lyra-open-models', 'lyra-retry']) await assert.rejects(fixture.lyra.run({ type }), /LYRA_PRIVATE/);
   await assert.rejects(fixture.ask(), /LYRA_PRIVATE/);
   await assert.rejects(readLyraPage(page.contents, page.url, () => true, true), /LYRA_PRIVATE/);
   assert.equal(fixture.reads.length, 0); assert.equal(fixture.calls.length, 0);
   const browser = notebookBrowser(t, authenticatedCipher()), peer = browser.addWindow({ privateWindow: true });
-  for (const type of ['lyra-open', 'lyra-install', 'lyra-home']) assert.throws(() => peer.command({ type }), /LYRA_PRIVATE/);
+  for (const type of ['lyra-open', 'lyra-open-models', 'lyra-home']) assert.throws(() => peer.command({ type }), /LYRA_PRIVATE/);
 });
 
 test('Lyra context is capped in UTF-8, JSON delimited and contains no page text in instructions', async t => {
@@ -7215,6 +7220,92 @@ test('Lyra opens and reuses a trusted tab, survives session restore and refuses 
   assert.throws(() => privateBrowser.command({ type: 'lyra-tab' }), /LYRA_PRIVATE/);
   assert.throws(() => privateBrowser.command({ type: 'new-tab', input: 'horizon://lyra' }), /LYRA_PRIVATE/);
   assert.equal(privateBrowser.state().tabs.some(entry => entry.url === 'horizon://lyra'), false);
+});
+
+test('Lyra opens Models without installing or reading page content', async t => {
+  const options = { missing: true }, fixture = lyraFixture(options); t.after(fixture.close);
+  await fixture.lyra.run({ type: 'lyra-open-models' });
+  const missing = await lyraSettled(fixture.lyra, 'failed');
+  assert.equal(missing.error, 'model_missing'); assert.equal(missing.phase, 'failed');
+  assert.deepEqual(fixture.opens, ['models']); assert.equal(fixture.statusCalls.length, 1);
+  assert.equal(fixture.reads.length, 0); assert.equal(fixture.calls.some(call => call[0] === 'chat'), false);
+  assert.equal(options.missing, true);
+  options.missing = false; await fixture.lyra.run({ type: 'lyra-retry' }); await lyraSettled(fixture.lyra, 'home');
+  assert.deepEqual(fixture.opens, ['models']);
+});
+
+test('Lyra opening Models surfaces app_missing and suppresses stale results', async t => {
+  const options = { missing: true, openError: { code: 'app_missing', status: 409 } }, fixture = lyraFixture(options); t.after(fixture.close);
+  await fixture.lyra.run({ type: 'lyra-open-models' });
+  assert.equal((await lyraSettled(fixture.lyra, 'failed')).error, 'app_missing');
+  let settle; options.openError = undefined; options.missing = false;
+  const parked = async () => {
+    const opened = fixture.opens.length;
+    await fixture.lyra.run({ type: 'lyra-open-models' });
+    for (let attempt = 0; attempt < 20 && fixture.opens.length === opened; attempt++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fixture.opens.length, opened + 1);
+  };
+  options.openDelay = new Promise(resolve => { settle = resolve; });
+  await parked();
+  await assert.rejects(fixture.lyra.run({ type: 'lyra-open-models' }), /LYRA_BUSY/);
+  fixture.lyra.stop(); const frozen = fixture.lyra.state(); settle();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fixture.lyra.state(), frozen); assert.notEqual(frozen.phase, 'home');
+  options.openDelay = new Promise((_resolve, reject) => { settle = reject; });
+  await parked();
+  fixture.lyra.stop(); const rejected = fixture.lyra.state();
+  settle(Object.assign(new Error('late'), { code: 'app_missing', status: 409 }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fixture.lyra.state(), rejected); assert.notEqual(rejected.phase, 'home');
+});
+
+test('Lyra command schemas allow opening Models and reject model installation', () => {
+  const { assertPrivateCommand } = require('../dist/electron/private-commands.js');
+  const command = { type: 'lyra-open-models' };
+  assert.deepEqual(validateCommand(command), command);
+  assert.throws(() => validateCommand({ type: 'lyra-open-models', section: 'models' }), /LYRA_INVALID/);
+  assert.throws(() => validateCommand({ type: 'lyra-install' }), /LYRA_INVALID/);
+  assert.throws(() => assertPrivateCommand(command), /LYRA_PRIVATE/);
+});
+
+test('Lyra panel offers Open Lyra and the terminal fallback in both languages', () => {
+  const copy = interfaceModule('src/copy.ts'), icons = { ...notebookTestIcons, Columns2: 'Columns2', Send: 'Send' }, commands = [];
+  const blank = { open: true, phase: 'failed', task: 'question', question: '', answer: '', sources: [], permission: null, attachment: null, error: 'model_missing' };
+  const state = { lyra: blank, tabs: [], activeId: '', projectInUse: null, projects: [] };
+  const textOf = node => node == null || node === false ? '' : typeof node === 'string' || typeof node === 'number' ? String(node) : Array.isArray(node) ? node.map(textOf).join('') : textOf(node.props?.children);
+  for (const language of ['en', 'es']) {
+    const hooks = notebookTestHooks();
+    const module = interfaceModule('src/Lyra.tsx', {
+      react: hooks.react, 'lucide-react': icons, './copy': copy,
+      './Desktop': { CaptureImage: 'capture', CaptureProjectPicker: 'picker', DesktopDropdown: 'dropdown', desktopError: () => 'failed', itemCount: () => '' },
+      './SidePanelFaces': { SidePanelFaces: 'faces' },
+    }, { window: { horizon: { command: command => { commands.push(command); return Promise.resolve(true); } } } });
+    const render = lyra => hooks.render(() => module.LyraPanel({ state: { ...state, lyra }, language, onClose() {}, onDesktop() {} }));
+    let tree = render(blank); hooks.flush();
+    const primary = notebookNodes(tree, node => node.type === 'button' && node.props.className === 'desktop-action primary')[0];
+    assert.equal(textOf(primary), copy.text('openLyra', language));
+    primary.props.onClick();
+    assert.equal(commands.at(-1).type, 'lyra-open-models');
+    assert.ok(notebookNodes(tree, node => node.type === 'button' && textOf(node) === copy.text('retry', language)).length > 0);
+    tree = render({ ...blank, error: 'app_missing' });
+    assert.ok(textOf(tree).includes('lyra models'));
+    assert.equal(notebookNodes(tree, node => node.type === 'progress').length, 0);
+    assert.equal(textOf(tree).includes('Download and install') || textOf(tree).includes('Descargar e instalar'), false);
+    tree = render({ ...blank, phase: 'starting', error: null });
+    assert.equal(textOf(notebookNodes(tree, node => node.props.role === 'status')[0]), copy.text('lyraStartingOllama', language));
+    assert.equal(notebookNodes(tree, node => node.type === 'progress').length, 0);
+  }
+});
+
+test('Lyra starts Ollama without requesting model installation', async t => {
+  const options = { ollamaRunning: false }, fixture = lyraFixture(options); t.after(fixture.close);
+  await fixture.lyra.run({ type: 'lyra-open' });
+  assert.equal((await lyraSettled(fixture.lyra, 'failed')).error, 'ollama_unavailable');
+  options.ollamaRunning = true;
+  await fixture.lyra.run({ type: 'lyra-start-ollama' }); await lyraSettled(fixture.lyra, 'home');
+  assert.equal(fixture.ollamaStarts.length, 1); assert.deepEqual(fixture.opens, []);
+  assert.equal(fixture.calls.some(call => call[0] === 'chat'), false);
+  assert.ok(fixture.statusCalls.length >= 2);
 });
 
 test('Lyra command schemas reject extra fields, oversize requests and sparse tab lists', () => {

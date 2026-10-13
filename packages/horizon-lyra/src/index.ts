@@ -36,10 +36,6 @@ export type ChatEvent =
   | { type: 'text'; text: string }
   | { type: 'done' }
   | { type: 'error'; code: string };
-export type InstallEvent =
-  | { type: 'step'; name: string; status: string; completed: number; total: number }
-  | { type: 'done' }
-  | { type: 'error'; code: string };
 export interface ModeStatus { ready: boolean }
 export interface ModelsStatus {
   ready: boolean;
@@ -49,10 +45,7 @@ export interface ModelsStatus {
 }
 export interface Client {
   chat(request: ChatRequest, options?: { signal?: AbortSignal }): AsyncIterable<ChatEvent>;
-  models: {
-    status(): Promise<ModelsStatus>;
-    install(plan: string): AsyncIterable<InstallEvent>;
-  };
+  models: { status(): Promise<ModelsStatus> };
   app: { open(section: 'models'): Promise<void> };
   ollama: { start(): Promise<{ running: true; version: string }> };
 }
@@ -77,7 +70,6 @@ const tokenShape = /^[A-Za-z0-9_-]{43}$/;
 const inheritedVariables = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'HOME', 'XDG_DATA_HOME'];
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
-const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const invalid = (what: string) => new LyraError('invalid_response', `Unexpected ${what} from the Lyra service`);
 
 function transport(error: unknown, signal?: AbortSignal): LyraError {
@@ -200,17 +192,6 @@ function chatEvent(value: unknown): ChatEvent | undefined {
       ? { type: 'start', mode: value.mode, model: value.model, fellBack: value.fellBack } : undefined;
     case 'thinking': return { type: 'thinking' };
     case 'text': return typeof value.text === 'string' ? { type: 'text', text: value.text } : undefined;
-    case 'done': return { type: 'done' };
-    case 'error': return typeof value.code === 'string' && codeShape.test(value.code) ? { type: 'error', code: value.code } : undefined;
-    default: return undefined;
-  }
-}
-
-function installEvent(value: unknown): InstallEvent | undefined {
-  if (!isRecord(value)) return undefined;
-  switch (value.type) {
-    case 'step': return typeof value.name === 'string' && typeof value.status === 'string' && isCount(value.completed) && isCount(value.total)
-      ? { type: 'step', name: value.name, status: value.status, completed: value.completed, total: value.total } : undefined;
     case 'done': return { type: 'done' };
     case 'error': return typeof value.code === 'string' && codeShape.test(value.code) ? { type: 'error', code: value.code } : undefined;
     default: return undefined;
@@ -382,11 +363,6 @@ export async function connect(options: ConnectOptions): Promise<Client> {
     models: {
       async status() {
         return modelsStatus(await readJson(await authed('/v1/models', { timeout: 10000 })));
-      },
-      async *install(plan) {
-        if (typeof plan !== 'string' || !plan || plan.length > 64) throw new LyraError('invalid_request');
-        const response = await authed('/v1/models/install', { method: 'POST', body: { plan, confirm: true }, stream: true });
-        yield* events(response, installEvent);
       },
     },
     app: {

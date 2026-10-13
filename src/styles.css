@@ -481,7 +481,6 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 /* The summary's sources travel with the saved item, as the board draws; the longer answer link sits under the actions it follows. */
 .lyra-longer { align-self: flex-start; }
 .lyra-loading { display: flex; align-items: center; gap: var(--space-8); flex-wrap: wrap; font-size: var(--type-label); color: var(--text-secondary); }
-.lyra-loading progress { width: 100%; accent-color: var(--accent); }
 .lyra-body > .lyra-spacer { flex: 1; }
 .lyra-ask-field { flex: none; height: var(--size-44); padding: 0 var(--space-4) 0 var(--space-10); gap: var(--space-8); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); font-size: var(--type-label); }
 .lyra-ask-field > input { min-height: 0; }

@@ -22,7 +22,7 @@ export interface LyraHost {
   // Called when the client says Lyra is missing or did not start, for a feature the person reached.
   unreachable?(reason: ServiceReason): void;
 }
-const initial = (): LyraState => ({ open: false, phase: 'home', task: 'question', question: '', answer: '', sources: [], permission: null, attachment: null, error: null, progress: null });
+const initial = (): LyraState => ({ open: false, phase: 'home', task: 'question', question: '', answer: '', sources: [], permission: null, attachment: null, error: null });
 const failureCode = (error: unknown): string => {
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code;
   return error instanceof Error && /^(LYRA_|DESKTOP_|PROJECT_|SITE_SETTINGS_)/.test(error.message) ? error.message : 'unavailable';
@@ -40,7 +40,7 @@ export function createLyra(host: LyraHost) {
   let pendingWork: Promise<void> | undefined;
   const publish = () => { if (host.alive()) host.changed(); };
   const stop = () => { generation++; controller?.abort(); controller = undefined; state.permission = null; grants.clear(); pendingWork = undefined; };
-  const close = () => { state.open = false; stop(); if (['running', 'permission', 'checking', 'installing'].includes(state.phase)) { state.phase = 'failed'; state.error = 'cancelled'; } publish(); };
+  const close = () => { state.open = false; stop(); if (['running', 'permission', 'checking', 'starting'].includes(state.phase)) { state.phase = 'failed'; state.error = 'cancelled'; } publish(); };
   const assertPublic = () => { if (host.privateWindow || !host.alive()) throw new Error('LYRA_PRIVATE'); };
   const failed = (error: unknown) => { state.phase = 'failed'; state.error = failureCode(error); state.permission = null; publish(); };
   const launch = (work: (id: number, signal: AbortSignal) => Promise<void>) => {
@@ -119,7 +119,7 @@ export function createLyra(host: LyraHost) {
   };
   const ask = (asked: Ask) => {
     assertPublic();
-    if (pendingWork || state.phase === 'permission' || state.phase === 'installing') throw new Error('LYRA_BUSY');
+    if (pendingWork || state.phase === 'permission' || state.phase === 'starting') throw new Error('LYRA_BUSY');
     if (asked.task === 'summary' && asked.tabs.length !== 1 || asked.task === 'comparison' && asked.tabs.length < 2
       || ['project', 'item'].includes(asked.task) && asked.tabs.length || asked.task === 'project' && !asked.project || asked.task === 'item' && !asked.item) throw new Error('LYRA_INVALID');
     if (asked.task === 'project') host.project(asked.project!);
@@ -127,7 +127,7 @@ export function createLyra(host: LyraHost) {
     pages = asked.tabs.map(id => ({ ...host.page(id) }));
     previousAnswer = state.phase === 'answer' && request?.task === asked.task && request.project === asked.project && request.item === asked.item && request.tabs.join(',') === asked.tabs.join(',') ? state.answer : '';
     request = structuredClone(asked); state.open = true; state.task = asked.task; state.question = asked.question;
-    state.answer = ''; state.sources = []; state.error = null; state.progress = null;
+    state.answer = ''; state.sources = []; state.error = null;
     // Only preview metadata crosses to chrome. Image bytes never enter a model request.
     state.attachment = item?.image ? { project: asked.project, item: { ...item, text: '', note: '', image: { width: item.image.width, height: item.image.height, bytes: item.image.bytes, cut: item.image.cut } } } : null;
     launch(answer);
@@ -172,17 +172,20 @@ export function createLyra(host: LyraHost) {
           if (request) { const previous = request; stop(); state.phase = 'failed'; ask(previous); }
           else launch(readiness);
           break;
-        case 'lyra-install': case 'lyra-start-ollama':
+        case 'lyra-open-models':
           if (pendingWork || state.phase === 'permission') throw new Error('LYRA_BUSY');
           launch(async (id, signal) => {
-            state.phase = 'installing'; state.error = null; publish();
+            state.phase = 'checking'; state.error = null; publish();
             const client = await connect(); current(id, signal);
-            if (command.type === 'lyra-start-ollama') await client.ollama.start();
-            else for await (const event of client.models.install('light')) {
-              current(id, signal);
-              if (event.type === 'error') throw { code: event.code };
-              if (event.type === 'step') { state.progress = { completed: event.completed, total: event.total }; publish(); }
-            }
+            await client.app.open('models');
+            current(id, signal); await readiness(id, signal);
+          }); break;
+        case 'lyra-start-ollama':
+          if (pendingWork || state.phase === 'permission') throw new Error('LYRA_BUSY');
+          launch(async (id, signal) => {
+            state.phase = 'starting'; state.error = null; publish();
+            const client = await connect(); current(id, signal);
+            await client.ollama.start();
             current(id, signal); await readiness(id, signal);
           }); break;
         case 'lyra-save':

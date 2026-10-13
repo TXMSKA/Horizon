@@ -153,7 +153,7 @@ app.on('browser-window-created', (_event, created) => {
       assert.equal(current.lyra.answer, comparison); assert.equal(current.lyra.sources.length, 2);
       await command({ type: 'activate-tab', id: first });
       syntheticMissing = true; await command({ type: 'lyra-home' }); current = await phase('failed'); assert.equal(current.lyra.error, 'model_missing'); await screenshot('missing');
-      assert.ok(await chrome('Boolean([...document.querySelectorAll(".lyra-panel button")].find(button => button.textContent.includes("Install the local model")))'));
+      assert.ok(await chrome('Boolean([...document.querySelectorAll(".lyra-panel button")].find(button => button.textContent.includes("Open Lyra")))'));
       syntheticMissing = false;
       const unavailable = join(root, 'unavailable'); mkdirSync(unavailable);
       writeFileSync(join(unavailable, 'install.json'), JSON.stringify({ version: 1, command: join(unavailable, 'missing-node.exe'), args: [] }));

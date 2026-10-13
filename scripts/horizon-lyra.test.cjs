@@ -141,24 +141,26 @@ test('Lyra client registers once, keeps the token and retries a single 401', asy
   await assert.rejects(connect({ app, tokens: memoryTokens(), home: closed.home }).then(client => client.models.status()), { code: 'forbidden' });
 });
 
-test('Lyra client sends chat, install and Ollama requests as the routes expect', async t => {
+test('Lyra client sends chat, app opening and Ollama requests as the routes expect', async t => {
   const { connect } = await library();
   const requests = [];
   const service = await fakeService(t, (request, response, payload) => {
     requests.push({ url: request.url, auth: request.headers.authorization, language: request.headers['accept-language'], payload });
     if (request.url === '/v1/chat') return streamOf([{ type: 'start', mode: 'fast', model: 'tiny', fellBack: false }, { type: 'thinking' }, { type: 'text', text: 'Hi' }, { type: 'done' }, { type: 'text', text: 'after done' }])(request, response);
-    if (request.url === '/v1/models/install') return streamOf([{ type: 'step', name: 'pull', status: 'running', completed: 1, total: 4 }, { type: 'error', code: 'disk_full' }])(request, response);
+    if (request.url === '/v1/app/open') return json(response, 202, { opened: true });
     if (request.url === '/v1/ollama/start') return json(response, 200, { running: true, version: '0.9.0' });
     json(response, 404, { error: { code: 'not_found', message: 'No' } });
   });
   const client = await connect({ app, tokens: memoryTokens(fresh), home: service.home });
   assert.deepEqual(await drain(client.chat({ ...chatRequest, priority: 'interactive', context: 'ctx', language: 'es' })), [
     { type: 'start', mode: 'fast', model: 'tiny', fellBack: false }, { type: 'thinking' }, { type: 'text', text: 'Hi' }, { type: 'done' }]);
-  assert.deepEqual(await drain(client.models.install('light')), [{ type: 'step', name: 'pull', status: 'running', completed: 1, total: 4 }, { type: 'error', code: 'disk_full' }]);
+  assert.equal(await client.app.open('models'), undefined);
+  assert.equal(typeof client.models.status, 'function');
+  assert.equal(client.models.install, undefined);
   assert.deepEqual(await client.ollama.start(), { running: true, version: '0.9.0' });
   assert.deepEqual(requests.map(entry => [entry.url, entry.auth, entry.payload]), [
     ['/v1/chat', `Bearer ${fresh}`, { ...chatRequest, priority: 'interactive', context: 'ctx', language: 'es' }],
-    ['/v1/models/install', `Bearer ${fresh}`, { plan: 'light', confirm: true }],
+    ['/v1/app/open', `Bearer ${fresh}`, { section: 'models' }],
     ['/v1/ollama/start', `Bearer ${fresh}`, {}],
   ]);
   assert.equal(requests[0].language, 'es');
@@ -210,7 +212,6 @@ test('Lyra client rejects unknown event shapes and oversized or malformed JSON a
   ];
   const service = await fakeService(t, (request, response, payload) => {
     if (request.url === '/v1/chat') return streamOf(bad[Number(payload.context)])(request, response);
-    if (request.url === '/v1/models/install') return streamOf([{ type: 'step', name: 'pull', status: 'running', completed: -1, total: 4 }])(request, response);
     response.writeHead(200, { 'Content-Type': 'application/json' });
     if (request.url === '/v1/models') return response.end(JSON.stringify({ ready: true, padding: 'x'.repeat(1024 * 1024 + 1), ollama: { installed: true, running: true }, modes: { fast: { ready: true } } }));
     response.end('{"running":true,');
@@ -219,7 +220,6 @@ test('Lyra client rejects unknown event shapes and oversized or malformed JSON a
   for (const [index, events] of bad.entries()) {
     await assert.rejects(drain(client.chat({ ...chatRequest, context: String(index) })), { code: 'invalid_response' }, JSON.stringify(events));
   }
-  await assert.rejects(drain(client.models.install('light')), { code: 'invalid_response' });
   await assert.rejects(client.models.status(), { code: 'response_too_large' });
   await assert.rejects(client.ollama.start(), { code: 'invalid_response' });
   const shapes = await fakeService(t, (request, response) => json(response, 200, { ready: true, ollama: { installed: true, running: true }, modes: { slow: { ready: true } } }));
