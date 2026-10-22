@@ -1,0 +1,29 @@
+{
+  "name": "horizon-engine",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "description": "Horizon's browsing engine for host apps: session protections and tabs, with no chrome of its own.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@ghostery/adblocker": "2.18.2",
+    "tldts-experimental": "7.4.15"
+  },
+  "peerDependencies": {
+    "electron": ">=42"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
+  }
+}
