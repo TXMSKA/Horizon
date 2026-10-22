@@ -814,6 +814,29 @@ export const nebulaPopup = () => popover({ w: HUB_W, h: HUB_H, pad: 16, gap: 16,
   fill(), action("Share a project", { glyph: "share2", ref: "nebula-share" }));
 export const nebula = () => siteWindow([nebulaPopup()]);
 
+// Beta: the Hub as built (Desktop, Translate, Themes) gains Nebula, in two rows of two (the owner's pick, 2026-10-22).
+const BETA_TILES = [["layoutDashboard", "Desktop"], ["languages", "Translate"], ["palette", "Themes"], ["orbit", "Nebula"]];
+const betaHubPopup = (rows, gap) => popover({ shadow: false, w: HUB_W, pad: 16, gap: 16, radius: "xl", fill: "sky", place: toolbarPopup("hub", HUB_W), name: "hub-popup", label: "Hub" },
+  hubDock(), hubPage("Hub", col({ gap: 20, align: "center" }, ...rows.map(slice => row({ gap }, ...slice.map(item => hubCard(item)))))), space(8));
+export const hubBetaGrid = () => siteWindow([betaHubPopup([BETA_TILES.slice(0, 2), BETA_TILES.slice(2)], 40)]);
+// The Nebula page before sign-in, while the browser is open, and signed in. Spaces and shared projects stay out until Quantum serves them.
+const nebulaBeta = (...kids) => popover({ w: HUB_W, pad: 16, gap: 16, radius: "xl", shadow: false, place: toolbarPopup("hub", HUB_W), name: "nebula-popup", label: "Nebula" },
+  hubDock(false), hubPage("Nebula", ...kids));
+export const nebulaSignedOut = () => siteWindow([nebulaBeta(
+  text("Sign in with a Cosmic account to see its Spaces and what others share with it.", { size: "sm", color: "text" }),
+  note("Sign-in opens in the browser set as default on this computer."),
+  action("Sign in", { primary: true, glyph: "logIn", ref: "nebula-sign-in" }))]);
+export const nebulaSigningIn = () => siteWindow([nebulaBeta(
+  row({ gap: 8 }, icon("loaderCircle", { size: 16, color: "primary" }), text("Finish signing in in the browser.", { size: "sm", color: "title" })),
+  note("Horizon continues here once the browser returns."),
+  col({ gap: 8 }, action("Open the sign-in page again", { primary: true, glyph: "externalLink", ref: "nebula-reopen" }),
+    { ...action("Cancel", { ghost: true, ref: "nebula-cancel" }), stroke: "primary" }))]);
+export const nebulaSignedIn = () => siteWindow([nebulaBeta(
+  row({ gap: 10, name: "nebula-account", label: "Account" }, badge("primary", { initial: "AF", size: 36, ink: "on-primary" }),
+    col({ gap: 2 }, text("ana.ferrer@example.com", { size: "base", weight: 650, color: "title" }), note("Signed in on this computer"))), hr(),
+  col({ gap: 8 }, action("Manage account", { primary: true, glyph: "externalLink", ref: "nebula-manage" }),
+    { ...action("Sign out", { ghost: true, glyph: "logOut", ref: "nebula-sign-out" }), stroke: "primary" }))]);
+
 const pickRow = (title, color, initial, ref) => menuRow(title, { lead: badge(color, { initial, size: 22, ink: "site-ink", radius: "sm" }), ref, h: 44 });
 export const splitPick = () => horizonWindow(AMBER, [row({ w: 1440, h: PAGE_H, align: "stretch", place: { x: 0, y: 0 } },
   col({ w: 712, clip: true }, pageHeader("R", "rutasdelsur.example", true), stack({ h: PAGE_H - 34, clip: true }, routesSite({ width: 712, height: PAGE_H - 34 }))),

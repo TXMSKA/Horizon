@@ -44,6 +44,11 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
 function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
   const command = object(value);
   const type = command.type;
+  if (typeof type === 'string' && type.startsWith('account-')) {
+    if (!['account-sign-in', 'account-reopen', 'account-cancel', 'account-sign-out', 'account-manage', 'account-retry'].includes(type)
+      || !Object.hasOwn(command, 'type') || Object.keys(command).length !== 1) throw new Error('ACCOUNT_INVALID_RESPONSE');
+    return value as BrowserCommand;
+  }
   if (typeof type === 'string' && type.startsWith('sync-')) {
     let fields: string[] = [], valid = false;
     switch (type) {

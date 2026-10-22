@@ -2,7 +2,7 @@
 import { board } from "blueprint/board.mjs";
 import { col, row, stack, text } from "blueprint/kit.mjs";
 import { popover, menuRow } from "blueprint/ui.mjs";
-import { AMBER, FJORD, DUNE, GRAPHITE, MOSS, HUB_W, HUB_H, hubPopup, tileMenuPlace, themesPopup, scaled, site, hub, pin, themes, splitPick, split, splitOptions, translate, translateOptions, originalPage, nebula, shareDialog, withDialog, siteWindow, PINNED, horizonWindow, routesSite, SITE_TABS, SITE_BAR, startPage } from "../kit/horizon.mjs";
+import { AMBER, FJORD, DUNE, GRAPHITE, MOSS, HUB_W, HUB_H, hubPopup, tileMenuPlace, themesPopup, scaled, site, hub, pin, themes, splitPick, split, splitOptions, translate, translateOptions, originalPage, nebula, nebulaSignedOut, nebulaSigningIn, nebulaSignedIn, hubBetaGrid, shareDialog, withDialog, siteWindow, PINNED, horizonWindow, routesSite, SITE_TABS, SITE_BAR, startPage } from "../kit/horizon.mjs";
 function closeup() {
   const home = hubPopup(); home.place = { x: 0, y: 0 };
   const menuHome = hubPopup({ pressed: "Split view" }); menuHome.place = { x: 0, y: 0 };
@@ -37,6 +37,10 @@ export default board({
     { id: "dune-applied", title: "16. Dune applied", col: 3, row: 5, root: () => horizonWindow(DUNE, [startPage()]), note: "Dune, a light marketplace theme: a dim sand floor, white-free raised layers and a deep clay accent on small marks. Text reaches 4.5:1 and frames 3:1 against its surfaces." },
     { id: "graphite-applied", title: "17. Graphite applied", col: 3, row: 6, root: () => horizonWindow(GRAPHITE, [startPage()]), note: "Graphite, a dark marketplace theme: near-neutral greys with a calm periwinkle accent. Text reaches 4.5:1 and frames 3:1 against its surfaces." },
     { id: "moss-applied", title: "18. Moss applied", col: 3, row: 7, root: () => horizonWindow(MOSS, [startPage()]), note: "Moss, a light marketplace theme: a sage-grey floor and a deep moss accent. Text reaches 4.5:1 and frames 3:1 against its surfaces." },
+    { id: "new-hub-grid", title: "New 19, Hub with Nebula, two by two", col: 5, row: -1, root: hubBetaGrid, note: "Approved 2026-10-22: the Hub as built gains a Nebula tile, in two rows of two." },
+    { id: "new-nebula-out", title: "New 20, Nebula before sign-in", col: 6, row: -1, root: nebulaSignedOut, note: "Approved 2026-10-22. Sign in opens the Cosmic account site in the default browser; Google and Microsoft refuse sign-in inside an app's own browser." },
+    { id: "new-nebula-wait", title: "New 21, Signing in", col: 7, row: -1, root: nebulaSigningIn, note: "Approved 2026-10-22. Horizon waits for the browser to return to it; Cancel stops waiting." },
+    { id: "new-nebula-in", title: "New 22, Signed in", col: 8, row: -1, root: nebulaSignedIn, note: "Approved 2026-10-22. The account shows its address until Quantum serves a display name and plan; Spaces and Shared with you join this page once Quantum serves Spaces (screen 8)." },
     { id: "changed-closeup", title: "Changed 1, The Hub up close", col: 0, row: -1, root: closeup, note: "Changed 2026-10-08: Themes up close shows Dune, Graphite and Moss in their own palettes instead of placeholders." },
     { id: "changed-themes", title: "Changed 7, Themes", col: 1, row: -1, root: themes, note: "Changed 2026-10-08: the marketplace previews of Dune, Graphite and Moss use their own palettes." },
     { id: "new-dune", title: "New 16, Dune applied", col: 2, row: -1, root: () => horizonWindow(DUNE, [startPage()]), note: "New 2026-10-08, for the owner's approval before it ships." },

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { Check, ExternalLink, House, Languages, LayoutDashboard, Palette, Pin, PinOff, Trash2 } from 'lucide-react';
+import { Check, ExternalLink, House, Languages, LayoutDashboard, LoaderCircle, LogIn, LogOut, Orbit, Palette, Pin, PinOff, Trash2 } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { HUB_APPS, MARKETPLACE_THEMES } from './shared/api';
@@ -9,7 +9,7 @@ import { Menu } from './Menu';
 import { settingsError } from './Settings';
 import { ToolbarPopover } from './ToolbarPopover';
 
-export const hubApps = { translate: { label: 'translate', icon: Languages }, themes: { label: 'themes', icon: Palette }, desktop: { label: 'desktop', icon: LayoutDashboard } } as const;
+export const hubApps = { translate: { label: 'translate', icon: Languages }, themes: { label: 'themes', icon: Palette }, desktop: { label: 'desktop', icon: LayoutDashboard }, nebula: { label: 'nebula', icon: Orbit } } as const;
 type HubPage = 'home' | HubApp;
 const themes = ['amber', 'daylight', 'highContrast'] as const;
 type InstalledTheme = typeof themes[number] | MarketplaceTheme;
@@ -92,6 +92,40 @@ function InstalledThemes({ state, language, onInstalled }: { state: BrowserState
   </div>;
 }
 
+// The Cosmic account of the active profile. Spaces and shared projects join this page once Quantum serves them.
+function NebulaAccount({ state, language }: { state: BrowserState; language: Language }) {
+  const t = (key: CopyKey) => text(key, language), pending = useRef(false);
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState<BrowserCommand | null>(null);
+  const run = async (command: BrowserCommand) => {
+    if (pending.current) return;
+    pending.current = true; setBusy(true); setError(''); setRetry(null);
+    try { await window.horizon.command(command); }
+    catch (reason) { setError(settingsError(reason, language)); setRetry(command); }
+    finally { pending.current = false; setBusy(false); }
+  };
+  const account = state.account;
+  const initials = account.status === 'signedIn' ? (account.displayName ?? account.email).split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(part => part[0]!.toUpperCase()).join('') : '';
+  return <div className="hub-nebula" aria-busy={busy}>
+    {account.status === 'signedOut' && <>
+      <p className="hub-nebula-text">{t('nebulaSignedOutText')}</p><p className="settings-note">{t('nebulaBrowserNote')}</p>
+      <button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-sign-in' }); }}><LogIn aria-hidden="true" />{t('signIn')}</button>
+    </>}
+    {account.status === 'signingIn' && <>
+      <p className="hub-nebula-waiting" role="status"><LoaderCircle className="spinner accent" aria-hidden="true" /><span>{t('nebulaWaiting')}</span></p><p className="settings-note">{t('nebulaWaitingNote')}</p>
+      <div className="hub-nebula-actions"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-reopen' }); }}><ExternalLink aria-hidden="true" />{t('nebulaReopen')}</button>
+        <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-cancel' }); }}>{t('cancel')}</button></div>
+    </>}
+    {account.status === 'signedIn' && <>
+      <div className="hub-nebula-account"><span className="hub-nebula-avatar" aria-hidden="true">{initials}</span><span className="hub-nebula-who"><strong>{account.displayName ?? account.email}</strong><small>{account.plan ?? t('nebulaSignedInNote')}</small></span></div>
+      <hr />
+      <div className="hub-nebula-actions"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-manage' }); }}><ExternalLink aria-hidden="true" />{t('nebulaManage')}</button>
+        <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-sign-out' }); }}><LogOut aria-hidden="true" />{t('signOut')}</button></div>
+    </>}
+    {account.status === 'error' && <div className="settings-feedback error" role="alert"><span>{settingsError(new Error(account.code), language)}</span><button className="text-button" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-retry' }); }}>{t('retry')}</button></div>}
+    {error && <div className="settings-feedback error" role="alert"><span>{error}</span>{retry && <button className="text-button" type="button" aria-disabled={busy} onClick={() => { void run(retry); }}>{t('retry')}</button>}</div>}
+  </div>;
+}
+
 export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnounce }: {
   state: BrowserState; language: Language; page: HubPage; opener: RefObject<HTMLButtonElement | null>;
   onPage: (page: HubPage) => void; onDismiss: (focus: boolean) => void; onAnnounce: (message: string) => void;
@@ -131,9 +165,9 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
     }
     finally { pending.current = false; if (ref.current) setBusy(false); }
   };
-  const apps = HUB_APPS.filter(app => !state.privateWindow || app !== 'desktop' && app !== 'translate');
+  const apps = HUB_APPS.filter(app => !state.privateWindow || app !== 'desktop' && app !== 'translate' && app !== 'nebula');
   const open = (app: HubApp) => { closeMenu(false); setError(''); setRetry(null); onPage(app); };
-  return <ToolbarPopover opener={opener}><div className={`hub-popup${page !== 'home' ? ' hub-app-page' : ''}`} id="hub-popup" ref={ref} role="dialog" tabIndex={-1} aria-label={t('hub')} aria-busy={busy} onKeyDown={event => {
+  return <ToolbarPopover opener={opener}><div className={`hub-popup${page === 'themes' ? ' hub-app-page' : page === 'nebula' ? ' hub-fitted-page' : ''}`} id="hub-popup" ref={ref} role="dialog" tabIndex={-1} aria-label={t('hub')} aria-busy={busy} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (tileMenu) closeMenu(); else onDismiss(true); }
     if (event.key !== 'Tab') return;
     const stops = [...(ref.current?.querySelectorAll<HTMLElement>('button:not(:disabled):not([tabindex="-1"])') ?? [])];
@@ -144,7 +178,7 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
     {page === 'home' && <div className="hub-ground" aria-hidden="true"><div className="horizon-rule" /><svg className="horizon-sun" viewBox="0 0 64 32"><path d="M0 32 A32 32 0 0 1 64 32" /></svg></div>}
     <div className="hub-content"><nav className="hub-dock" aria-label={t('quickAccess')}>
       <button className="icon-button" type="button" aria-label={t('hubHome')} title={t('hubHome')} aria-current={page === 'home' ? 'page' : undefined} onClick={() => { closeMenu(false); onPage('home'); }}><House aria-hidden="true" /></button>
-      {state.quickAccess.filter(app => !state.privateWindow || app !== 'desktop' && app !== 'translate').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={() => open(app)}><Icon aria-hidden="true" /></button>; })}
+      {state.quickAccess.filter(app => !state.privateWindow || app !== 'desktop' && app !== 'translate' && app !== 'nebula').map(app => { const { label, icon: Icon } = hubApps[app]; return <button className="icon-button" type="button" key={app} aria-label={t(label)} title={t(label)} onClick={() => open(app)}><Icon aria-hidden="true" /></button>; })}
     </nav><div className="hub-page"><h2>{t(page === 'home' ? 'hub' : hubApps[page].label)}</h2>
       {page === 'home' ? <div className="hub-tiles">{apps.map((app, index) => { const { label, icon: Icon } = hubApps[app]; return <button className="hub-tile" type="button" ref={app === 'themes' ? tile : undefined} key={app} disabled={app === 'translate' && !state.tabs.some(tab => tab.id === state.activeId && /^https?:/.test(tab.url) && !tab.loading && !tab.error)} aria-haspopup="menu" aria-expanded={tileMenu === app} onClick={() => open(app)} onContextMenu={event => { event.preventDefault(); tile.current = event.currentTarget; setTileMenu(app); }} onKeyDown={event => {
         if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) { event.preventDefault(); tile.current = event.currentTarget; setTileMenu(app); return; }
@@ -152,7 +186,7 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
         if (!step) return;
         event.preventDefault(); const next = (index + step + apps.length * 3) % apps.length;
         (event.currentTarget.parentElement?.children[next] as HTMLButtonElement | undefined)?.focus();
-      }}><span className="hub-tile-icon"><Icon aria-hidden="true" /></span><span>{t(label)}</span></button>; })}</div> : <InstalledThemes state={state} language={language} onInstalled={() => onDismiss(true)} />}
+      }}><span className="hub-tile-icon"><Icon aria-hidden="true" /></span><span>{t(label)}</span></button>; })}</div> : page === 'nebula' ? <NebulaAccount state={state} language={language} /> : <InstalledThemes state={state} language={language} onInstalled={() => onDismiss(true)} />}
       {error && <div className="settings-feedback error" role="alert"><span>{error}</span>{retry && <button className="text-button" type="button" ref={retryButton} aria-disabled={busy} onClick={() => { void pin(retry); }}>{t('retry')}</button>}</div>}
     </div></div>
     {tileMenu && <ToolbarPopover opener={tile} within={ref} className="hub-menu-anchor"><div ref={menu}><Menu id="hub-tile-menu" className="hub-tile-menu" label={t('appActions').replace('{name}', t(hubApps[tileMenu].label))} keyboard opener={tile} onDismiss={reason => closeMenu(reason !== 'outside')}>

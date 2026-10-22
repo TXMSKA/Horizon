@@ -1,4 +1,5 @@
 import { createVault } from './vault';
+import { createAccount } from './account';
 import type { VaultCommand } from '../src/shared/api';
 import { app, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
 import type { BrowserWindow, DownloadItem, Session, WebContents } from 'electron';
@@ -116,7 +117,7 @@ function attachSession(target: Session, owner: SessionOwner) {
 }
 
 type BrowserOwner = { window: BrowserWindow; privateWindow: boolean; activeProfile(): string; publish(): void; flush(): void; stop(): void; releasePrivate(): void; persistSessions(): void; settingsChanged(): void; syncApplied(): void; syncReady(): boolean; closeVault(): Promise<void>; disposeProfile(id: string): void; registryChanged(): void; runtime(id: string): unknown };
-interface ProfileData { favicons?: ReturnType<typeof createFaviconCache>; store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number; importProgress: ImportProgress | null }
+interface ProfileData { account?: ReturnType<typeof createAccount>; favicons?: ReturnType<typeof createFaviconCache>; store: BrowserStore; status: { readError: boolean; memoryOnly: boolean }; desktop: ReturnType<typeof createDesktop>; sessions: WindowSessions; sessionStatus: { readError: boolean; memoryOnly: boolean }; favoritesVersion: number; importProgress: ImportProgress | null }
 export interface BrowserGroup {
   sync?: SyncEngine;
   registry: ProfileRegistry; owners: Map<string, BrowserOwner>; profiles: Map<string, ProfileData>;
@@ -192,6 +193,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   };
   const current = () => runtimes.get(selectedProfile)!;
   const state = (): BrowserState => ({
+    account: privateWindow ? { status: 'signedOut' } : shared.profiles.get(selectedProfile)?.account?.state() ?? { status: 'signedOut' },
     sync: privateWindow ? emptySyncState() : shared.sync?.state() ?? emptySyncState(),
     ...current().state(), firstRun: !settings.onboarded && !privateWindow, version: app.getVersion(), update: options.updates?.state ?? { status: 'unavailable' }, activeProfileId: selectedProfile, privateWindow,
     extensionWarning: extensionDecision?.warning ?? null,
@@ -255,6 +257,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const clearRemovedFavicons = (next: ProfileRegistry) => {
     for (const profile of shared.registry.profiles) if (!next.profiles.some(entry => entry.id === profile.id)) {
       const data = shared.profiles.get(profile.id);
+      data?.account?.close(); if (data) delete data.account;
       try {
         if (data?.favicons) data.favicons.clear();
         else clearFaviconCacheFile(resolve(dirname(profileStorePath(userData, profile.id)), 'favicons.json'));
@@ -298,6 +301,17 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (command.type.startsWith('vault-') || command.type === 'set-vault-timeout') return vault.run(command as VaultCommand);
     if (['navigate', 'activate-tab', 'close-tab', 'switch-profile', 'home', 'back', 'forward', 'reload', 'new-tab', 'open-settings', 'zoom', 'fullscreen', 'move-tab-to-window'].includes(command.type)) vault.invalidate();
     if (privateWindow) assertPrivateCommand(command);
+    if (command.type.startsWith('account-')) {
+      const account = shared.profiles.get(selectedProfile)!.account!;
+      switch (command.type) {
+        case 'account-sign-in': return account.signIn();
+        case 'account-reopen': return account.reopen();
+        case 'account-cancel': return account.cancel();
+        case 'account-sign-out': return account.signOut();
+        case 'account-manage': return account.manage();
+        case 'account-retry': return account.retry();
+      }
+    }
     if (command.type.startsWith('service-')) return services.run(command as ServicesCommand);
     if (command.type.startsWith('sync-')) {
       const sync = shared.sync!;
@@ -472,6 +486,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       shared.profiles.set(profile.id, data);
     }
     const profileData = data;
+    if (!privateWindow && !profileData.account) {
+      const account = createAccount({ directory: dirname(storePath), userData, cipher: safeStorage, isPackaged: app.isPackaged,
+        language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { for (const owner of shared.owners.values()) owner.publish(); },
+        // The default session refuses every web request, so the account talks to Quantum through its own in-memory session.
+        openExternal: url => shell.openExternal(url), fetch: (input, init) => session.fromPartition('horizon-account').fetch(String(input), init) });
+      profileData.account = account; void account.retry().catch(() => undefined);
+    }
     const favicons = privateWindow ? undefined : profileData.favicons ??= createFaviconCache(resolve(dirname(storePath), 'favicons.json'), safeStorage,
       bytes => nativeImage.createFromBuffer(bytes), () => { for (const owner of shared.owners.values()) owner.publish(); });
     const readStatus = profileData.status;
@@ -2040,7 +2061,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       if (!status.memoryOnly) try { writeWindowSessions(path, saved, safeStorage); shared.sync?.markDirty('tabs'); } catch { registryError = true; }
     }
     if (privateWindow) cleanupPrivate();
-    if (!shared.owners.size) { shared.sync?.stop(); for (const data of shared.profiles.values()) { data.favicons?.dispose(); data.desktop.dispose(); } groups.delete(userData); }
+    if (!shared.owners.size) { shared.sync?.stop(); for (const data of shared.profiles.values()) { data.account?.close(); data.favicons?.dispose(); data.desktop.dispose(); } groups.delete(userData); }
     app.removeListener('before-quit', beforeQuit);
     window.removeListener('focus', refreshDefaultBrowser);
     unsubscribeUpdates?.();

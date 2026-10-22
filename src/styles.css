@@ -491,17 +491,34 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .hub-popup { position: relative; width: var(--width-hub); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow: hidden; border-radius: var(--radius-sheet); background: var(--surface-page); color: var(--text-title); outline: none; }
 .hub-popup::after { content: ''; position: absolute; inset: 0; border: var(--border-width) solid var(--border-popover); border-radius: inherit; pointer-events: none; }
 .hub-app-page { height: var(--height-hub); background: var(--surface-raised); }
+/* Nebula fits its content, like Home, on the raised surface of an app page. */
+.hub-fitted-page { background: var(--surface-raised); }
 .hub-ground { position: absolute; bottom: 0; left: 0; right: 0; height: var(--size-32); background: var(--surface-ground); pointer-events: none; }
 /* The content scrolls inside the popup, so the popup's rim stays put and no scrollbar narrows the theme grid. */
 .hub-content { position: relative; display: flex; flex-direction: column; gap: var(--space-16); height: 100%; overflow-y: auto; scrollbar-width: none; padding: var(--space-16); }
-.hub-popup:not(.hub-app-page) .hub-content { height: auto; max-height: var(--popup-available-height); padding: var(--space-24); padding-bottom: calc(var(--size-32) + var(--height-sun) + var(--space-16)); }
+.hub-popup.hub-fitted-page .hub-content { height: auto; max-height: var(--popup-available-height); }
+.hub-popup:not(.hub-app-page):not(.hub-fitted-page) .hub-content { height: auto; max-height: var(--popup-available-height); padding: var(--space-24); padding-bottom: calc(var(--size-32) + var(--height-sun) + var(--space-16)); }
 .hub-dock { display: flex; flex: none; align-items: center; gap: var(--space-8); height: var(--height-hub-dock); padding: var(--space-8); border-radius: var(--radius-panel); background: var(--surface-sunken); }
 .hub-dock .icon-button { width: var(--size-40); height: var(--size-40); }
 .hub-dock .icon-button svg { width: var(--size-18); height: var(--size-18); }
 .hub-dock [aria-current=page] { background: var(--surface-pressed); color: var(--accent); }
 .hub-page { display: flex; flex-direction: column; gap: var(--space-12); }
+.hub-nebula { display: flex; flex-direction: column; gap: var(--space-12); }
+.hub-nebula-text { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.hub-nebula-waiting { display: flex; align-items: center; gap: var(--space-8); color: var(--text-title); font-size: var(--type-body); line-height: var(--line-body); }
+.hub-nebula-waiting svg { flex: none; width: var(--size-16); height: var(--size-16); }
+.hub-nebula-actions { display: flex; flex-direction: column; gap: var(--space-8); }
+.hub-nebula .desktop-action { width: 100%; }
+.hub-nebula-account { display: flex; align-items: center; gap: var(--space-10); min-width: 0; }
+.hub-nebula-avatar { display: grid; flex: none; place-items: center; width: var(--size-36); height: var(--size-36); border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: var(--type-caption); font-weight: var(--weight-emphasis); }
+.hub-nebula-who { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.hub-nebula-who strong { overflow: hidden; color: var(--text-title); font-size: var(--type-body); font-weight: var(--weight-heading); text-overflow: ellipsis; white-space: nowrap; }
+.hub-nebula-who small { color: var(--text-secondary); font-size: var(--type-caption); }
+.hub-nebula hr { width: 100%; margin: 0; border: 0; border-top: var(--border-width) solid var(--divider); }
 .hub-page > h2 { color: var(--text-title); font-size: var(--type-heading); font-weight: var(--weight-heading); line-height: var(--line-heading); }
 .hub-tiles { display: grid; grid-template-columns: repeat(3, var(--size-hub-tile)); justify-content: center; gap: var(--space-24); }
+/* Four tiles sit two by two, wider apart across than down. */
+.hub-tiles:has(> :nth-child(4)) { grid-template-columns: repeat(2, var(--size-hub-tile)); column-gap: var(--space-40); row-gap: var(--space-20); }
 .hub-tiles:has(> :only-child) { grid-template-columns: var(--size-hub-tile); }
 .hub-tile { display: flex; flex-direction: column; align-items: center; gap: var(--space-8); width: var(--size-hub-tile); padding: 0; border-radius: var(--radius-panel); font-size: var(--type-caption); line-height: var(--line-caption); color: var(--text-title); }
 .hub-tile-icon { display: grid; place-items: center; width: var(--size-hub-tile); height: var(--size-hub-tile); border: var(--border-width) solid var(--divider); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--accent); }

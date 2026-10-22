@@ -1,6 +1,21 @@
 import type { Language } from './shared/api';
 
 export const copy = {
+  nebula: { en: 'Nebula', es: 'Nebula' },
+  nebulaSignedOutText: { en: 'Sign in with a Cosmic account to see its Spaces and what others share with it.', es: 'Iniciar sesión con una cuenta de Cosmic para ver sus Spaces y lo que otros comparten con ella.' },
+  nebulaBrowserNote: { en: 'Sign-in opens in the browser set as default on this computer.', es: 'El inicio de sesión se abre en el navegador predeterminado de este equipo.' },
+  signIn: { en: 'Sign in', es: 'Iniciar sesión' },
+  nebulaWaiting: { en: 'Finish signing in in the browser.', es: 'Terminar de iniciar sesión en el navegador.' },
+  nebulaWaitingNote: { en: 'Horizon continues here once the browser returns.', es: 'Horizon continúa aquí cuando vuelve el navegador.' },
+  nebulaReopen: { en: 'Open the sign-in page again', es: 'Abrir de nuevo la página de inicio de sesión' },
+  nebulaSignedInNote: { en: 'Signed in on this computer', es: 'Sesión iniciada en este equipo' },
+  nebulaManage: { en: 'Manage account', es: 'Administrar la cuenta' },
+  signOut: { en: 'Sign out', es: 'Cerrar sesión' },
+  ACCOUNT_NETWORK: { en: 'The account service could not be reached. Check the connection and try again.', es: 'No se pudo contactar al servicio de cuentas. Comprobar la conexión y volver a intentarlo.' },
+  ACCOUNT_TIMEOUT: { en: 'Sign-in took too long. Try again.', es: 'El inicio de sesión tardó demasiado. Volver a intentarlo.' },
+  ACCOUNT_DENIED: { en: 'Account access was denied. Sign in again.', es: 'Se denegó el acceso a la cuenta. Volver a iniciar sesión.' },
+  ACCOUNT_INVALID_RESPONSE: { en: 'The account service returned an invalid response. Try again.', es: 'El servicio de cuentas devolvió una respuesta no válida. Volver a intentarlo.' },
+  ACCOUNT_STORAGE: { en: 'Account sign-in could not be saved or read securely. Check system encryption and disk access, then try again.', es: 'No se pudo guardar o leer el inicio de sesión de forma segura. Comprobar el cifrado del sistema y el acceso al disco y volver a intentarlo.' },
   sync: { en: 'Sync', es: 'Sincronización' },
   syncIntro: { en: 'Keep your chosen browsing data on your computers through a folder such as OneDrive or MEGA; the folder holds only encrypted copies.', es: 'Los datos de navegación elegidos se comparten entre computadoras mediante una carpeta de OneDrive, MEGA u otro servicio, que solo guarda copias cifradas.' },
   syncSetup: { en: 'Set up sync', es: 'Configurar sincronización' },

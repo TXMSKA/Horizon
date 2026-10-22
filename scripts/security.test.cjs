@@ -953,7 +953,7 @@ test('Hub tiles, dock and menus support keyboard opening, pending saves, retry a
   dialog.props.ref.current = { contains: () => false, querySelector: () => focus, querySelectorAll: () => [] };
   tile(tree).props.ref.current = focus; hooks.flush();
   assert.equal(dialog.props['aria-label'], 'Hub'); assert.equal(tile(tree).props.children[1].props.children, 'Themes');
-  const currentTarget = { parentElement: { children: [focus, focus] } }; tile(tree).props.onKeyDown({ ...key('ArrowRight'), currentTarget }); assert.equal(focused, 2);
+  const currentTarget = { parentElement: { children: require('../dist/src/shared/api.js').HUB_APPS.map(() => focus) } }; tile(tree).props.onKeyDown({ ...key('ArrowRight'), currentTarget }); assert.equal(focused, 2);
   tile(tree).props.onKeyDown({ ...key('ContextMenu'), currentTarget: focus }); tree = render(); hooks.flush();
   assert.equal(tile(tree).props['aria-expanded'], true); assert.deepEqual(nodes(tree, 'menuitem').map(node => node.props.children[1].props.children), ['Open', 'Add to quick access']);
   nodes(tree, 'menuitem')[1].props.onClick(); nodes(tree, 'menuitem')[1].props.onClick(); tree = render(); hooks.flush();
@@ -4594,7 +4594,7 @@ function notebookBrowser(t, cipher = plainCipher, options = {}) {
   const filename = resolve('dist/electron/browser.js'), localRequire = require('node:module').createRequire(filename), exported = {};
   const schedule = (callback, delay) => { const id = {}; timers.set(id, { callback, delay }); return id; };
   compileFunction(readFileSync(filename, 'utf8'), ['exports', 'require', 'setTimeout', 'clearTimeout'])(exported, name =>
-    name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './favicon-cache' ? timedModule('favicon-cache', timers) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './lyra' && options.lyraConnect ? { ...localRequire(name), createLyra: host => localRequire(name).createLyra({ ...host, connect: options.lyraConnect }) } : name === './vault' && options.vaultConnect ? { ...localRequire(name), createVault: host => localRequire(name).createVault({ ...host, connect: options.vaultConnect }) } : name === './sync-browser' && options.syncHostCapture ? { ...localRequire(name), browserSyncHost(...args) { const host = localRequire(name).browserSyncHost(...args); options.syncHostCapture(host); return host; } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: (...args) => options.blockingFactory?.(...args) ?? options.blocker ?? ({ ready: false, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
+    name === './account' && options.accountFactory ? { createAccount: options.accountFactory } : name === './extensions' ? browserTestExtensions : name === 'electron' ? Object.assign(electron, { Menu: { buildFromTemplate: items => items } }) : name === './favicon-cache' ? timedModule('favicon-cache', timers) : name === './browsing-data' ? timedModule('browsing-data', timers) : name === './store' ? { ...localRequire(name), writeStore(...args) { if (options.failStore) throw new Error('Disk failure'); return localRequire(name).writeStore(...args); } } : name === './lyra' && options.lyraConnect ? { ...localRequire(name), createLyra: host => localRequire(name).createLyra({ ...host, connect: options.lyraConnect }) } : name === './vault' && options.vaultConnect ? { ...localRequire(name), createVault: host => localRequire(name).createVault({ ...host, connect: options.vaultConnect }) } : name === './sync-browser' && options.syncHostCapture ? { ...localRequire(name), browserSyncHost(...args) { const host = localRequire(name).browserSyncHost(...args); options.syncHostCapture(host); return host; } } : name === './desktop' ? notebookModule : name === './captures' ? captureModule : name === './blocking' ? { ...localRequire(name), createBlockingEngine: (...args) => options.blockingFactory?.(...args) ?? options.blocker ?? ({ ready: false, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => '', match: () => undefined }) } : localRequire(name), schedule, id => timers.delete(id));
   const window = Object.assign(new EventEmitter(), { webContents: new Contents(), isDestroyed: () => false, isFocused: () => true, isEnabled() { return this.enabled !== false; },
     getContentBounds: () => ({ width: 800, height: 600 }), setTitle() {}, setFullScreen() {}, setMenu(menu) { this.menu = menu; }, contentView: { addChildView() {}, removeChildView() {} } });
   electron.dialog = { showOpenDialog: async (...args) => { options.folderArgs = args; if (options.folderError) throw new Error('Picker failed'); return options.folderChoice ?? { canceled: true, filePaths: [] }; }, showSaveDialog: async (...args) => { options.captureSaveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.captureSaveChoice ?? { canceled: true }; }, showSaveDialogSync: (...args) => { options.saveArgs = args; if (options.saveError) throw new Error('Save dialog failed'); return options.saveChoice; } };
@@ -6754,7 +6754,7 @@ test('Desktop tab titles and card metadata follow the board in both languages', 
 });
 
 test('the Hub draws Desktop first and focuses its first built tile', () => {
-  assert.deepEqual(require('../dist/src/shared/api.js').HUB_APPS, ['desktop', 'translate', 'themes']);
+  assert.deepEqual(require('../dist/src/shared/api.js').HUB_APPS, ['desktop', 'translate', 'themes', 'nebula']);
   const hub = readFileSync('src/Hub.tsx', 'utf8');
   assert.match(hub, /const apps = HUB_APPS.filter/); assert.match(hub, /apps.map/);
   assert.ok(hub.includes("querySelector<HTMLButtonElement>(page === 'home' ? '.hub-tile'"));
@@ -7434,4 +7434,285 @@ test('packaged send commands ignore the development Cosmic root override', async
     browser.app.isPackaged = true;
     assert.deepEqual((await browser.command({ type: 'send-targets' }))[0].accepts, ['note']);
   } finally { send.cosmicRoot = original; }
+});
+
+function accountTokens() {
+  const token = () => require('node:crypto').randomBytes(32).toString('base64url');
+  return { accessToken: token(), refreshToken: token(), tokenType: 'Bearer', expiresIn: 900, deviceId: randomUUID() };
+}
+async function accountHTTP(url, method = 'GET') {
+  return new Promise((done, reject) => {
+    const request = require('node:http').request(url, { method, agent: false }, response => {
+      const chunks = []; response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => done({ status: response.statusCode, headers: response.headers, text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    request.on('error', reject); request.end();
+  });
+}
+async function waitForAccount(account, status) {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    if (account.state().status === status) return;
+    await new Promise(done => setTimeout(done, 5));
+  }
+  assert.equal(account.state().status, status);
+}
+async function accountFixture(t, options = {}) {
+  const { createAccount } = require('../dist/electron/account.js'), { createServer } = require('node:http');
+  const directory = temporaryDirectory(t, 'account'), protection = options.cipher ?? authenticatedCipher(), requests = [], opened = [], states = [];
+  let tokens = accountTokens(), me = { email: 'person@example.test', devices: [], twoFactorEnabled: false }, handler;
+  const server = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+    const call = { path: request.url, method: request.method, headers: request.headers, body }; requests.push(call);
+    const answer = handler?.(call) ?? (request.url === '/v1/oauth/token' ? { status: 200, body: tokens } : request.url === '/v1/me' ? { status: 200, body: me } : { status: 200, body: { success: true } });
+    response.writeHead(answer.status, { 'content-type': 'application/json', ...answer.headers }); response.end(JSON.stringify(answer.body));
+  });
+  await new Promise(done => server.listen(0, '127.0.0.1', done));
+  t.after(() => new Promise(done => { server.close(done); server.closeAllConnections(); }));
+  const origin = `http://127.0.0.1:${server.address().port}`, originalFetch = globalThis.fetch;
+  const host = {
+    directory: join(directory, 'profile'), userData: directory, cipher: protection, isPackaged: false, language: () => options.language ?? 'en',
+    changed: () => states.push(account.state()), openExternal: async url => { opened.push(url); }, env: { HORIZON_QUANTUM_API: origin, HORIZON_QUANTUM_SITE: origin },
+    fetch: async (url, init) => {
+      assert.equal(new URL(url).origin, origin); assert.equal(init.redirect, 'manual'); assert.ok(init.signal);
+      return originalFetch(url, init);
+    },
+  };
+  const account = createAccount(host); t.after(() => account.close());
+  const start = async () => { await account.signIn(); return new URL(opened.at(-1)); };
+  const signIn = async () => {
+    const page = await start(), callback = page.searchParams.get('redirectUri');
+    const response = await accountHTTP(`${callback}?code=${'c'.repeat(43)}`);
+    assert.equal(response.status, 200); await waitForAccount(account, 'signedIn'); return page;
+  };
+  return { account, host, directory, protection, requests, opened, states, origin, start, signIn,
+    token: () => tokens, rotate(value = accountTokens()) { tokens = value; return value; }, me(value) { me = value; }, handle(value) { handler = value; } };
+}
+
+test('account PKCE uses a random 64-character verifier and its 43-character S256 challenge', () => {
+  const { createPKCE } = require('../dist/electron/account.js'), { createHash } = require('node:crypto');
+  const first = createPKCE(), second = createPKCE();
+  assert.match(first.verifier, /^[A-Za-z0-9_-]{64}$/); assert.match(first.challenge, /^[A-Za-z0-9_-]{43}$/);
+  assert.ok(first.challenge === createHash('sha256').update(first.verifier).digest('base64url'));
+  assert.ok(first.verifier !== second.verifier); assert.ok(first.challenge !== second.challenge);
+});
+
+test('account endpoints ignore overrides when packaged and accept only HTTPS origins or explicit local ports in development', () => {
+  const { accountEndpoints } = require('../dist/electron/account.js');
+  const production = { api: 'https://quantum.txmska.com', site: 'https://cosmic.txmska.com' };
+  assert.deepEqual(accountEndpoints(false, {}), production);
+  for (const value of ['http://127.0.0.1:43210', 'http://localhost:43210', 'https://account.example.test', 'https://account.example.test:8443']) {
+    assert.deepEqual(accountEndpoints(false, { HORIZON_QUANTUM_API: value, HORIZON_QUANTUM_SITE: value }), { api: value, site: value });
+    assert.deepEqual(accountEndpoints(true, { HORIZON_QUANTUM_API: value, HORIZON_QUANTUM_SITE: value }), production);
+  }
+  assert.deepEqual(accountEndpoints(false, { HORIZON_QUANTUM_API: 'http://127.0.0.1:80', HORIZON_QUANTUM_SITE: 'http://localhost:80' }), { api: 'http://127.0.0.1', site: 'http://localhost' });
+  for (const value of ['http://example.test:43210', 'http://127.0.0.2:43210', 'http://127.0.0.1', 'http://localhost', 'http://localhost:0', 'http://[::1]:43210', 'file:///account', 'https://person:secret@example.test', 'https://example.test/path', 'https://example.test?', 'https://example.test#', 'https://example.test?query=1', 'https://example.test#hash', 'https://@example.test', 'https://example.test/../', 'http://localhost:43210/path', 'http://person@localhost:43210', 'not-a-url']) {
+    for (const field of ['HORIZON_QUANTUM_API', 'HORIZON_QUANTUM_SITE']) {
+      assert.throws(() => accountEndpoints(false, { [field]: value }), /ACCOUNT_INVALID_RESPONSE/);
+      assert.deepEqual(accountEndpoints(true, { [field]: value }), production);
+    }
+  }
+});
+
+test('account token responses strictly require complete Bearer tokens and a positive finite lifetime', () => {
+  const { validateAccountTokens } = require('../dist/electron/account.js'), valid = accountTokens();
+  assert.deepEqual(validateAccountTokens(valid), valid);
+  for (const field of Object.keys(valid)) { const missing = { ...valid }; delete missing[field]; assert.throws(() => validateAccountTokens(missing), /ACCOUNT_INVALID_RESPONSE/); }
+  for (const changes of [{ accessToken: 'a'.repeat(42) }, { accessToken: '!'.repeat(43) }, { refreshToken: 'a'.repeat(44) }, { refreshToken: null }, { tokenType: 'bearer' }, { expiresIn: 0 }, { expiresIn: -1 }, { expiresIn: Infinity }, { expiresIn: NaN }, { expiresIn: '900' }, { deviceId: 1 }, { extra: true }]) assert.throws(() => validateAccountTokens({ ...valid, ...changes }), /ACCOUNT_INVALID_RESPONSE/);
+  for (const value of [null, [], {}, 'token']) assert.throws(() => validateAccountTokens(value), /ACCOUNT_INVALID_RESPONSE/);
+});
+
+test('account loopback rejects wrong methods, paths and malformed codes before accepting one callback with a script-free CSP', async t => {
+  const fixture = await accountFixture(t), page = await fixture.start(), callback = page.searchParams.get('redirectUri');
+  assert.equal(fixture.account.state().status, 'signingIn'); assert.equal(page.pathname, '/authorize'); assert.equal(page.searchParams.get('appId'), 'horizon');
+  assert.match(page.searchParams.get('codeChallenge'), /^[A-Za-z0-9_-]{43}$/);
+  assert.match(page.searchParams.get('computerId'), /^[A-Za-z0-9._:-]{1,128}$/);
+  assert.ok(page.searchParams.get('deviceName').length > 0 && page.searchParams.get('deviceName').length <= 128);
+  assert.doesNotMatch(page.searchParams.get('deviceName'), /[\x00-\x1f\x7f-\x9f]/);
+  for (const [suffix, method] of [['?code=' + 'a'.repeat(43), 'POST'], ['?code=' + 'a'.repeat(43), 'HEAD'], ['', 'GET'], ['?code=short', 'GET'], ['?code=' + '!'.repeat(43), 'GET'], ['?code=' + 'a'.repeat(44), 'GET'], ['?code=' + 'a'.repeat(43) + '&extra=1', 'GET'], ['?code=' + 'a'.repeat(43) + '&code=' + 'b'.repeat(43), 'GET']]) assert.equal((await accountHTTP(callback + suffix, method)).status, 404);
+  assert.equal((await accountHTTP(new URL('/other?code=' + 'a'.repeat(43), callback))).status, 404);
+  assert.equal(fixture.requests.length, 0); await fixture.account.reopen(); assert.equal(fixture.opened.at(-1), page.href);
+  const address = new URL(callback), response = await new Promise((done, reject) => {
+    const socket = require('node:net').createConnection({ host: '127.0.0.1', port: Number(address.port) }); let result = '';
+    socket.on('connect', () => socket.end(`GET /callback?code=${'c'.repeat(43)} HTTP/1.1\r\nHost: 127.0.0.1:${address.port}\r\nConnection: keep-alive\r\n\r\nGET /callback?code=${'d'.repeat(43)} HTTP/1.1\r\nHost: 127.0.0.1:${address.port}\r\nConnection: close\r\n\r\n`));
+    socket.on('data', chunk => { result += chunk; }); socket.on('error', reject); socket.on('end', () => done(result));
+  });
+  assert.deepEqual([...response.matchAll(/HTTP\/1\.1 (\d+)/g)].map(match => Number(match[1])), [200, 404]);
+  assert.match(response, /Content-Security-Policy: default-src 'none'/i); assert.match(response, /Signed in\. Return to Horizon\./); assert.doesNotMatch(response, /<script/i);
+  await waitForAccount(fixture.account, 'signedIn'); assert.equal(fixture.requests.filter(call => call.path === '/v1/oauth/token').length, 1);
+  const exchange = fixture.requests.find(call => call.path === '/v1/oauth/token');
+  assert.deepEqual(Object.keys(exchange.body).sort(), ['appId', 'code', 'codeVerifier', 'grantType', 'redirectUri']);
+  assert.equal(exchange.body.grantType, 'authorization_code'); assert.equal(exchange.body.appId, 'horizon'); assert.equal(exchange.body.redirectUri, callback);
+  assert.match(exchange.body.codeVerifier, /^[A-Za-z0-9_-]{64}$/);
+  assert.ok(require('node:crypto').createHash('sha256').update(exchange.body.codeVerifier).digest('base64url') === page.searchParams.get('codeChallenge'));
+});
+
+test('account callback uses Spanish and keeps identity across attempts while cancellation closes the listener', async t => {
+  const fixture = await accountFixture(t, { language: 'es' }), first = await fixture.start(), redirect = first.searchParams.get('redirectUri');
+  fixture.account.cancel(); assert.deepEqual(fixture.account.state(), { status: 'signedOut' });
+  await assert.rejects(accountHTTP(redirect + '?code=' + 'c'.repeat(43)));
+  const second = await fixture.start(); assert.equal(first.searchParams.get('computerId'), second.searchParams.get('computerId'));
+  const response = await accountHTTP(second.searchParams.get('redirectUri') + '?code=' + 'c'.repeat(43));
+  assert.equal(response.status, 200); assert.match(response.text, /Sesión iniciada\. Se puede volver a Horizon\./); assert.equal(response.headers['content-security-policy'], "default-src 'none'");
+  await waitForAccount(fixture.account, 'signedIn');
+  await fixture.account.manage(); assert.equal(fixture.opened.at(-1), fixture.origin + '/');
+});
+
+test('account seals only the refresh token and restores me in a new profile controller without retaining unrelated account fields', async t => {
+  const fixture = await accountFixture(t); await fixture.signIn();
+  const path = join(fixture.host.directory, 'account.sealed'), bytes = readFileSync(path), saved = await require('../dist/electron/vault-storage.js').vaultTokenStore(path, fixture.protection).get();
+  assert.ok(saved === fixture.token().refreshToken); assert.ok(!bytes.includes(Buffer.from(saved))); assert.ok(!bytes.includes(Buffer.from(fixture.token().accessToken)));
+  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null });
+  fixture.account.close(); const rotated = fixture.rotate();
+  const next = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {} }); t.after(() => next.close());
+  await next.retry(); assert.equal(next.state().status, 'signedIn');
+  const refresh = fixture.requests.filter(call => call.path === '/v1/oauth/token').at(-1);
+  assert.equal(refresh.body.grantType, 'refresh_token'); assert.ok(refresh.body.refreshToken === saved); assert.equal(refresh.body.appId, 'horizon');
+  assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(path, fixture.protection).get()) === rotated.refreshToken);
+  const other = require('../dist/electron/account.js').createAccount({ ...fixture.host, directory: join(fixture.directory, 'other-profile'), changed() {} }); t.after(() => other.close());
+  const count = fixture.requests.length; await other.retry(); assert.deepEqual(other.state(), { status: 'signedOut' }); assert.equal(fixture.requests.length, count);
+});
+
+test('account refreshes a rejected access token exactly once and persists the rotated refresh token', async t => {
+  const fixture = await accountFixture(t); await fixture.signIn();
+  const previous = fixture.token(), rotated = fixture.rotate(); let rejected = false;
+  fixture.handle(call => {
+    if (call.path === '/v1/me' && call.headers.authorization === `Bearer ${previous.accessToken}`) { rejected = true; return { status: 401, body: { error: 'unauthorized' } }; }
+  });
+  const before = fixture.requests.length; await Promise.all([fixture.account.me(), fixture.account.me(), fixture.account.me()]); assert.equal(rejected, true); assert.equal(fixture.account.state().status, 'signedIn');
+  assert.deepEqual(fixture.requests.slice(before).map(call => [call.method, call.path]), [['GET', '/v1/me'], ['POST', '/v1/oauth/token'], ['GET', '/v1/me']]);
+  const refresh = fixture.requests.slice(before)[1]; assert.ok(refresh.body.refreshToken === previous.refreshToken);
+  assert.ok(fixture.requests.at(-1).headers.authorization === `Bearer ${rotated.accessToken}`);
+  assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
+});
+
+test('account invalid_grant signs out locally and sign-out removes the sealed file even when revocation fails', async t => {
+  const fixture = await accountFixture(t); await fixture.signIn(); const path = join(fixture.host.directory, 'account.sealed');
+  fixture.handle(call => call.path === '/v1/me' ? { status: 401, body: { error: { code: 'unauthorized' } } } : call.path === '/v1/oauth/token' ? { status: 400, body: { error: { code: 'invalid_grant' } } } : undefined);
+  await fixture.account.me().catch(() => {}); assert.deepEqual(fixture.account.state(), { status: 'signedOut' }); assert.equal(existsSync(path), false);
+  fixture.handle(undefined); await fixture.signIn(); fixture.handle(call => call.path === '/v1/oauth/revoke' ? { status: 503, body: { error: 'unavailable' } } : undefined);
+  await fixture.account.signOut(); assert.deepEqual(fixture.account.state(), { status: 'signedOut' }); assert.equal(existsSync(path), false);
+  const revoke = fixture.requests.find(call => call.path === '/v1/oauth/revoke'); assert.equal(revoke.method, 'POST'); assert.ok(revoke.headers.authorization === `Bearer ${fixture.token().accessToken}`);
+});
+
+test('account sign-out deletes the sealed file before remote work and retries a rejected revoke once with refreshed credentials', async t => {
+  const fixture = await accountFixture(t); await fixture.signIn();
+  const path = join(fixture.host.directory, 'account.sealed'), previous = fixture.token(), rotated = fixture.rotate(), before = fixture.requests.length;
+  let revoked = 0;
+  fixture.handle(call => {
+    assert.equal(existsSync(path), false);
+    if (call.path === '/v1/oauth/revoke' && ++revoked === 1) return { status: 401, body: { error: { code: 'unauthorized' } } };
+  });
+  await fixture.account.signOut(); assert.equal(existsSync(path), false); assert.deepEqual(fixture.account.state(), { status: 'signedOut' });
+  const calls = fixture.requests.slice(before); assert.deepEqual(calls.map(call => [call.method, call.path]), [['POST', '/v1/oauth/revoke'], ['POST', '/v1/oauth/token'], ['POST', '/v1/oauth/revoke']]);
+  assert.ok(calls[0].headers.authorization === `Bearer ${previous.accessToken}`); assert.ok(calls[1].body.refreshToken === previous.refreshToken);
+  assert.ok(calls[2].headers.authorization === `Bearer ${rotated.accessToken}`); assert.equal(revoked, 2);
+});
+
+test('account retry preserves a stored token on a malformed me response and refuses redirects', async t => {
+  const fixture = await accountFixture(t); await fixture.signIn(); const path = join(fixture.host.directory, 'account.sealed');
+  fixture.me({ email: 123, displayName: null }); await fixture.account.me().catch(() => {});
+  assert.deepEqual(fixture.account.state(), { status: 'error', code: 'ACCOUNT_INVALID_RESPONSE' }); assert.equal(existsSync(path), true);
+  fixture.handle(call => call.path === '/v1/me' ? { status: 302, headers: { location: 'http://127.0.0.1:1/forbidden' }, body: {} } : undefined);
+  await fixture.account.retry().catch(() => {}); assert.deepEqual(fixture.account.state(), { status: 'error', code: 'ACCOUNT_INVALID_RESPONSE' }); assert.equal(existsSync(path), true);
+});
+
+test('account me accepts valid future names and plans and ignores invalid optional account fields', async t => {
+  const fixture = await accountFixture(t); await fixture.signIn();
+  fixture.me({ email: 'person@example.test', displayName: 'Account Name', plans: [{ key: 'nebula-dawn', product: 'nebula', tier: 'dawn', label: 'Nebula+ Alba' }], devices: [{ id: 'private-device' }] });
+  await fixture.account.me(); assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: 'Account Name', plan: 'Nebula+ Alba' });
+  for (const extra of [{ displayName: 42, plans: null }, { displayName: ' bad name ', plans: [{ key: 'key', product: 'nebula', tier: 'tier', label: 42 }] }, { displayName: 'bad\nname', plans: [{ product: 'nebula', label: 'Missing plan fields' }] }]) {
+    fixture.me({ email: 'person@example.test', ...extra }); await fixture.account.me();
+    assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null });
+  }
+});
+
+test('account refreshes an expired access token before me and keeps refresh material after a network failure', async t => {
+  const fixture = await accountFixture(t); fixture.rotate({ ...accountTokens(), expiresIn: 0.001 }); await fixture.signIn();
+  await new Promise(done => setTimeout(done, 5)); const previous = fixture.token(), rotated = fixture.rotate(), before = fixture.requests.length;
+  await fixture.account.me(); assert.deepEqual(fixture.requests.slice(before).map(call => call.path), ['/v1/oauth/token', '/v1/me']);
+  assert.ok(fixture.requests[before].body.refreshToken === previous.refreshToken);
+  assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
+  fixture.account.close(); const next = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {}, fetch: async () => { throw new Error('Synthetic network refusal'); } }); t.after(() => next.close());
+  await next.retry().catch(() => {}); assert.deepEqual(next.state(), { status: 'error', code: 'ACCOUNT_NETWORK' });
+  assert.equal(existsSync(join(fixture.host.directory, 'account.sealed')), true);
+});
+
+test('account storage failure cannot publish signed-in state or retain an unsealed refresh token', async t => {
+  const fixture = await accountFixture(t, { cipher: plainCipher }), page = await fixture.start();
+  assert.equal((await accountHTTP(page.searchParams.get('redirectUri') + '?code=' + 'c'.repeat(43))).status, 200);
+  await waitForAccount(fixture.account, 'error'); assert.deepEqual(fixture.account.state(), { status: 'error', code: 'ACCOUNT_STORAGE' });
+  assert.equal(existsSync(join(fixture.host.directory, 'account.sealed')), false);
+  assert.equal(fixture.states.some(state => state.status === 'signedIn'), false);
+});
+
+test('account sign-in times out after ten minutes and closes the callback listener', async t => {
+  const fixture = await accountFixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const page = await fixture.start(); t.mock.timers.tick(599999); assert.equal(fixture.account.state().status, 'signingIn');
+  t.mock.timers.tick(1); assert.deepEqual(fixture.account.state(), { status: 'error', code: 'ACCOUNT_TIMEOUT' }); t.mock.timers.reset();
+  await assert.rejects(accountHTTP(page.searchParams.get('redirectUri') + '?code=' + 'c'.repeat(43))); assert.equal(fixture.requests.length, 0);
+});
+
+test('account aborts an unresponsive token request after twenty seconds with a stable timeout code', async t => {
+  const fixture = await accountFixture(t); fixture.account.close();
+  let started; const fetching = new Promise(done => { started = done; });
+  const account = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {}, fetch: async (_url, init) => new Promise((_done, reject) => {
+    init.signal.addEventListener('abort', () => reject(new Error('Synthetic abort')), { once: true }); started();
+  }) }); t.after(() => account.close());
+  await account.signIn(); t.mock.timers.enable({ apis: ['setTimeout'] });
+  assert.equal((await accountHTTP(new URL(fixture.opened.at(-1)).searchParams.get('redirectUri') + '?code=' + 'c'.repeat(43))).status, 200);
+  await fetching; t.mock.timers.tick(20000); await new Promise(setImmediate); t.mock.timers.reset();
+  assert.deepEqual(account.state(), { status: 'error', code: 'ACCOUNT_TIMEOUT' }); assert.equal(existsSync(join(fixture.host.directory, 'account.sealed')), false);
+});
+
+test('account cancellation during an outstanding exchange discards a late response and keeps the profile signed out', async t => {
+  const fixture = await accountFixture(t); fixture.account.close();
+  let started, finish; const fetching = new Promise(done => { started = done; }), pending = new Promise(done => { finish = done; });
+  const account = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {}, fetch: async () => { started(); return pending; } }); t.after(() => account.close());
+  await account.signIn(); const callback = new URL(fixture.opened.at(-1)).searchParams.get('redirectUri');
+  assert.equal((await accountHTTP(callback + '?code=' + 'c'.repeat(43))).status, 200); await fetching;
+  account.cancel(); finish(new Response(JSON.stringify(accountTokens()), { headers: { 'content-type': 'application/json' } }));
+  await new Promise(setImmediate); assert.deepEqual(account.state(), { status: 'signedOut' }); assert.equal(existsSync(join(fixture.host.directory, 'account.sealed')), false);
+});
+
+test('account commands accept only their exact fields and all six are refused in private windows', t => {
+  const { assertPrivateCommand } = require('../dist/electron/private-commands.js'), browser = notebookBrowser(t, authenticatedCipher()), privateWindow = browser.addWindow({ privateWindow: true });
+  for (const type of ['account-sign-in', 'account-reopen', 'account-cancel', 'account-sign-out', 'account-manage', 'account-retry']) {
+    const command = { type }; assert.deepEqual(validateCommand(command), command);
+    for (const extra of [{ extra: true }, { profile: randomUUID() }, { token: 'forged' }]) assert.throws(() => validateCommand({ ...command, ...extra }));
+    assert.throws(() => assertPrivateCommand(command), /ACCOUNT_PRIVATE/); assert.throws(() => privateWindow.command(command), /ACCOUNT_PRIVATE/);
+  }
+});
+
+test('browser account controllers follow profiles, are shared by regular windows, stay hidden in private windows and close with their owner', async t => {
+  const controllers = new Map();
+  const browser = notebookBrowser(t, authenticatedCipher(), { accountFactory(host) {
+    const id = require('node:path').basename(host.directory), entry = { state: { status: 'signedOut' }, retries: 0, closed: 0 };
+    assert.equal(controllers.has(id), false); controllers.set(id, entry);
+    return { state: () => ({ ...entry.state }), async retry() { entry.retries++; await Promise.resolve(); entry.state = { status: 'signedIn', email: `${id}@example.test`, displayName: null, plan: null }; host.changed(); },
+      async signIn() {}, async reopen() {}, cancel() {}, async me() {}, async signOut() {}, async manage() {}, close() { entry.closed++; } };
+  } });
+  await new Promise(setImmediate); const first = browser.state().activeProfileId, firstController = controllers.get(first);
+  assert.equal(firstController.retries, 1); assert.deepEqual(browser.state().account, firstController.state);
+  const count = controllers.size, peer = browser.addWindow({ profileId: first, fresh: true }), privateWindow = browser.addWindow({ profileId: first, privateWindow: true, fresh: true });
+  await new Promise(setImmediate); assert.equal(controllers.size, count); assert.equal(firstController.retries, 1);
+  assert.deepEqual(peer.state().account, firstController.state); assert.deepEqual(privateWindow.state().account, { status: 'signedOut' });
+  browser.command({ type: 'create-profile', name: 'Account profile', color: 'blue' }); await new Promise(setImmediate);
+  const next = browser.state().activeProfileId, nextController = controllers.get(next);
+  assert.notEqual(next, first); assert.equal(nextController.retries, 1); assert.deepEqual(browser.state().account, nextController.state); assert.deepEqual(peer.state().account, firstController.state);
+  browser.command({ type: 'switch-profile', id: first }); assert.deepEqual(browser.state().account, firstController.state); assert.equal(firstController.retries, 1);
+  await browser.command({ type: 'delete-profile', id: next }); assert.equal(nextController.closed, 1);
+  browser.close(); assert.equal(firstController.closed, 0); peer.close(); assert.equal(firstController.closed, 0);
+  privateWindow.close(); assert.equal(firstController.closed, 1);
+  for (const controller of controllers.values()) assert.equal(controller.closed, 1);
+});
+
+test('Nebula follows Themes in Hub apps and is accepted by pin commands, quick access and settings sync', t => {
+  const { HUB_APPS } = require('../dist/src/shared/api.js'), { syncSettings, validateSyncSettings } = require('../dist/electron/sync-model.js');
+  assert.equal(HUB_APPS[HUB_APPS.indexOf('themes') + 1], 'nebula');
+  for (const type of ['pin-app', 'unpin-app']) assert.deepEqual(validateCommand({ type, id: 'nebula' }), { type, id: 'nebula' });
+  const path = join(temporaryDirectory(t, 'nebula-settings'), 'settings.json'), settings = createSettings(path, () => {});
+  settings.setAppPinned('nebula', true); assert.deepEqual(readSettings(path).quickAccess, ['nebula']);
+  const synced = syncSettings(readSettings(path)); assert.doesNotThrow(() => validateSyncSettings(synced)); assert.deepEqual(synced.quickAccess, ['nebula']);
 });
