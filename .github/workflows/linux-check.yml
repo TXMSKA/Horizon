@@ -1,0 +1,328 @@
+name: Linux install check
+on:
+  push:
+    branches: [ci/012-linux-check]
+permissions:
+  contents: read
+jobs:
+  linux:
+    if: github.repository == 'TXMSKA/Horizon'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare the runner
+        run: |
+          set -euo pipefail
+          current="Runner prepared"
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "- FAIL: $current" >> "$GITHUB_STEP_SUMMARY"; fi' EXIT
+          { echo "## Linux install check"; echo; } >> "$GITHUB_STEP_SUMMARY"
+
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils libfuse2t64 dbus-x11
+
+          # Chromium's sandbox needs unprivileged user namespaces; Ubuntu 24.04 restricts them through AppArmor.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "The AppArmor userns key is not available, continuing."
+
+          setsid nohup Xvfb :99 -screen 0 1280x1024x24 > "$RUNNER_TEMP/xvfb.log" 2>&1 < /dev/null &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          ready=""
+          for _ in $(seq 1 20); do
+            if DISPLAY=:99 xdpyinfo > /dev/null 2>&1; then ready=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then echo "Xvfb did not start."; cat "$RUNNER_TEMP/xvfb.log"; exit 1; fi
+
+          # A session bus for the app, so Chromium does not fall back to noisy defaults.
+          dbus-launch --sh-syntax > "$RUNNER_TEMP/dbus.env"
+          . "$RUNNER_TEMP/dbus.env"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+
+          echo "- PASS: $current" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download the releases
+        run: |
+          set -euo pipefail
+          current="Releases v0.1.1 and v0.1.2 downloaded"
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "- FAIL: $current" >> "$GITHUB_STEP_SUMMARY"; fi' EXIT
+
+          gh release download v0.1.1 -R TXMSKA/Horizon -p 'Horizon-0.1.1.AppImage' -p 'horizon_0.1.1_amd64.deb' -D old
+          gh release download v0.1.2 -R TXMSKA/Horizon -p 'Horizon-0.1.2.AppImage' -p 'horizon_0.1.2_amd64.deb' -p 'latest-linux.yml' -D new
+          sha512sum old/* new/*
+          ls -la old new
+          test -s old/Horizon-0.1.1.AppImage
+          test -s old/horizon_0.1.1_amd64.deb
+          test -s new/Horizon-0.1.2.AppImage
+          test -s new/horizon_0.1.2_amd64.deb
+          test -s new/latest-linux.yml
+
+          echo "- PASS: $current" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "AppImage: install, start, update"
+        run: |
+          set -euo pipefail
+          current="AppImage 0.1.1 starts and downloads 0.1.2"
+          finish() {
+            local rc=$?
+            if [ "$rc" -ne 0 ]; then echo "- FAIL: $current" >> "$GITHUB_STEP_SUMMARY"; fi
+            # Leave nothing behind so the deb test starts clean.
+            rm -rf "$HOME/Applications" "$HOME/.cache/horizon-updater" "$HOME/.config/Horizon"
+            return "$rc"
+          }
+          trap finish EXIT
+          pass() { echo "- PASS: $1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          alive() { [ -r "/proc/$1/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status"; }
+          descendants() { local c; for c in $(pgrep -P "$1" || true); do echo "$c"; descendants "$c"; done; }
+          tree_alive() { local p; for p in "$@"; do if alive "$p"; then return 0; fi; done; return 1; }
+          pending_size() {
+            local total=0 f
+            for f in "$HOME"/.cache/horizon-updater/pending/*0.1.2*; do
+              if [ -f "$f" ]; then total=$((total + $(stat -c %s "$f"))); fi
+            done
+            echo "$total"
+          }
+          find_windows() { xwininfo -root -tree 2>/dev/null | grep -i horizon || true; }
+          start_app() {
+            APP_LOG=$(mktemp "$RUNNER_TEMP/horizon-app-XXXXXX")
+            echo "Starting: $*"
+            "$@" > "$APP_LOG" 2>&1 &
+            APP_PID=$!
+          }
+          stop_app() {
+            local pids p i
+            pids="$APP_PID $(descendants "$APP_PID" | tr '\n' ' ')"
+            echo "Sending SIGTERM to the app (pids: $pids)"
+            for p in $pids; do
+              if ! grep -qa -e '--type=' "/proc/$p/cmdline" 2>/dev/null; then kill -TERM "$p" 2>/dev/null || true; fi
+            done
+            i=0
+            while [ "$i" -lt 60 ] && tree_alive $pids; do sleep 1; i=$((i + 1)); done
+            if tree_alive $pids; then
+              echo "Still running after 60 s: sending SIGTERM to the children, then SIGKILL."
+              for p in $pids; do pkill -TERM -P "$p" || true; done
+              sleep 5
+              for p in $pids; do
+                if alive "$p"; then echo "Forcing pid $p"; kill -KILL "$p" 2>/dev/null || true; fi
+              done
+            else
+              echo "The app and all its processes exited after ${i}s."
+            fi
+            wait "$APP_PID" 2>/dev/null || true
+            echo "----- app log -----"
+            cat "$APP_LOG"
+            echo "----- updater cache -----"
+            ls -laR "$HOME/.cache/horizon-updater" 2>&1 || true
+          }
+          abort() { echo "$1"; stop_app; return 1; }
+          run_until_downloaded() {
+            local t=0 last=-1 size win="" seen=""
+            start_app "$@"
+            while [ "$t" -lt 180 ]; do
+              sleep 5; t=$((t + 5))
+              if ! alive "$APP_PID"; then echo "The app died after ${t}s."; cat "$APP_LOG"; return 1; fi
+              if [ -z "$seen" ]; then
+                win=$(find_windows)
+                if [ -n "$win" ]; then seen=1; echo "Horizon window found after ${t}s:"; echo "$win"
+                elif [ "$t" -ge 60 ]; then abort "No Horizon window appeared within 60 s."; return 1
+                fi
+              fi
+              size=$(pending_size)
+              if [ -n "$seen" ] && [ "$size" -gt 0 ] && [ "$size" = "$last" ]; then
+                echo "Update stable at $size bytes after ${t}s."
+                if [ -n "${EXPECT_BYTES:-}" ] && [ "$size" != "$EXPECT_BYTES" ]; then echo "Warning: expected $EXPECT_BYTES bytes."; fi
+                stop_app
+                return 0
+              fi
+              last=$size
+            done
+            abort "Timed out after 180 s waiting for the update to download."
+          }
+          run_until_window() {
+            local t=0 win=""
+            start_app "$@"
+            while [ "$t" -lt 60 ]; do
+              sleep 5; t=$((t + 5))
+              if ! alive "$APP_PID"; then echo "The app died after ${t}s."; cat "$APP_LOG"; return 1; fi
+              win=$(find_windows)
+              if [ -n "$win" ]; then
+                echo "Horizon window found after ${t}s:"; echo "$win"
+                sleep 5
+                if ! alive "$APP_PID"; then echo "The app died right after showing its window."; cat "$APP_LOG"; return 1; fi
+                stop_app
+                return 0
+              fi
+            done
+            abort "No Horizon window appeared within 60 s."
+          }
+
+          mkdir -p "$HOME/Applications"
+          cp old/Horizon-0.1.1.AppImage "$HOME/Applications/Horizon.AppImage"
+          chmod +x "$HOME/Applications/Horizon.AppImage"
+          new_sum=$(sha512sum new/Horizon-0.1.2.AppImage | cut -d' ' -f1)
+          export EXPECT_BYTES
+          EXPECT_BYTES=$(stat -c %s new/Horizon-0.1.2.AppImage)
+
+          run_until_downloaded "$HOME/Applications/Horizon.AppImage"
+          pass "$current"
+
+          current="AppImage replaced by 0.1.2 after the app quit"
+          updated=""
+          for _ in $(seq 1 12); do
+            for f in "$HOME"/Applications/*; do
+              if [ -f "$f" ] && [ "$(sha512sum "$f" | cut -d' ' -f1)" = "$new_sum" ]; then updated=$f; break; fi
+            done
+            if [ -n "$updated" ]; then break; fi
+            sleep 5
+          done
+          echo "Contents of $HOME/Applications:"
+          ls -la "$HOME/Applications"
+          if [ -z "$updated" ]; then echo "No file in $HOME/Applications matches the sha512 of Horizon-0.1.2.AppImage."; exit 1; fi
+          echo "Updated AppImage: $updated"
+          pass "$current ($(basename "$updated"))"
+
+          current="Updated AppImage starts"
+          chmod +x "$updated"
+          run_until_window "$updated"
+          pass "$current"
+
+      - name: "deb: install, start, update, uninstall"
+        if: always()
+        run: |
+          set -euo pipefail
+          current="deb 0.1.1 installs"
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "- FAIL: $current" >> "$GITHUB_STEP_SUMMARY"; fi' EXIT
+          pass() { echo "- PASS: $1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          alive() { [ -r "/proc/$1/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status"; }
+          descendants() { local c; for c in $(pgrep -P "$1" || true); do echo "$c"; descendants "$c"; done; }
+          tree_alive() { local p; for p in "$@"; do if alive "$p"; then return 0; fi; done; return 1; }
+          pending_size() {
+            local total=0 f
+            for f in "$HOME"/.cache/horizon-updater/pending/*0.1.2*; do
+              if [ -f "$f" ]; then total=$((total + $(stat -c %s "$f"))); fi
+            done
+            echo "$total"
+          }
+          find_windows() { xwininfo -root -tree 2>/dev/null | grep -i horizon || true; }
+          start_app() {
+            APP_LOG=$(mktemp "$RUNNER_TEMP/horizon-app-XXXXXX")
+            echo "Starting: $*"
+            "$@" > "$APP_LOG" 2>&1 &
+            APP_PID=$!
+          }
+          stop_app() {
+            local pids p i
+            pids="$APP_PID $(descendants "$APP_PID" | tr '\n' ' ')"
+            echo "Sending SIGTERM to the app (pids: $pids)"
+            for p in $pids; do
+              if ! grep -qa -e '--type=' "/proc/$p/cmdline" 2>/dev/null; then kill -TERM "$p" 2>/dev/null || true; fi
+            done
+            i=0
+            while [ "$i" -lt 60 ] && tree_alive $pids; do sleep 1; i=$((i + 1)); done
+            if tree_alive $pids; then
+              echo "Still running after 60 s: sending SIGTERM to the children, then SIGKILL."
+              for p in $pids; do pkill -TERM -P "$p" || true; done
+              sleep 5
+              for p in $pids; do
+                if alive "$p"; then echo "Forcing pid $p"; kill -KILL "$p" 2>/dev/null || true; fi
+              done
+            else
+              echo "The app and all its processes exited after ${i}s."
+            fi
+            wait "$APP_PID" 2>/dev/null || true
+            echo "----- app log -----"
+            cat "$APP_LOG"
+            echo "----- updater cache -----"
+            ls -laR "$HOME/.cache/horizon-updater" 2>&1 || true
+          }
+          abort() { echo "$1"; stop_app; return 1; }
+          run_until_downloaded() {
+            local t=0 last=-1 size win="" seen=""
+            start_app "$@"
+            while [ "$t" -lt 180 ]; do
+              sleep 5; t=$((t + 5))
+              if ! alive "$APP_PID"; then echo "The app died after ${t}s."; cat "$APP_LOG"; return 1; fi
+              if [ -z "$seen" ]; then
+                win=$(find_windows)
+                if [ -n "$win" ]; then seen=1; echo "Horizon window found after ${t}s:"; echo "$win"
+                elif [ "$t" -ge 60 ]; then abort "No Horizon window appeared within 60 s."; return 1
+                fi
+              fi
+              size=$(pending_size)
+              if [ -n "$seen" ] && [ "$size" -gt 0 ] && [ "$size" = "$last" ]; then
+                echo "Update stable at $size bytes after ${t}s."
+                if [ -n "${EXPECT_BYTES:-}" ] && [ "$size" != "$EXPECT_BYTES" ]; then echo "Warning: expected $EXPECT_BYTES bytes."; fi
+                stop_app
+                return 0
+              fi
+              last=$size
+            done
+            abort "Timed out after 180 s waiting for the update to download."
+          }
+
+          # Start from a clean profile in case the AppImage step left anything behind.
+          rm -rf "$HOME/.cache/horizon-updater" "$HOME/.config/Horizon"
+
+          sudo apt-get install -y ./old/horizon_0.1.1_amd64.deb
+          ver=$(dpkg-query -W -f='${Version}\n' horizon)
+          echo "Installed version: $ver"
+          case "$ver" in
+            0.1.1*) ;;
+            *) echo "Expected a version starting with 0.1.1."; exit 1 ;;
+          esac
+          pass "$current (version $ver)"
+
+          current="deb 0.1.1 starts and downloads 0.1.2"
+          launcher=""
+          while read -r f; do
+            if [ -f "$f" ] && [ -x "$f" ] && [ ! -L "$f" ]; then launcher=$f; break; fi
+          done < <(dpkg -L horizon | grep -E '/horizon$' || true)
+          echo "Launcher: ${launcher:-none found}"
+          if [ -z "$launcher" ]; then echo "No launcher found in the package."; exit 1; fi
+          if [ "$launcher" != "/opt/Horizon/horizon" ]; then echo "Warning: expected /opt/Horizon/horizon."; fi
+          export EXPECT_BYTES
+          EXPECT_BYTES=$(stat -c %s new/horizon_0.1.2_amd64.deb)
+          run_until_downloaded "$launcher"
+          pass "$current"
+
+          # electron-updater installs the deb when the app quits, through pkexec or sudo, which can fail without a polkit agent.
+          current="deb updated to 0.1.2 by the app"
+          reached=""
+          ver=""
+          for _ in $(seq 1 18); do
+            ver=$(dpkg-query -W -f='${Version}\n' horizon 2>/dev/null || true)
+            case "$ver" in
+              0.1.2*) reached=1 ;;
+            esac
+            if [ -n "$reached" ]; then break; fi
+            sleep 5
+          done
+          echo "Version reached: ${ver:-unknown}"
+          echo "Updater lines in the app log:"
+          grep -iE 'updat|pkexec|polkit|sudo|dpkg|apt-get|authoriz|authentic|error' "$APP_LOG" || echo "(no matching lines)"
+          update_failed=""
+          if [ -n "$reached" ]; then
+            pass "$current (version $ver)"
+          else
+            reason=$(grep -iE 'pkexec|polkit|authoriz|authentic|sudo|dpkg|apt-get|error' "$APP_LOG" | sed -n 1,3p || true)
+            echo "UPDATE_NOT_INSTALLED: version stayed at ${ver:-unknown}. Reason found in the log: ${reason:-none, the log has no updater error}"
+            echo "Tail of /var/log/dpkg.log:"
+            tail -n 10 /var/log/dpkg.log || true
+            update_failed=1
+          fi
+
+          current="deb removed cleanly"
+          sudo apt-get remove -y horizon
+          if [ -e /opt/Horizon ]; then echo "/opt/Horizon is still there:"; ls -la /opt/Horizon; exit 1; fi
+          if dpkg -l horizon 2>/dev/null | grep -q '^ii'; then echo "dpkg still lists horizon as installed."; exit 1; fi
+          pass "$current"
+
+          if [ -n "$update_failed" ]; then
+            current="deb updated to 0.1.2 by the app (UPDATE_NOT_INSTALLED)"
+            exit 1
+          fi
