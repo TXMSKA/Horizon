@@ -3,9 +3,13 @@ import type { ServicesCommand, ServicesState } from './services';
 import type { ServiceReason } from './services';
 import type { TranslateCommand, TranslateState, TranslationChoices } from './translate';
 export type Language = 'en' | 'es';
+export interface AccountSpaceMember { accountId: string; displayName: string | null; role: 'owner' | 'member'; keyChanged: boolean }
+export interface AccountSpace { id: string; name: string; code: string | null; colour: string | null; icon: string | null; role: 'owner' | 'member'; pending: boolean; members: AccountSpaceMember[] }
+export interface AccountSharedDataset { spaceId: string; datasetId: string; sharedBy: { accountId: string; displayName: string | null }; updatedAt: string; size: number; title: null }
 export type AccountState = { status: 'signedOut' } | { status: 'signingIn' }
-  | { status: 'signedIn'; email: string; displayName: string | null; plan: string | null } | { status: 'error'; code: string };
-export type AccountCommand = { type: 'account-sign-in' | 'account-reopen' | 'account-cancel' | 'account-sign-out' | 'account-manage' | 'account-retry' };
+  | { status: 'signedIn'; email: string; displayName: string | null; plan: string | null; phrase: 'ready' | 'needed' | 'wrong'; keyStore: 'shared' | 'session' | 'error'; spaces: AccountSpace[]; shared: AccountSharedDataset[]; spacesError: string | null } | { status: 'error'; code: string };
+export type AccountCommand = { type: 'account-sign-in' | 'account-reopen' | 'account-cancel' | 'account-sign-out' | 'account-manage' | 'account-retry' | 'account-refresh' }
+  | { type: 'account-phrase'; phrase: string };
 export type VaultTimeout = 'close' | '5' | '15' | '60';
 export interface VaultLogin { id: string; origin: string; title: string; username: string }
 export interface VaultSuggestion { id: string; origin: string; x: number; y: number; width: number; locked: boolean; logins: VaultLogin[] }

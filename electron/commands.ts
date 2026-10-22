@@ -45,8 +45,10 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
   const command = object(value);
   const type = command.type;
   if (typeof type === 'string' && type.startsWith('account-')) {
-    if (!['account-sign-in', 'account-reopen', 'account-cancel', 'account-sign-out', 'account-manage', 'account-retry'].includes(type)
-      || !Object.hasOwn(command, 'type') || Object.keys(command).length !== 1) throw new Error('ACCOUNT_INVALID_RESPONSE');
+    const phrase = type === 'account-phrase';
+    if (!(phrase || ['account-sign-in', 'account-reopen', 'account-cancel', 'account-sign-out', 'account-manage', 'account-retry', 'account-refresh'].includes(type))
+      || !Object.hasOwn(command, 'type') || Object.keys(command).length !== (phrase ? 2 : 1)
+      || phrase && (!Object.hasOwn(command, 'phrase') || !string(command.phrase, 1000))) throw new Error('ACCOUNT_INVALID_RESPONSE');
     return value as BrowserCommand;
   }
   if (typeof type === 'string' && type.startsWith('sync-')) {

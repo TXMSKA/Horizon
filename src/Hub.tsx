@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { Check, ExternalLink, House, Languages, LayoutDashboard, LoaderCircle, LogIn, LogOut, Orbit, Palette, Pin, PinOff, Trash2 } from 'lucide-react';
+import { Check, ExternalLink, Folder, House, Languages, LayoutDashboard, LoaderCircle, Lock, LogIn, LogOut, Orbit, Palette, Pin, PinOff, Trash2, Users } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { HUB_APPS, MARKETPLACE_THEMES } from './shared/api';
@@ -92,15 +92,18 @@ function InstalledThemes({ state, language, onInstalled }: { state: BrowserState
   </div>;
 }
 
-// The Cosmic account of the active profile. Spaces and shared projects join this page once Quantum serves them.
+const memberInitials = (name: string | null) => name ? name.split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]!.toUpperCase()).join('') : '';
+// The Cosmic account of the active profile, its Spaces and what was shared with it. Sharing a project joins this page in its own step.
 function NebulaAccount({ state, language }: { state: BrowserState; language: Language }) {
   const t = (key: CopyKey) => text(key, language), pending = useRef(false);
-  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState<BrowserCommand | null>(null);
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState<BrowserCommand | null>(null), [phrase, setPhrase] = useState('');
+  useEffect(() => { if (state.account.status === 'signedIn' && state.account.phrase === 'ready') void window.horizon.command({ type: 'account-refresh' }).catch(() => undefined); }, [state.account.status]);
   const run = async (command: BrowserCommand) => {
     if (pending.current) return;
     pending.current = true; setBusy(true); setError(''); setRetry(null);
     try { await window.horizon.command(command); }
-    catch (reason) { setError(settingsError(reason, language)); setRetry(command); }
+    // The phrase is never kept for a retry.
+    catch (reason) { setError(settingsError(reason, language)); setRetry(command.type === 'account-phrase' ? null : command); }
     finally { pending.current = false; setBusy(false); }
   };
   const account = state.account;
@@ -115,8 +118,28 @@ function NebulaAccount({ state, language }: { state: BrowserState; language: Lan
       <div className="hub-nebula-actions"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-reopen' }); }}><ExternalLink aria-hidden="true" />{t('nebulaReopen')}</button>
         <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-cancel' }); }}>{t('cancel')}</button></div>
     </>}
-    {account.status === 'signedIn' && <>
+    {account.status === 'signedIn' && account.phrase !== 'ready' && <form className="hub-nebula-phrase" onSubmit={event => { event.preventDefault(); const value = phrase; setPhrase(''); void run({ type: 'account-phrase', phrase: value }); }}>
+      <h3>{t('nebulaPhraseTitle')}</h3><p className="hub-nebula-text">{t('nebulaPhraseHint')}</p>
+      <textarea className="hub-nebula-words" aria-label={t('nebulaPhraseTitle')} value={phrase} maxLength={1000} spellCheck={false} autoComplete="off" autoCapitalize="off" onChange={event => setPhrase(event.target.value)} />
+      {account.phrase === 'wrong' && <p className="settings-feedback error" role="alert">{t('ACCOUNT_PHRASE_WRONG')}</p>}
+      <p className="settings-note">{t('nebulaPhraseLocal')}</p>
+      <div className="hub-nebula-actions"><button className="desktop-action primary" type="submit" aria-disabled={busy || !phrase.trim()}>{t('phraseContinue')}</button>
+        <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { setPhrase(''); void run({ type: 'account-sign-out' }); }}>{t('cancel')}</button></div>
+    </form>}
+    {account.status === 'signedIn' && account.phrase === 'ready' && <>
       <div className="hub-nebula-account"><span className="hub-nebula-avatar" aria-hidden="true">{initials}</span><span className="hub-nebula-who"><strong>{account.displayName ?? account.email}</strong><small>{account.plan ?? t('nebulaSignedInNote')}</small></span></div>
+      <hr />
+      <section className="hub-nebula-section" aria-labelledby="nebula-spaces"><h3 id="nebula-spaces">{t('spaces')}</h3>
+        <div className="hub-nebula-row"><Lock aria-hidden="true" /><span>{t('personalSpace')}</span></div>
+        {account.spaces.map(space => <div className="hub-nebula-space" key={space.id}>
+          <div className="hub-nebula-row"><Users aria-hidden="true" style={space.colour?.startsWith('#') ? { color: space.colour } : undefined} /><span>{space.name || t('sharedSpace')}</span></div>
+          {space.pending ? <small className="hub-nebula-pending">{t('spaceKeyPending')}</small> : <div className="hub-nebula-members">{space.members.map(member => <span className="hub-nebula-member" key={member.accountId} title={member.displayName ?? t('spaceMember')}>{memberInitials(member.displayName)}</span>)}</div>}
+        </div>)}
+      </section>
+      {account.shared.length > 0 && <><hr /><section className="hub-nebula-section" aria-labelledby="nebula-shared"><h3 id="nebula-shared">{t('sharedWithYou')}</h3>
+        {account.shared.map(item => { const space = account.spaces.find(entry => entry.id === item.spaceId); return <div className="hub-nebula-shared" key={`${item.spaceId}:${item.datasetId}`}><Folder aria-hidden="true" /><span><span>{item.title ?? t('sharedProject')}</span><small>{t('sharedBy').replace('{name}', item.sharedBy.displayName ?? t('spaceMember'))}{space ? ` · ${space.name || t('sharedSpace')}` : ''}</small></span></div>; })}
+      </section></>}
+      {account.spacesError && <div className="settings-feedback error" role="alert"><span>{settingsError(new Error(account.spacesError), language)}</span><button className="text-button" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-refresh' }); }}>{t('retry')}</button></div>}
       <hr />
       <div className="hub-nebula-actions"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-manage' }); }}><ExternalLink aria-hidden="true" />{t('nebulaManage')}</button>
         <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-sign-out' }); }}><LogOut aria-hidden="true" />{t('signOut')}</button></div>

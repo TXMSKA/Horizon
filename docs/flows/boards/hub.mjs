@@ -2,7 +2,7 @@
 import { board } from "blueprint/board.mjs";
 import { col, row, stack, text } from "blueprint/kit.mjs";
 import { popover, menuRow } from "blueprint/ui.mjs";
-import { AMBER, FJORD, DUNE, GRAPHITE, MOSS, HUB_W, HUB_H, hubPopup, tileMenuPlace, themesPopup, scaled, site, hub, pin, themes, splitPick, split, splitOptions, translate, translateOptions, originalPage, nebula, nebulaSignedOut, nebulaSigningIn, nebulaSignedIn, hubBetaGrid, shareDialog, withDialog, siteWindow, PINNED, horizonWindow, routesSite, SITE_TABS, SITE_BAR, startPage } from "../kit/horizon.mjs";
+import { AMBER, FJORD, DUNE, GRAPHITE, MOSS, HUB_W, HUB_H, hubPopup, tileMenuPlace, themesPopup, scaled, site, hub, pin, themes, splitPick, split, splitOptions, translate, translateOptions, originalPage, nebula, nebulaSignedOut, nebulaSigningIn, nebulaSignedIn, nebulaPhrase, shareChooser, hubBetaGrid, shareDialog, withDialog, siteWindow, PINNED, horizonWindow, routesSite, SITE_TABS, SITE_BAR, startPage } from "../kit/horizon.mjs";
 function closeup() {
   const home = hubPopup(); home.place = { x: 0, y: 0 };
   const menuHome = hubPopup({ pressed: "Split view" }); menuHome.place = { x: 0, y: 0 };
@@ -41,6 +41,8 @@ export default board({
     { id: "new-nebula-out", title: "New 20, Nebula before sign-in", col: 6, row: -1, root: nebulaSignedOut, note: "Approved 2026-10-22. Sign in opens the Cosmic account site in the default browser; Google and Microsoft refuse sign-in inside an app's own browser." },
     { id: "new-nebula-wait", title: "New 21, Signing in", col: 7, row: -1, root: nebulaSigningIn, note: "Approved 2026-10-22. Horizon waits for the browser to return to it; Cancel stops waiting." },
     { id: "new-nebula-in", title: "New 22, Signed in", col: 8, row: -1, root: nebulaSignedIn, note: "Approved 2026-10-22. The account shows its address until Quantum serves a display name and plan; Spaces and Shared with you join this page once Quantum serves Spaces (screen 8)." },
+    { id: "new-nebula-phrase", title: "New 23, Recovery phrase", col: 9, row: -1, root: nebulaPhrase, note: "Approved 2026-10-22. Shown after sign-in only when no Cosmic app on this computer holds the account key yet; afterwards the page shows the Spaces (screen 8)." },
+    { id: "new-share-chooser", title: "New 24, Choose what to share", col: 10, row: -1, root: () => withDialog(site(), shareChooser()), note: "Approved 2026-10-22. Opened by Share a project in Nebula, or by Share in a Desktop project with the project already chosen; Next leads to the warning (screen 13)." },
     { id: "changed-closeup", title: "Changed 1, The Hub up close", col: 0, row: -1, root: closeup, note: "Changed 2026-10-08: Themes up close shows Dune, Graphite and Moss in their own palettes instead of placeholders." },
     { id: "changed-themes", title: "Changed 7, Themes", col: 1, row: -1, root: themes, note: "Changed 2026-10-08: the marketplace previews of Dune, Graphite and Moss use their own palettes." },
     { id: "new-dune", title: "New 16, Dune applied", col: 2, row: -1, root: () => horizonWindow(DUNE, [startPage()]), note: "New 2026-10-08, for the owner's approval before it ships." },

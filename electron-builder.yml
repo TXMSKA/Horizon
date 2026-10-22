@@ -13,6 +13,9 @@ icon: assets/icon/horizon-icon-1024.png
 # Fuses are flipped in this hook because the built-in electronFuses option cannot set wasmTrapHandlers or per-platform values.
 afterPack: scripts/after-pack.cjs
 win:
+  extraResources:
+    - from: build/helpers/cosmic-dpapi.exe
+      to: helpers/cosmic-dpapi.exe
   target:
     - target: nsis
       arch: x64

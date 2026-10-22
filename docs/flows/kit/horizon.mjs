@@ -831,6 +831,21 @@ export const nebulaSigningIn = () => siteWindow([nebulaBeta(
   note("Horizon continues here once the browser returns."),
   col({ gap: 8 }, action("Open the sign-in page again", { primary: true, glyph: "externalLink", ref: "nebula-reopen" }),
     { ...action("Cancel", { ghost: true, ref: "nebula-cancel" }), stroke: "primary" }))]);
+// When Horizon is the first Cosmic app on the computer, it asks once for the recovery phrase; every later app reads the key from this computer.
+export const nebulaPhrase = () => siteWindow([nebulaBeta(
+  text("Enter the recovery phrase", { size: "base", weight: 650, color: "title" }),
+  text("The 24 words given when the Cosmic account was created. They are asked once on this computer; every Cosmic app on it then opens the Spaces without them.", { size: "sm", color: "text" }),
+  col({ h: 112, pad: 10, radius: "md", fill: "surface-2", stroke: "primary", strokeWidth: 1.5, name: "phrase-field", label: "Recovery phrase" },
+    text("river candle maple orbit lantern cedar …", { size: "sm", color: "title" })),
+  note("The words stay on this computer and are never sent."),
+  col({ gap: 8 }, action("Continue", { primary: true, ref: "phrase-continue" }), { ...action("Cancel", { ghost: true, ref: "phrase-cancel" }), stroke: "primary" }))]);
+// Sharing starts here from the Nebula page, or from a project's Share with the project already chosen; the warning (screen 13) follows.
+export const shareChooser = () => popover({ w: 560, pad: 24, gap: 18, radius: "xl", shadow: false, name: "share-chooser", label: "Share a project" },
+  heading("Share a project"),
+  col({ gap: 8 }, label("Project"), dropdown("Trip to Patagonia", { lead: icon("folder", { size: 16, color: "primary" }), ref: "share-project" })),
+  col({ gap: 8 }, label("Space"), dropdown("Lago Azul Studio", { lead: icon("users", { size: 16, color: "primary" }), ref: "share-space-pick" })),
+  note("Only Spaces this account belongs to are listed."),
+  row({ gap: 10, justify: "end" }, { ...action("Cancel", { ghost: true, ref: "chooser-cancel" }), stroke: "primary" }, action("Next", { primary: true, ref: "chooser-next" })));
 export const nebulaSignedIn = () => siteWindow([nebulaBeta(
   row({ gap: 10, name: "nebula-account", label: "Account" }, badge("primary", { initial: "AF", size: 36, ink: "on-primary" }),
     col({ gap: 2 }, text("ana.ferrer@example.com", { size: "base", weight: 650, color: "title" }), note("Signed in on this computer"))), hr(),

@@ -310,6 +310,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'account-sign-out': return account.signOut();
         case 'account-manage': return account.manage();
         case 'account-retry': return account.retry();
+        case 'account-refresh': return account.refreshSpaces();
+        case 'account-phrase': {
+          const phrase = command.phrase; command.phrase = '';
+          return account.phrase(phrase);
+        }
       }
     }
     if (command.type.startsWith('service-')) return services.run(command as ServicesCommand);

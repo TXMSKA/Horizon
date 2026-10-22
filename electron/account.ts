@@ -7,14 +7,20 @@ import { resolve } from 'node:path';
 import type { AccountState, Language } from '../src/shared/api';
 import type { StoreCipher } from './store';
 import { vaultTokenStore } from './vault-storage';
+import { cosmicRoot } from './send';
+import { createCosmicKeyStore } from './cosmic-keys';
+import { createAccountKeyPair, openAccountKeyPair, openPhrase } from './cosmic-crypto';
+import type { AccountKeyPair, KeyEnvelope } from './cosmic-crypto';
+import { accountId, accountSuccess, keyEnvelope, readSpaces } from './spaces';
 
 interface Options {
   directory: string; userData: string; cipher: StoreCipher; isPackaged: boolean; env?: NodeJS.ProcessEnv;
   language(): Language; changed(): void; openExternal(url: string): Promise<void>; fetch: typeof globalThis.fetch;
+  keyStore?: ReturnType<typeof createCosmicKeyStore>;
 }
 interface Tokens { accessToken: string; refreshToken: string; tokenType: 'Bearer'; expiresIn: number; deviceId: string }
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
-const errorCodes = new Set(['ACCOUNT_NETWORK', 'ACCOUNT_TIMEOUT', 'ACCOUNT_DENIED', 'ACCOUNT_INVALID_RESPONSE', 'ACCOUNT_STORAGE']);
+const errorCodes = new Set(['ACCOUNT_NETWORK', 'ACCOUNT_TIMEOUT', 'ACCOUNT_DENIED', 'ACCOUNT_INVALID_RESPONSE', 'ACCOUNT_STORAGE', 'ACCOUNT_PHRASE_WRONG', 'ACCOUNT_KEYSTORE']);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const errorCode = (error: unknown) => error instanceof Error && errorCodes.has(error.message) ? error.message : 'ACCOUNT_NETWORK';
 export function createPKCE() {
@@ -41,13 +47,13 @@ export function validateAccountTokens(value: unknown): Tokens {
     || !Number.isFinite(Date.now() + value.expiresIn * 1000) || typeof value.deviceId !== 'string') throw new Error('ACCOUNT_INVALID_RESPONSE');
   return value as unknown as Tokens;
 }
-function accountCard(value: unknown): AccountState {
+function accountCard(value: unknown): Extract<AccountState, { status: 'signedIn' }> {
   if (!record(value) || typeof value.email !== 'string') throw new Error('ACCOUNT_INVALID_RESPONSE');
   const displayName = typeof value.displayName === 'string' && value.displayName.trim() === value.displayName && value.displayName.length > 0
     && value.displayName.length <= 80 && !/[\x00-\x1f\x7f-\x9f]/.test(value.displayName) ? value.displayName : null;
   const plans = Array.isArray(value.plans) ? value.plans.filter((plan: unknown): plan is Record<'key' | 'product' | 'tier' | 'label', string> => record(plan)
     && ['key', 'product', 'tier', 'label'].every(key => typeof plan[key] === 'string' && (plan[key] as string).trim().length > 0 && !/[\x00-\x1f\x7f-\x9f]/.test(plan[key] as string))) : [];
-  return { status: 'signedIn', email: value.email, displayName, plan: plans[0]?.label ?? null };
+  return { status: 'signedIn', email: value.email, displayName, plan: plans[0]?.label ?? null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null };
 }
 function installationId(userData: string): string {
   const path = resolve(userData, 'account-computer-id');
@@ -64,14 +70,17 @@ function installationId(userData: string): string {
 }
 export function createAccount(options: Options) {
   const path = resolve(options.directory, 'account.sealed'), tokens = vaultTokenStore(path, options.cipher);
-  let state: AccountState = { status: 'signedOut' }, access: { token: string; expires: number } | undefined;
+  let state: AccountState = { status: 'signedOut' }, access: { token: string; expires: number; deviceId: string } | undefined;
+  let identity: string | undefined, key: Uint8Array<ArrayBuffer> | undefined, pair: AccountKeyPair | undefined;
+  let keyStore = options.keyStore, keyStoreError = false, lastRefresh = 0, phraseWork: Promise<void> | undefined;
   let generation = 0, closed = false, checking: Promise<void> | undefined;
   let attempt: { server: Server; url: string; timer: ReturnType<typeof setTimeout>; used: boolean } | undefined;
   const requests = new Set<AbortController>();
   const publish = (next: AccountState) => { state = next; if (!closed) options.changed(); };
   const check = (ticket: number) => { if (closed || ticket !== generation) throw new Error('ACCOUNT_DENIED'); };
   const stopAttempt = () => { if (attempt) { clearTimeout(attempt.timer); attempt.server.close(); attempt.server.closeAllConnections(); attempt = undefined; } };
-  const invalidate = () => { generation++; checking = undefined; stopAttempt(); for (const controller of requests) controller.abort(); requests.clear(); };
+  const clearKeys = () => { key?.fill(0); key = undefined; pair = undefined; identity = undefined; keyStoreError = false; };
+  const invalidate = () => { generation++; checking = undefined; phraseWork = undefined; lastRefresh = 0; clearKeys(); stopAttempt(); for (const controller of requests) controller.abort(); requests.clear(); };
   const fail = (error: unknown, ticket: number) => { if (!closed && ticket === generation) { stopAttempt(); publish({ status: 'error', code: errorCode(error) }); } };
   const readToken = async () => {
     try {
@@ -87,7 +96,7 @@ export function createAccount(options: Options) {
     try { unlinkSync(path); }
     catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw new Error('ACCOUNT_STORAGE'); }
   };
-  const request = async (route: string, method: 'GET' | 'POST', ticket: number, body?: unknown, bearer?: string) => {
+  const request = async (route: string, method: 'GET' | 'POST' | 'PUT', ticket: number, body?: unknown, bearer?: string) => {
     check(ticket);
     const controller = new AbortController(); requests.add(controller);
     let timedOut = false;
@@ -106,7 +115,7 @@ export function createAccount(options: Options) {
           const { done, value } = await reader.read();
           if (done) break;
           size += value.byteLength;
-          if (size > 65536) { await reader.cancel(); throw new Error('ACCOUNT_INVALID_RESPONSE'); }
+          if (size > (route.startsWith('/v1/spaces') ? 2 * 1024 * 1024 : 65536)) { await reader.cancel(); throw new Error('ACCOUNT_INVALID_RESPONSE'); }
           chunks.push(value);
         }
       } finally { reader.releaseLock(); }
@@ -124,17 +133,62 @@ export function createAccount(options: Options) {
   const saveTokens = async (value: unknown, ticket: number) => {
     const validated = validateAccountTokens(value); check(ticket);
     try { await tokens.set(validated.refreshToken); } catch { throw new Error('ACCOUNT_STORAGE'); }
-    check(ticket); access = { token: validated.accessToken, expires: Date.now() + validated.expiresIn * 1000 };
+    check(ticket); access = { token: validated.accessToken, expires: Date.now() + validated.expiresIn * 1000, deviceId: validated.deviceId };
     return access.token;
   };
   const refresh = async (ticket: number): Promise<string | undefined> => {
     const refreshToken = await readToken(); check(ticket);
-    if (!refreshToken) { access = undefined; publish({ status: 'signedOut' }); return; }
+    if (!refreshToken) { invalidate(); access = undefined; publish({ status: 'signedOut' }); return; }
     const response = await request('/v1/oauth/token', 'POST', ticket, { grantType: 'refresh_token', refreshToken, appId: 'horizon' });
     if (!response.ok && record(response.value) && record(response.value.error) && response.value.error.code === 'invalid_grant') {
-      access = undefined; removeToken(); publish({ status: 'signedOut' }); return;
+      access = undefined; clearKeys(); removeToken(); invalidate(); publish({ status: 'signedOut' }); return;
     }
     requireSuccess(response); return saveTokens(response.value, ticket);
+  };
+  const authorized = async (route: string, method: 'GET' | 'PUT', ticket: number, body?: unknown) => {
+    let bearer = access && access.expires > Date.now() ? access.token : await refresh(ticket);
+    if (!bearer) throw new Error('ACCOUNT_DENIED');
+    let response = await request(route, method, ticket, body, bearer);
+    if (response.status === 401) {
+      access = undefined; bearer = await refresh(ticket);
+      if (!bearer) throw new Error('ACCOUNT_DENIED');
+      response = await request(route, method, ticket, body, bearer);
+    }
+    return response;
+  };
+  const envelopes = async (ticket: number): Promise<{ phrase?: KeyEnvelope; public?: KeyEnvelope }> => {
+    const value = accountSuccess(await authorized('/v1/keys', 'GET', ticket));
+    if (!record(value) || !Array.isArray(value.keys) || value.keys.length > 10000) throw new Error('ACCOUNT_INVALID_RESPONSE');
+    const found: { phrase?: KeyEnvelope; public?: KeyEnvelope } = {};
+    for (const entry of value.keys) if (record(entry) && (entry.recipient === 'phrase' || entry.recipient === 'public')) {
+      if (found[entry.recipient]) throw new Error('ACCOUNT_INVALID_RESPONSE');
+      found[entry.recipient] = keyEnvelope(entry);
+    }
+    return found;
+  };
+  const loadSpaces = async (ticket: number, card: Extract<AccountState, { status: 'signedIn' }>, keys?: { phrase?: KeyEnvelope; public?: KeyEnvelope }) => {
+    if (!identity || !key) return;
+    try {
+      if (!pair) {
+        keys ??= await envelopes(ticket); check(ticket);
+        let openedPair: AccountKeyPair;
+        if (keys.public) openedPair = await openAccountKeyPair(key, keys.public, identity);
+        else {
+          if (!keys.phrase) throw new Error('ACCOUNT_INVALID_RESPONSE');
+          const created = await createAccountKeyPair(key, identity); check(ticket);
+          const response = await authorized('/v1/keys/public', 'PUT', ticket, created.envelope);
+          if (response.status === 403) {
+            const concurrent = (await envelopes(ticket)).public;
+            if (!concurrent) throw new Error('ACCOUNT_DENIED');
+            openedPair = await openAccountKeyPair(key!, concurrent, identity!);
+          } else { accountSuccess(response); openedPair = { privateKey: created.privateKey, publicKey: created.publicKey }; }
+        }
+        check(ticket); pair = openedPair;
+      }
+      Object.assign(card, await readSpaces({ get: route => authorized(route, 'GET', ticket), account: identity, pair, directory: options.directory, cipher: options.cipher,
+        check: () => check(ticket), fallbackName: options.language() === 'es' ? 'Space compartido' : 'Shared Space' }));
+      if (keyStoreError && !card.spacesError) card.spacesError = 'ACCOUNT_KEYSTORE';
+    } catch (error) { check(ticket); card.spacesError = errorCode(error); }
   };
   const loadMe = async (ticket: number) => {
     let bearer = access && access.expires > Date.now() ? access.token : await refresh(ticket);
@@ -145,10 +199,27 @@ export function createAccount(options: Options) {
       if (!bearer) return;
       response = await request('/v1/me', 'GET', ticket, undefined, bearer);
     }
-    requireSuccess(response); check(ticket); publish(accountCard(response.value));
+    requireSuccess(response); check(ticket);
+    const card = accountCard(response.value), value = response.value as Record<string, unknown>;
+    const device = Array.isArray(value.devices) ? value.devices.find((entry: unknown) => record(entry) && entry.id === access?.deviceId) : undefined;
+    const id: unknown = record(device) ? device.userId : undefined;
+    if (!accountId(id)) { card.spacesError = 'ACCOUNT_INVALID_RESPONSE'; publish(card); return; }
+    if (identity !== id) { clearKeys(); identity = id; }
+    // Development builds may point at a scratch Cosmic folder, as Send to does; shipped builds use the person's own.
+    keyStore ??= createCosmicKeyStore({ root: !options.isPackaged && (options.env ?? process.env).HORIZON_COSMIC_ROOT || cosmicRoot(options.env), origin: accountEndpoints(options.isPackaged, options.env).api,
+      ...(options.isPackaged ? { helperPath: resolve(process.resourcesPath, 'helpers', 'cosmic-dpapi.exe') } : {}) });
+    if (!key && !keyStoreError) try {
+      const stored = await keyStore.get(id);
+      try { check(ticket); key = stored; } catch (error) { stored?.fill(0); throw error; }
+    } catch (error) { check(ticket); keyStoreError = true; card.spacesError = errorCode(error); }
+    card.keyStore = keyStoreError ? 'error' : keyStore.kind;
+    card.phrase = key ? 'ready' : state.status === 'signedIn' && state.phrase === 'wrong' ? 'wrong' : 'needed';
+    if (keyStoreError) card.spacesError = 'ACCOUNT_KEYSTORE';
+    await loadSpaces(ticket, card); check(ticket); lastRefresh = Date.now(); publish(card);
   };
   const me = (): Promise<void> => {
     if (closed || attempt) return Promise.resolve();
+    if (phraseWork) return phraseWork;
     if (checking) return checking;
     const ticket = generation;
     const work = loadMe(ticket).catch(error => { fail(error, ticket); throw new Error(errorCode(error)); }).finally(() => { if (checking === work) checking = undefined; });
@@ -157,7 +228,35 @@ export function createAccount(options: Options) {
   const open = async (url: string) => { try { await options.openExternal(url); } catch { throw new Error('ACCOUNT_NETWORK'); } };
   const cancel = () => { invalidate(); access = undefined; publish({ status: 'signedOut' }); };
   return {
-    state: (): AccountState => ({ ...state }), me, retry: me, cancel,
+    state: (): AccountState => structuredClone(state), me, retry: me, cancel,
+    refreshSpaces() {
+      if (state.status !== 'signedIn' || Date.now() - lastRefresh < 30000) return Promise.resolve();
+      lastRefresh = Date.now(); return me();
+    },
+    phrase(phrase: string): Promise<void> {
+      if (closed || state.status !== 'signedIn' || !identity || !keyStore) { phrase = ''; return Promise.reject(new Error('ACCOUNT_DENIED')); }
+      if (typeof phrase !== 'string' || phrase.length > 1000 || phrase.includes('\0')) { phrase = ''; return Promise.reject(new Error('ACCOUNT_INVALID_RESPONSE')); }
+      if (phraseWork) { phrase = ''; return Promise.reject(new Error('ACCOUNT_DENIED')); }
+      if (state.phrase === 'ready') { phrase = ''; return Promise.resolve(); }
+      const ticket = generation, id = identity, card = structuredClone(state);
+      const work = (async () => {
+        let opened: Uint8Array<ArrayBuffer> | undefined;
+        try {
+          if (checking) await checking; check(ticket);
+          const keys = await envelopes(ticket);
+          if (!keys.phrase) throw new Error('ACCOUNT_INVALID_RESPONSE');
+          opened = await openPhrase(phrase, keys.phrase); phrase = ''; check(ticket);
+          if (!keyStoreError) try { await keyStore!.set(id, opened); } catch { check(ticket); keyStoreError = true; }
+          check(ticket); key = opened; opened = undefined;
+          card.phrase = 'ready'; card.keyStore = keyStoreError ? 'error' : keyStore!.kind; card.spacesError = keyStoreError ? 'ACCOUNT_KEYSTORE' : null;
+          await loadSpaces(ticket, card, keys); check(ticket); lastRefresh = Date.now(); publish(card);
+        } catch (error) {
+          check(ticket); const code = errorCode(error);
+          card.phrase = code === 'ACCOUNT_PHRASE_WRONG' ? 'wrong' : 'needed'; card.spacesError = code; publish(card); throw new Error(code);
+        } finally { phrase = ''; opened?.fill(0); }
+      })().finally(() => { if (phraseWork === work) phraseWork = undefined; });
+      phraseWork = work; return work;
+    },
     async signIn() {
       if (closed) throw new Error('ACCOUNT_DENIED');
       if (attempt) return;

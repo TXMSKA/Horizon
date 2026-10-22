@@ -7459,12 +7459,12 @@ async function waitForAccount(account, status) {
 async function accountFixture(t, options = {}) {
   const { createAccount } = require('../dist/electron/account.js'), { createServer } = require('node:http');
   const directory = temporaryDirectory(t, 'account'), protection = options.cipher ?? authenticatedCipher(), requests = [], opened = [], states = [];
-  let tokens = accountTokens(), me = { email: 'person@example.test', devices: [], twoFactorEnabled: false }, handler;
+  let tokens = accountTokens(), me = { email: 'person@example.test', twoFactorEnabled: false }, handler;
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
     const call = { path: request.url, method: request.method, headers: request.headers, body }; requests.push(call);
-    const answer = handler?.(call) ?? (request.url === '/v1/oauth/token' ? { status: 200, body: tokens } : request.url === '/v1/me' ? { status: 200, body: me } : { status: 200, body: { success: true } });
+    const answer = handler?.(call) ?? (request.url === '/v1/oauth/token' ? { status: 200, body: tokens } : request.url === '/v1/me' ? { status: 200, body: { ...me, devices: [{ id: tokens.deviceId, userId: 'account-fixture', appId: 'horizon' }] } } : request.url === '/v1/keys' ? { status: 200, body: { keys: [] } } : { status: 200, body: { success: true } });
     response.writeHead(answer.status, { 'content-type': 'application/json', ...answer.headers }); response.end(JSON.stringify(answer.body));
   });
   await new Promise(done => server.listen(0, '127.0.0.1', done));
@@ -7472,6 +7472,7 @@ async function accountFixture(t, options = {}) {
   const origin = `http://127.0.0.1:${server.address().port}`, originalFetch = globalThis.fetch;
   const host = {
     directory: join(directory, 'profile'), userData: directory, cipher: protection, isPackaged: false, language: () => options.language ?? 'en',
+    keyStore: options.keyStore ?? require('../dist/electron/cosmic-keys.js').createCosmicKeyStore({ root: directory, origin, platform: 'linux' }),
     changed: () => states.push(account.state()), openExternal: async url => { opened.push(url); }, env: { HORIZON_QUANTUM_API: origin, HORIZON_QUANTUM_SITE: origin },
     fetch: async (url, init) => {
       assert.equal(new URL(url).origin, origin); assert.equal(init.redirect, 'manual'); assert.ok(init.signal);
@@ -7562,7 +7563,7 @@ test('account seals only the refresh token and restores me in a new profile cont
   const fixture = await accountFixture(t); await fixture.signIn();
   const path = join(fixture.host.directory, 'account.sealed'), bytes = readFileSync(path), saved = await require('../dist/electron/vault-storage.js').vaultTokenStore(path, fixture.protection).get();
   assert.ok(saved === fixture.token().refreshToken); assert.ok(!bytes.includes(Buffer.from(saved))); assert.ok(!bytes.includes(Buffer.from(fixture.token().accessToken)));
-  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null });
+  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
   fixture.account.close(); const rotated = fixture.rotate();
   const next = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {} }); t.after(() => next.close());
   await next.retry(); assert.equal(next.state().status, 'signedIn');
@@ -7620,10 +7621,10 @@ test('account retry preserves a stored token on a malformed me response and refu
 test('account me accepts valid future names and plans and ignores invalid optional account fields', async t => {
   const fixture = await accountFixture(t); await fixture.signIn();
   fixture.me({ email: 'person@example.test', displayName: 'Account Name', plans: [{ key: 'nebula-dawn', product: 'nebula', tier: 'dawn', label: 'Nebula+ Alba' }], devices: [{ id: 'private-device' }] });
-  await fixture.account.me(); assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: 'Account Name', plan: 'Nebula+ Alba' });
+  await fixture.account.me(); assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: 'Account Name', plan: 'Nebula+ Alba', phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
   for (const extra of [{ displayName: 42, plans: null }, { displayName: ' bad name ', plans: [{ key: 'key', product: 'nebula', tier: 'tier', label: 42 }] }, { displayName: 'bad\nname', plans: [{ product: 'nebula', label: 'Missing plan fields' }] }]) {
     fixture.me({ email: 'person@example.test', ...extra }); await fixture.account.me();
-    assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null });
+    assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
   }
 });
 
@@ -7676,25 +7677,37 @@ test('account cancellation during an outstanding exchange discards a late respon
   await new Promise(setImmediate); assert.deepEqual(account.state(), { status: 'signedOut' }); assert.equal(existsSync(join(fixture.host.directory, 'account.sealed')), false);
 });
 
-test('account commands accept only their exact fields and all six are refused in private windows', t => {
+test('account commands accept only their exact fields and all are refused in private windows', t => {
   const { assertPrivateCommand } = require('../dist/electron/private-commands.js'), browser = notebookBrowser(t, authenticatedCipher()), privateWindow = browser.addWindow({ privateWindow: true });
-  for (const type of ['account-sign-in', 'account-reopen', 'account-cancel', 'account-sign-out', 'account-manage', 'account-retry']) {
+  for (const type of ['account-sign-in', 'account-reopen', 'account-cancel', 'account-sign-out', 'account-manage', 'account-retry', 'account-refresh']) {
     const command = { type }; assert.deepEqual(validateCommand(command), command);
     for (const extra of [{ extra: true }, { profile: randomUUID() }, { token: 'forged' }]) assert.throws(() => validateCommand({ ...command, ...extra }));
     assert.throws(() => assertPrivateCommand(command), /ACCOUNT_PRIVATE/); assert.throws(() => privateWindow.command(command), /ACCOUNT_PRIVATE/);
   }
 });
 
+test('account phrase commands require bounded text, exact fields and a regular window', t => {
+  const { assertPrivateCommand } = require('../dist/electron/private-commands.js'), browser = notebookBrowser(t, authenticatedCipher()), privateWindow = browser.addWindow({ privateWindow: true });
+  for (const phrase of ['amber '.repeat(24).trim(), 'a'.repeat(1000)]) {
+    const command = { type: 'account-phrase', phrase }; assert.deepEqual(validateCommand(command), command);
+    assert.throws(() => assertPrivateCommand(command), /ACCOUNT_PRIVATE/); assert.throws(() => privateWindow.command(command), /ACCOUNT_PRIVATE/);
+    for (const extra of [{ extra: true }, { token: 'forged' }, { profile: randomUUID() }]) assert.throws(() => validateCommand({ ...command, ...extra }));
+  }
+  for (const command of [{ type: 'account-phrase' }, { type: 'account-phrase', phrase: '' }, { type: 'account-phrase', phrase: 42 }, { type: 'account-phrase', phrase: 'a'.repeat(1001) }]) assert.throws(() => validateCommand(command));
+});
+
 test('browser account controllers follow profiles, are shared by regular windows, stay hidden in private windows and close with their owner', async t => {
   const controllers = new Map();
   const browser = notebookBrowser(t, authenticatedCipher(), { accountFactory(host) {
-    const id = require('node:path').basename(host.directory), entry = { state: { status: 'signedOut' }, retries: 0, closed: 0 };
+    const id = require('node:path').basename(host.directory), entry = { state: { status: 'signedOut' }, retries: 0, refreshes: 0, phrases: 0, closed: 0 };
     assert.equal(controllers.has(id), false); controllers.set(id, entry);
-    return { state: () => ({ ...entry.state }), async retry() { entry.retries++; await Promise.resolve(); entry.state = { status: 'signedIn', email: `${id}@example.test`, displayName: null, plan: null }; host.changed(); },
-      async signIn() {}, async reopen() {}, cancel() {}, async me() {}, async signOut() {}, async manage() {}, close() { entry.closed++; } };
+    return { state: () => ({ ...entry.state }), async retry() { entry.retries++; await Promise.resolve(); entry.state = { status: 'signedIn', email: `${id}@example.test`, displayName: null, plan: null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null }; host.changed(); },
+      async signIn() {}, async reopen() {}, cancel() {}, async me() {}, async refreshSpaces() { entry.refreshes++; }, async phrase() { entry.phrases++; }, async signOut() {}, async manage() {}, close() { entry.closed++; } };
   } });
   await new Promise(setImmediate); const first = browser.state().activeProfileId, firstController = controllers.get(first);
   assert.equal(firstController.retries, 1); assert.deepEqual(browser.state().account, firstController.state);
+  await browser.command({ type: 'account-refresh' }); await browser.command({ type: 'account-phrase', phrase: 'amber '.repeat(24).trim() });
+  assert.equal(firstController.refreshes, 1); assert.equal(firstController.phrases, 1);
   const count = controllers.size, peer = browser.addWindow({ profileId: first, fresh: true }), privateWindow = browser.addWindow({ profileId: first, privateWindow: true, fresh: true });
   await new Promise(setImmediate); assert.equal(controllers.size, count); assert.equal(firstController.retries, 1);
   assert.deepEqual(peer.state().account, firstController.state); assert.deepEqual(privateWindow.state().account, { status: 'signedOut' });
@@ -7715,4 +7728,253 @@ test('Nebula follows Themes in Hub apps and is accepted by pin commands, quick a
   const path = join(temporaryDirectory(t, 'nebula-settings'), 'settings.json'), settings = createSettings(path, () => {});
   settings.setAppPinned('nebula', true); assert.deepEqual(readSettings(path).quickAccess, ['nebula']);
   const synced = syncSettings(readSettings(path)); assert.doesNotThrow(() => validateSyncSettings(synced)); assert.deepEqual(synced.quickAccess, ['nebula']);
+});
+
+let cosmicCryptoFixture;
+function independentCosmicFixture() {
+  cosmicCryptoFixture ??= (async () => {
+    const subtle = globalThis.crypto.subtle, encode = value => new TextEncoder().encode(value);
+    const phrase = Array(24).fill('amber').join(' '), key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+    const salt = Uint8Array.from({ length: 16 }, (_, index) => index + 17), iv = Uint8Array.from({ length: 12 }, (_, index) => index + 33);
+    const material = await subtle.importKey('raw', encode(phrase), 'PBKDF2', false, ['deriveKey']);
+    const passwordKey = await subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 600000 }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+    const algorithm = 'QNT_PBKDF2_SHA256_AES256GCM_V1';
+    const encrypted = await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: encode(algorithm), tagLength: 128 }, passwordKey, key);
+    return { phrase, key, phraseEnvelope: { algorithm, wrapped: Buffer.concat([Buffer.from([1]), salt, iv, Buffer.from(encrypted)]).toString('base64') } };
+  })();
+  return cosmicCryptoFixture;
+}
+async function independentCosmicSeal(key, info, plain, aad) {
+  const subtle = globalThis.crypto.subtle, encoder = new TextEncoder(), material = await subtle.importKey('raw', key, 'HKDF', false, ['deriveKey']);
+  const derived = await subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(), info: encoder.encode(info) }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+  const iv = Uint8Array.from({ length: 12 }, (_, index) => index + 101), encrypted = await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: encoder.encode(aad), tagLength: 128 }, derived, plain);
+  return { algorithm: 'QNT_AES256GCM_V1', wrapped: Buffer.concat([Buffer.from([1]), iv, Buffer.from(encrypted)]).toString('base64') };
+}
+
+test('Cosmic phrase opening matches an independent PBKDF2 fixture and never exposes phrase text in failures', async () => {
+  const crypto = require('../dist/electron/cosmic-crypto.js'), fixture = await independentCosmicFixture();
+  const opened = await crypto.openPhrase('  ' + fixture.phrase.toUpperCase().replace('AMBER', '\uFF21\uFF2D\uFF22\uFF25\uFF32').replaceAll(' ', '\t  ') + '  ', fixture.phraseEnvelope);
+  assert.ok(Buffer.from(opened).equals(Buffer.from(fixture.key)));
+  for (const [phrase, envelope] of [[fixture.phrase.replace('amber', 'azure'), fixture.phraseEnvelope], [fixture.phrase, { ...fixture.phraseEnvelope, wrapped: fixture.phraseEnvelope.wrapped.slice(1) }], ['a'.repeat(1001), fixture.phraseEnvelope]]) {
+    await assert.rejects(crypto.openPhrase(phrase, envelope), error => error.message === 'ACCOUNT_PHRASE_WRONG' && !error.message.includes(phrase));
+  }
+});
+
+test('Cosmic X25519 envelopes bind Space, generation and member and account private keys bind the account', async () => {
+  const crypto = require('../dist/electron/cosmic-crypto.js'), fixture = await independentCosmicFixture(), pair = await crypto.createAccountKeyPair(fixture.key, 'account-a');
+  const restored = await crypto.openAccountKeyPair(fixture.key, pair.envelope, 'account-a');
+  assert.ok(Buffer.from(pair.publicKey).equals(Buffer.from(restored.publicKey))); assert.equal(restored.privateKey.extractable, false);
+  await assert.rejects(crypto.openAccountKeyPair(fixture.key, pair.envelope, 'account-b'), /ACCOUNT_INVALID_RESPONSE/);
+  const aad = 'space-key:space-a:1:member:account-a', envelope = await crypto.wrap(pair.publicKey, fixture.key, aad);
+  assert.ok(Buffer.from(await crypto.unwrap(restored, envelope, aad)).equals(Buffer.from(fixture.key)));
+  for (const wrong of ['space-key:space-b:1:member:account-a', 'space-key:space-a:2:member:account-a', 'space-key:space-a:1:member:account-b']) await assert.rejects(crypto.unwrap(restored, envelope, wrong), /ACCOUNT_INVALID_RESPONSE/);
+  const publicOnly = { algorithm: pair.envelope.algorithm, wrapped: Buffer.from(pair.envelope.wrapped, 'base64').subarray(0, 33).toString('base64') };
+  assert.ok(Buffer.from(crypto.openPublicKey(publicOnly)).equals(Buffer.from(pair.publicKey)));
+  await assert.rejects(crypto.unwrap(await crypto.createAccountKeyPair(fixture.key, 'other'), envelope, aad), /ACCOUNT_INVALID_RESPONSE/);
+});
+
+test('Cosmic sealed profiles match independent HKDF and AES-GCM and bind their Space generation', async () => {
+  const crypto = require('../dist/electron/cosmic-crypto.js'), fixture = await independentCosmicFixture(), aad = 'space-profile:space-a:1';
+  const profile = Buffer.from(JSON.stringify({ name: 'Team', code: 'TM', colour: '#123abc', icon: 'star' }));
+  const envelope = await independentCosmicSeal(fixture.key, 'cosmic/space/profile', profile, aad), derived = await crypto.deriveKey(fixture.key, 'cosmic/space/profile');
+  assert.ok(Buffer.from(await crypto.openSealed(derived, envelope, aad)).equals(profile));
+  for (const wrong of ['space-profile:space-b:1', 'space-profile:space-a:2']) await assert.rejects(crypto.openSealed(derived, envelope, wrong), /ACCOUNT_INVALID_RESPONSE/);
+  const own = await crypto.seal(derived, profile, aad); assert.ok(Buffer.from(await crypto.openSealed(derived, own, aad)).equals(profile));
+  const fingerprint = await crypto.fingerprint(Uint8Array.from({ length: 32 }, (_, index) => index));
+  assert.match(fingerprint, /^[A-Z2-7]{4}(?:-[A-Z2-7]{4}){4}$/); assert.equal(fingerprint, await crypto.fingerprint(Uint8Array.from({ length: 32 }, (_, index) => index)));
+});
+
+function cosmicStoreFixture(t, overrides = {}) {
+  const root = temporaryDirectory(t, 'cosmic-keys'), directory = join(root, 'shared', 'keys'), calls = [];
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const protection = {
+    protect(data) { calls.push('protect'); return Buffer.concat([Buffer.from('sealed:'), Buffer.from(data).map(value => value ^ 0xa5)]); },
+    unprotect(data) { calls.push('unprotect'); if (Buffer.from(data).subarray(0, 7).toString() !== 'sealed:') throw new Error('Synthetic refusal'); return Buffer.from(data).subarray(7).map(value => value ^ 0xa5); },
+  };
+  const store = require('../dist/electron/cosmic-keys.js').createCosmicKeyStore({ root, origin: 'https://quantum.txmska.com', platform: 'win32', ...protection, ...overrides });
+  return { store, calls, root, directory, path: join(directory, 'account.json') };
+}
+
+test('Cosmic key store creates sealed entries and preserves every other account parsed value', async t => {
+  const fixture = cosmicStoreFixture(t), first = Uint8Array.from({ length: 32 }, (_, index) => index), second = new Uint8Array(32).fill(9);
+  assert.equal(fixture.store.kind, 'shared'); assert.equal(await fixture.store.get('account-a'), undefined);
+  await fixture.store.set('account-a', first); const saved = JSON.parse(readFileSync(fixture.path, 'utf8')), previous = structuredClone(saved.accounts['account-a']);
+  assert.deepEqual(Object.keys(saved).sort(), ['accounts', 'version']); assert.equal(saved.version, 1); assert.equal(previous.writer, 'horizon');
+  assert.equal(previous.origin, 'https://quantum.txmska.com'); assert.equal(typeof previous.createdAt, 'number'); assert.equal(previous.createdAt, previous.updatedAt);
+  assert.ok(!readFileSync(fixture.path).includes(Buffer.from(first))); assert.ok(Buffer.from(await fixture.store.get('account-a')).equals(Buffer.from(first)));
+  await fixture.store.set('account-b', second); assert.deepEqual(JSON.parse(readFileSync(fixture.path, 'utf8')).accounts['account-a'], previous);
+  assert.ok(Buffer.from(await fixture.store.get('account-b')).equals(Buffer.from(second))); assert.deepEqual(fixture.calls, ['protect', 'unprotect', 'protect', 'unprotect']);
+  assert.deepEqual(readdirSync(fixture.directory), ['account.json']);
+});
+
+test('Cosmic key store refuses unknown, malformed and foreign-origin data without overwriting it', async t => {
+  const fixture = cosmicStoreFixture(t), key = new Uint8Array(32).fill(13);
+  for (const content of ['{"version":2,"accounts":{}}', '{broken', '{"version":1,"accounts":{"other":{"unknown":true}}}']) {
+    writeFileSync(fixture.path, content); await assert.rejects(fixture.store.get('account-a'), /ACCOUNT_KEYSTORE/); await assert.rejects(fixture.store.set('account-a', key), /ACCOUNT_KEYSTORE/);
+    assert.equal(readFileSync(fixture.path, 'utf8'), content); assert.deepEqual(readdirSync(fixture.directory), ['account.json']);
+  }
+  rmSync(fixture.path); await fixture.store.set('account-a', key);
+  const foreign = require('../dist/electron/cosmic-keys.js').createCosmicKeyStore({ root: fixture.root, origin: 'https://other.example.test', platform: 'win32', protect: data => data, unprotect: data => data });
+  const original = readFileSync(fixture.path); await assert.rejects(foreign.get('account-a'), /ACCOUNT_KEYSTORE/); await assert.rejects(foreign.set('account-a', key), /ACCOUNT_KEYSTORE/); assert.ok(original.equals(readFileSync(fixture.path)));
+});
+
+test('Cosmic key store recovers one stale lock, refuses an active lock and atomically cleans failed renames', async t => {
+  const fixture = cosmicStoreFixture(t), key = new Uint8Array(32).fill(19), lock = fixture.path + '.lock', fs = require('node:fs');
+  writeFileSync(lock, ''); await assert.rejects(fixture.store.set('account-a', key), /ACCOUNT_KEYSTORE/); assert.equal(existsSync(lock), true); assert.equal(existsSync(fixture.path), false);
+  const stale = new Date(Date.now() - 11000); fs.utimesSync(lock, stale, stale); await fixture.store.set('account-a', key);
+  assert.equal(existsSync(lock), false); const original = readFileSync(fixture.path), rename = fs.renameSync;
+  fs.renameSync = () => { throw new Error('Synthetic rename refusal'); };
+  try { await assert.rejects(fixture.store.set('account-b', key), /ACCOUNT_KEYSTORE/); } finally { fs.renameSync = rename; }
+  assert.ok(original.equals(readFileSync(fixture.path))); assert.deepEqual(readdirSync(fixture.directory), ['account.json']);
+});
+
+test('Cosmic key store keeps Linux and macOS keys only for their running session', async t => {
+  for (const platform of ['linux', 'darwin']) {
+    const root = temporaryDirectory(t, 'cosmic-session'), options = { root, origin: 'https://quantum.txmska.com', platform, protect() { assert.fail('Session keys must not use DPAPI'); } };
+    const store = require('../dist/electron/cosmic-keys.js').createCosmicKeyStore(options), key = new Uint8Array(32).fill(21);
+    assert.equal(store.kind, 'session'); await store.set('account-a', key); key.fill(0);
+    const opened = await store.get('account-a'); assert.equal(opened.every(value => value === 21), true); opened.fill(0); assert.equal((await store.get('account-a')).every(value => value === 21), true);
+    assert.equal(await store.get('account-b'), undefined); assert.equal(await require('../dist/electron/cosmic-keys.js').createCosmicKeyStore(options).get('account-a'), undefined); assert.deepEqual(readdirSync(root), []);
+  }
+});
+
+test('Cosmic DPAPI helper compiles with the Windows Framework compiler when available', t => {
+  const compiler = join(process.env.WINDIR ?? 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+  if (process.platform !== 'win32' || !existsSync(compiler)) { t.skip('Windows Framework compiler is unavailable'); return; }
+  const output = join(temporaryDirectory(t, 'cosmic-helper'), 'cosmic-dpapi.exe');
+  const compiled = require('node:child_process').spawnSync(compiler, ['/nologo', '/target:exe', '/reference:System.Web.Extensions.dll', '/reference:System.Security.dll', `/out:${output}`, resolve('helpers/windows/cosmic-dpapi.cs')], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+  assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr); assert.equal(existsSync(output), true);
+});
+
+async function accountSpacesFixture(t) {
+  const crypto = require('../dist/electron/cosmic-crypto.js'), base = await independentCosmicFixture(), pair = await crypto.createAccountKeyPair(base.key, 'account-fixture');
+  const spaceKey = new Uint8Array(32).fill(63), keys = [{ recipient: 'phrase', ...base.phraseEnvelope }, { recipient: 'public', ...pair.envelope }];
+  const profile = await independentCosmicSeal(spaceKey, 'cosmic/space/profile', Buffer.from(JSON.stringify({ name: 'Shared team', code: 'ST', colour: '#abc123', icon: 'star' })), 'space-profile:space-a:1');
+  const invalidProfile = await independentCosmicSeal(spaceKey, 'cosmic/space/profile', Buffer.from(JSON.stringify({ name: 'Unsafe profile', code: 'ST', colour: 'not-a-token', icon: 'star' })), 'space-profile:space-b:2');
+  const keyA = await crypto.wrap(pair.publicKey, spaceKey, 'space-key:space-a:1:member:account-fixture'), keyB = await crypto.wrap(pair.publicKey, spaceKey, 'space-key:space-b:2:member:account-fixture');
+  let memberKey = Buffer.from(pair.envelope.wrapped, 'base64').subarray(0, 33).toString('base64');
+  const member = { accountId: 'member-a', displayName: null, role: 'member' }, owner = { accountId: 'account-fixture', displayName: 'Account Name', role: 'owner' };
+  const spaces = [
+    { id: 'space-a', kind: 'shared', algorithm: profile.algorithm, sealedProfile: profile.wrapped, role: 'owner', members: [owner, member] },
+    { id: 'space-b', kind: 'shared', generation: 2, algorithm: invalidProfile.algorithm, sealedProfile: invalidProfile.wrapped, role: 'member', members: [member] },
+    { id: 'space-c', kind: 'shared', keyPending: true, role: 'member', members: [member] },
+    { id: 'space-d', kind: 'shared', algorithm: profile.algorithm, sealedProfile: profile.wrapped, role: 'member', members: [member] },
+  ];
+  const fixture = await accountFixture(t, { keyStore: { kind: 'session', async get() { return base.key.slice(); }, async set() { assert.fail('An existing key must not be replaced'); } } });
+  fixture.handle(call => {
+    const url = new URL(call.path, fixture.origin);
+    if (url.pathname === '/v1/keys') return { status: 200, body: { keys } };
+    if (url.pathname === '/v1/spaces') { assert.equal(url.searchParams.get('limit'), '200'); return { status: 200, body: { spaces: url.searchParams.has('after') ? spaces.slice(1) : spaces.slice(0, 1), after: url.searchParams.has('after') ? null : 'space-a' } }; }
+    if (url.pathname.endsWith('/public-key')) return { status: 200, body: { algorithm: pair.envelope.algorithm, wrapped: memberKey } };
+    if (url.pathname === '/v1/spaces/space-a/key') { assert.equal(url.search, ''); return { status: 200, body: keyA }; }
+    if (url.pathname === '/v1/spaces/space-b/key') { assert.equal(url.searchParams.get('generation'), '2'); return { status: 200, body: keyB }; }
+    if (url.pathname === '/v1/spaces/space-d/key') return { status: 200, body: keyA };
+    if (url.pathname.endsWith('/datasets')) {
+      assert.equal(url.searchParams.get('app'), 'horizon'); assert.equal(url.searchParams.get('limit'), '200');
+      if (url.pathname.includes('space-a')) return { status: 200, body: { datasets: [{ id: url.searchParams.has('after') ? 'dataset-b' : 'dataset-a', appId: 'horizon', sharedBy: { accountId: 'member-a', displayName: null }, updatedAt: '2026-10-22T00:00:00.000Z', size: 45 }], after: url.searchParams.has('after') ? null : 'dataset-a' } };
+      return { status: 200, body: { datasets: [], after: null } };
+    }
+  });
+  return { ...fixture, base, pair, keys, changeMemberKey: async () => { const next = await crypto.createAccountKeyPair(base.key, 'member-a'); memberKey = Buffer.from(next.envelope.wrapped, 'base64').subarray(0, 33).toString('base64'); } };
+}
+
+test('account reads every Space and Horizon dataset page while isolating pending keys and invalid profiles', async t => {
+  const fixture = await accountSpacesFixture(t); await fixture.signIn(); const state = fixture.account.state();
+  assert.equal(state.phrase, 'ready'); assert.equal(state.keyStore, 'session'); assert.equal(state.spacesError, null); assert.equal(state.spaces.length, 4);
+  assert.deepEqual(state.spaces[0], { id: 'space-a', name: 'Shared team', code: 'ST', colour: '#abc123', icon: 'star', role: 'owner', pending: false, members: [{ accountId: 'account-fixture', displayName: 'Account Name', role: 'owner', keyChanged: false }, { accountId: 'member-a', displayName: null, role: 'member', keyChanged: false }] });
+  assert.equal(state.spaces[1].name, 'Shared Space'); assert.equal(state.spaces[1].colour, null); assert.equal(state.spaces[1].pending, false);
+  assert.equal(state.spaces[2].pending, true); assert.equal(state.spaces[3].pending, true); assert.equal(fixture.requests.some(call => call.path === '/v1/spaces/space-c/key'), false);
+  assert.equal(fixture.requests.some(call => /^\/v1\/spaces\/space-[cd]\/datasets/.test(call.path)), false);
+  assert.deepEqual(state.shared, ['dataset-a', 'dataset-b'].map(datasetId => ({ spaceId: 'space-a', datasetId, sharedBy: { accountId: 'member-a', displayName: null }, updatedAt: '2026-10-22T00:00:00.000Z', size: 45, title: null })));
+  assert.equal(fixture.requests.some(call => call.path.includes('objects') || call.method === 'PUT'), false);
+  const pin = join(fixture.host.directory, 'spaces-pins.json'); assert.equal(existsSync(pin), true); assert.ok(!readFileSync(pin).includes(Buffer.from(fixture.pair.publicKey).toString('base64')));
+  state.spaces[0].members[0].displayName = 'tampered'; state.shared.length = 0;
+  assert.equal(fixture.account.state().spaces[0].members[0].displayName, 'Account Name'); assert.equal(fixture.account.state().shared.length, 2);
+});
+
+test('account refresh throttles Nebula requests, retries on demand and reports changed sealed member pins', async t => {
+  const fixture = await accountSpacesFixture(t); await fixture.signIn(); const before = fixture.requests.length;
+  await fixture.account.refreshSpaces(); await fixture.account.refreshSpaces(); assert.equal(fixture.requests.length, before);
+  await fixture.changeMemberKey(); await fixture.account.retry();
+  assert.equal(fixture.account.state().spaces[0].members.find(member => member.accountId === 'member-a').keyChanged, true);
+  assert.equal(fixture.account.state().spaces[0].pending, false); assert.equal(fixture.account.state().shared.length, 2);
+  const realNow = Date.now; Date.now = () => realNow() + 30001;
+  try { await fixture.account.refreshSpaces(); const count = fixture.requests.length; assert.ok(count > before); await fixture.account.refreshSpaces(); assert.equal(fixture.requests.length, count); }
+  finally { Date.now = realNow; }
+});
+
+test('account phrase failures keep words out of state and requests and successful phrases store only the account key', async t => {
+  const base = await independentCosmicFixture(), crypto = require('../dist/electron/cosmic-crypto.js'), pair = await crypto.createAccountKeyPair(base.key, 'account-fixture'), stored = [];
+  const fixture = await accountFixture(t, { keyStore: { kind: 'shared', async get() {}, async set(id, key) { stored.push({ id, key: key.slice() }); } } });
+  fixture.handle(call => call.path === '/v1/keys' ? { status: 200, body: { keys: [{ recipient: 'phrase', ...base.phraseEnvelope }, { recipient: 'public', ...pair.envelope }] } } : call.path.startsWith('/v1/spaces?') ? { status: 200, body: { spaces: [], after: null } } : undefined);
+  await fixture.signIn(); assert.equal(fixture.account.state().phrase, 'needed');
+  const wrong = base.phrase.replace('amber', 'azure');
+  await assert.rejects(fixture.account.phrase(wrong), error => error.message === 'ACCOUNT_PHRASE_WRONG' && !error.message.includes(wrong));
+  assert.equal(fixture.account.state().phrase, 'wrong'); assert.equal(stored.length, 0);
+  await fixture.account.phrase(base.phrase); assert.equal(fixture.account.state().phrase, 'ready'); assert.equal(fixture.account.state().spacesError, null);
+  assert.equal(stored.length, 1); assert.equal(stored[0].id, 'account-fixture'); assert.ok(Buffer.from(stored[0].key).equals(Buffer.from(base.key)));
+  assert.equal(JSON.stringify(fixture.states).includes(base.phrase), false); assert.equal(JSON.stringify(fixture.states).includes(wrong), false);
+  assert.equal(JSON.stringify(fixture.requests).includes(base.phrase), false); assert.equal(JSON.stringify(fixture.requests).includes(wrong), false);
+});
+
+test('account keeps an unreadable shared key store untouched and opens the phrase for this session only', async t => {
+  const base = await independentCosmicFixture(), crypto = require('../dist/electron/cosmic-crypto.js'), pair = await crypto.createAccountKeyPair(base.key, 'account-fixture');
+  const fixture = await accountFixture(t, { keyStore: { kind: 'shared', async get() { throw new Error('ACCOUNT_KEYSTORE'); }, async set() { assert.fail('An unreadable key store must stay untouched'); } } });
+  fixture.handle(call => call.path === '/v1/keys' ? { status: 200, body: { keys: [{ recipient: 'phrase', ...base.phraseEnvelope }, { recipient: 'public', ...pair.envelope }] } } : call.path.startsWith('/v1/spaces?') ? { status: 200, body: { spaces: [], after: null } } : undefined);
+  await fixture.signIn(); assert.equal(fixture.account.state().keyStore, 'error'); assert.equal(fixture.account.state().spacesError, 'ACCOUNT_KEYSTORE');
+  await fixture.account.phrase(base.phrase); assert.equal(fixture.account.state().phrase, 'ready'); assert.equal(fixture.account.state().keyStore, 'error'); assert.equal(fixture.account.state().spacesError, 'ACCOUNT_KEYSTORE');
+});
+
+test('account creates its public key once and rereads a concurrent creator after Quantum refuses the write', async t => {
+  const crypto = require('../dist/electron/cosmic-crypto.js'), base = await independentCosmicFixture(), concurrent = await crypto.createAccountKeyPair(base.key, 'account-fixture');
+  for (const race of [false, true]) {
+    const fixture = await accountFixture(t, { keyStore: { kind: 'session', async get() { return base.key.slice(); }, async set() {} } }); let written = false;
+    fixture.handle(call => {
+      if (call.path === '/v1/keys') return { status: 200, body: { keys: [{ recipient: 'phrase', ...base.phraseEnvelope }, ...(written && race ? [{ recipient: 'public', ...concurrent.envelope }] : [])] } };
+      if (call.path === '/v1/keys/public') { written = true; return { status: race ? 403 : 200, body: race ? { error: { code: 'app_forbidden' } } : { success: true } }; }
+      if (call.path.startsWith('/v1/spaces?')) return { status: 200, body: { spaces: [], after: null } };
+    });
+    await fixture.signIn(); assert.equal(fixture.account.state().phrase, 'ready'); assert.equal(fixture.account.state().spacesError, null);
+    const writes = fixture.requests.filter(call => call.method === 'PUT'); assert.equal(writes.length, 1); assert.equal(writes[0].path, '/v1/keys/public');
+    await crypto.openAccountKeyPair(base.key, writes[0].body, 'account-fixture');
+    assert.equal(fixture.requests.filter(call => call.path === '/v1/keys').length, race ? 2 : 1);
+  }
+});
+
+test('account cancellation during a delayed phrase-store write cannot publish secrets or poison the next sign-in', async t => {
+  const base = await independentCosmicFixture();
+  for (const action of ['cancel', 'signOut']) {
+    let entered, rejectWrite;
+    const writing = new Promise(done => { entered = done; }), pending = new Promise((_done, reject) => { rejectWrite = reject; });
+    const fixture = await accountFixture(t, { keyStore: { kind: 'shared', async get() {}, async set() { entered(); await pending; } } });
+    fixture.handle(call => call.path === '/v1/keys' ? { status: 200, body: { keys: [{ recipient: 'phrase', ...base.phraseEnvelope }] } } : undefined);
+    await fixture.signIn(); const submission = fixture.account.phrase(base.phrase); await writing;
+    await fixture.account[action](); assert.deepEqual(fixture.account.state(), { status: 'signedOut' });
+    rejectWrite(new Error('ACCOUNT_KEYSTORE')); await assert.rejects(submission, /ACCOUNT_DENIED/);
+    assert.deepEqual(fixture.account.state(), { status: 'signedOut' });
+    await fixture.signIn(); assert.equal(fixture.account.state().phrase, 'needed'); assert.equal(fixture.account.state().keyStore, 'shared'); assert.equal(fixture.account.state().spacesError, null);
+    assert.equal(JSON.stringify(fixture.states).includes(base.phrase), false);
+  }
+});
+
+test('account revoked credentials during a Space request cannot republish a stale signed-in card', async t => {
+  const fixture = await accountSpacesFixture(t); await fixture.signIn(); const before = fixture.states.length;
+  fixture.handle(call => call.path.startsWith('/v1/spaces?') ? { status: 401, body: { error: { code: 'unauthorized' } } } : call.path === '/v1/oauth/token' ? { status: 400, body: { error: { code: 'invalid_grant' } } } : undefined);
+  await fixture.account.retry().catch(() => {});
+  assert.deepEqual(fixture.account.state(), { status: 'signedOut' }); assert.equal(existsSync(join(fixture.host.directory, 'account.sealed')), false);
+  assert.equal(fixture.states.slice(before).some(state => state.status === 'signedIn'), false);
+});
+
+test('account keeps a Space pending without a page error when a member has no public key yet', async t => {
+  const base = await independentCosmicFixture(), pair = await require('../dist/electron/cosmic-crypto.js').createAccountKeyPair(base.key, 'account-fixture');
+  const fixture = await accountFixture(t, { keyStore: { kind: 'session', async get() { return base.key.slice(); }, async set() {} } });
+  fixture.handle(call => {
+    if (call.path === '/v1/keys') return { status: 200, body: { keys: [{ recipient: 'public', ...pair.envelope }] } };
+    if (call.path.startsWith('/v1/spaces?')) return { status: 200, body: { spaces: [{ id: 'pending-space', role: 'member', keyPending: true, members: [{ accountId: 'new-member', displayName: null, role: 'member' }] }], after: null } };
+    if (call.path.endsWith('/public-key')) return { status: 404, body: { error: { code: 'not_found' } } };
+    if (call.path.startsWith('/v1/spaces/')) assert.fail('Pending Spaces must not request a member envelope or datasets');
+  });
+  await fixture.signIn();
+  assert.equal(fixture.account.state().spacesError, null); assert.equal(fixture.account.state().spaces[0].pending, true);
+  assert.deepEqual(fixture.account.state().shared, []);
 });
