@@ -5075,7 +5075,7 @@ function desktopInterface(react = {}, globals = {}) {
   return interfaceModule('src/Desktop.tsx', { react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' }, './shared/capture': require('../dist/src/shared/capture.js') }, globals);
 }
 function desktopViewInterface(react, desktop, globals = {}) {
-  return interfaceModule('src/DesktopView.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': desktop, './DesktopDrop': { DesktopDrop: 'drop' }, './SidePanelFaces': { SidePanelFaces: 'faces' } }, globals);
+  return interfaceModule('src/DesktopView.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': desktop, './DesktopDrop': { DesktopDrop: 'drop' }, './SidePanelFaces': { SidePanelFaces: 'faces' }, './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' } }, globals);
 }
 
 test('browser menu keeps the drawn order, shortcuts and working zoom controls', () => {
@@ -6787,7 +6787,7 @@ test('non-project panel pages expose a drop hint only during a candidate drag an
 
 
 test('link and action chooser openers keep menus without field decorations', () => {
-  for (const [variant, className] of [['link', 'desktop-small-link'], ['action', 'desktop-action']]) {
+  for (const [variant, className] of [['link', 'desktop-small-link'], ['action', 'desktop-action primary']]) {
     const hooks = notebookTestHooks(), module = desktopInterface(hooks.react);
     const render = () => hooks.render(() => module.DesktopDropdown({ label: 'Choose', value: '', variant, choices: [{ id: 'one', name: 'One' }], onChoose() {} }));
     let tree = render(), button = notebookNodes(tree, node => node.type === 'button')[0];
@@ -7249,4 +7249,189 @@ test('sync cancelled folder selection reports its cause without creating sync st
   await assert.rejects(browser.command({ type: 'sync-create', accepted: true }), /SYNC_CANCELLED/);
   assert.equal(browser.state().sync.configured, false);
   assert.equal(existsSync(join(browser.directory, 'sync', 'state.sealed')), false);
+});
+
+const { cosmicRoot, SEND_APPS, readReceivers, sendItem } = require('../dist/electron/send.js');
+function sendFixture(t, accepts = ['note', 'text', 'area', 'page', 'link']) {
+  const root = temporaryDirectory(t, 'send'), directory = join(root, 'inbox', 'docs');
+  mkdirSync(directory, { recursive: true });
+  const receiver = { version: 1, app: 'docs', name: 'Docs', accepts };
+  const path = join(directory, 'receiver.json'); writeFileSync(path, JSON.stringify(receiver));
+  const payload = { kind: 'text', title: 'Route', text: 'Plain text', note: 'Saved note', source: { url: 'https://route.example/', title: 'Route source' }, project: 'Travel', image: null };
+  return { root, directory, receiver, path, payload };
+}
+
+test('send resolves the Cosmic data folder with platform fallbacks and leaves test overrides to the unpackaged host', () => {
+  const home = require('node:os').homedir();
+  assert.equal(cosmicRoot({ LOCALAPPDATA: join(testTemporaryRoot, 'local'), XDG_DATA_HOME: join(testTemporaryRoot, 'xdg') }, 'win32'), join(testTemporaryRoot, 'local', 'Cosmic'));
+  assert.equal(cosmicRoot({}, 'win32'), join(home, 'AppData', 'Local', 'Cosmic'));
+  assert.equal(cosmicRoot({ XDG_DATA_HOME: join(testTemporaryRoot, 'xdg') }, 'linux'), join(testTemporaryRoot, 'xdg', 'Cosmic'));
+  assert.equal(cosmicRoot({}, 'linux'), join(home, '.local', 'share', 'Cosmic'));
+  assert.equal(cosmicRoot({ HORIZON_COSMIC_ROOT: join(testTemporaryRoot, 'override') }, 'linux'), join(home, '.local', 'share', 'Cosmic'));
+});
+
+test('send receivers are read fresh, use fixed app names and reject malformed declarations', t => {
+  const root = temporaryDirectory(t, 'send-missing');
+  assert.deepEqual(SEND_APPS, ['docs', 'blueprint', 'nova']);
+  assert.deepEqual(readReceivers(root), [{ app: 'docs', name: 'Docs', accepts: null }, { app: 'blueprint', name: 'Blueprint', accepts: null }, { app: 'nova', name: 'Nova', accepts: null }]);
+  const fixture = sendFixture(t);
+  assert.deepEqual(readReceivers(fixture.root)[0], { app: 'docs', name: 'Docs', accepts: fixture.receiver.accepts });
+  for (const value of [
+    { ...fixture.receiver, app: 'nova' }, { ...fixture.receiver, version: 2 }, { ...fixture.receiver, accepts: 'note' },
+    { ...fixture.receiver, accepts: ['note', 'vault'] }, { ...fixture.receiver, accepts: [null] }, { ...fixture.receiver, name: '' },
+    { ...fixture.receiver, extra: true }, '{bad JSON', ' '.repeat(4097),
+  ]) {
+    writeFileSync(fixture.path, typeof value === 'string' ? value : JSON.stringify(value));
+    assert.equal(readReceivers(fixture.root)[0].accepts, null);
+  }
+  writeFileSync(fixture.path, JSON.stringify({ ...fixture.receiver, accepts: [] })); assert.deepEqual(readReceivers(fixture.root)[0].accepts, []);
+  for (const app of SEND_APPS) {
+    const directory = join(root, 'inbox', app); mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, 'receiver.json'), JSON.stringify({ ...fixture.receiver, app }));
+  }
+  assert.equal(readReceivers(root).every(receiver => receiver.accepts?.length === 5), true);
+});
+
+test('send receivers refuse linked inbox directories, app directories and receiver files', t => {
+  for (const part of ['inbox', 'app', 'file']) {
+    const root = temporaryDirectory(t, 'send-linked'), actual = temporaryDirectory(t, 'send-actual');
+    const receiver = { version: 1, app: 'docs', name: 'Docs', accepts: ['text'] };
+    let target, link;
+    if (part === 'inbox') {
+      mkdirSync(join(actual, 'docs')); writeFileSync(join(actual, 'docs', 'receiver.json'), JSON.stringify(receiver));
+      target = actual; link = join(root, 'inbox');
+    } else if (part === 'app') {
+      mkdirSync(join(root, 'inbox')); writeFileSync(join(actual, 'receiver.json'), JSON.stringify(receiver));
+      target = actual; link = join(root, 'inbox', 'docs');
+    } else {
+      mkdirSync(join(root, 'inbox', 'docs'), { recursive: true }); target = join(actual, 'receiver.json'); link = join(root, 'inbox', 'docs', 'receiver.json');
+      writeFileSync(target, JSON.stringify(receiver));
+    }
+    try { symlinkSync(target, link, part === 'file' ? 'file' : process.platform === 'win32' ? 'junction' : 'dir'); }
+    catch (error) { if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) { t.diagnostic(`Cannot create ${part} symlink on this platform`); continue; } throw error; }
+    assert.equal(readReceivers(root)[0].accepts, null);
+    assert.throws(() => sendItem(root, 'docs', { kind: 'text', title: '', text: '', note: '', source: null, project: null, image: null }), /SEND_NOT_INSTALLED/);
+    assert.equal(readdirSync(actual).some(name => name.startsWith('.partial-')), false);
+  }
+});
+
+test('send atomically writes only the agreed item fields and PNG with private modes', t => {
+  const fixture = sendFixture(t), bytes = capturePNG(100, 80), payload = { ...fixture.payload, kind: 'page', image: { bytes, width: 100, height: 80 } };
+  assert.equal(sendItem(fixture.root, 'docs', payload), undefined);
+  const folders = readdirSync(fixture.directory).filter(name => name !== 'receiver.json'); assert.equal(folders.length, 1);
+  assert.match(folders[0], /^\d{8}-\d{6}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const directory = join(fixture.directory, folders[0]), path = join(directory, 'item.json'), value = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(Object.keys(value), ['version', 'id', 'from', 'sentAt', 'kind', 'title', 'text', 'note', 'source', 'project', 'image']);
+  assert.deepEqual(value, { version: 1, id: value.id, from: 'horizon', sentAt: value.sentAt, kind: 'page', title: payload.title, text: payload.text, note: payload.note, source: payload.source, project: payload.project, image: { file: 'image.png', width: 100, height: 80 } });
+  assert.equal(new Date(value.sentAt).toISOString(), value.sentAt); assert.equal(folders[0].endsWith(value.id), true);
+  assert.deepEqual(readFileSync(join(directory, 'image.png')), bytes); assert.deepEqual(readdirSync(directory).sort(), ['image.png', 'item.json']);
+  if (process.platform === 'linux') {
+    const { statSync } = require('node:fs'); assert.equal(statSync(directory).mode & 0o777, 0o700);
+    for (const file of ['item.json', 'image.png']) assert.equal(statSync(join(directory, file)).mode & 0o777, 0o600);
+  }
+  sendItem(fixture.root, 'docs', { ...fixture.payload, kind: 'note', note: '', source: null, project: null });
+  const next = readdirSync(fixture.directory).filter(name => name !== 'receiver.json'); assert.equal(next.length, 2);
+  assert.equal(next.some(name => name.startsWith('.partial-')), false);
+  const note = next.find(name => name !== folders[0]); assert.deepEqual(readdirSync(join(fixture.directory, note)), ['item.json']);
+  const noteValue = JSON.parse(readFileSync(join(fixture.directory, note, 'item.json'), 'utf8'));
+  assert.equal(noteValue.image, null); assert.equal(noteValue.source, null); assert.equal(noteValue.project, null); assert.notEqual(noteValue.id, value.id);
+});
+
+test('send refuses absent receivers, unsupported kinds, invalid PNG bytes and oversized images without writes', t => {
+  const fixture = sendFixture(t, ['text']);
+  assert.throws(() => sendItem(fixture.root, 'nova', fixture.payload), /SEND_NOT_INSTALLED/);
+  assert.throws(() => sendItem(fixture.root, 'docs', { ...fixture.payload, kind: 'note' }), /SEND_NOT_INSTALLED/);
+  const oversized = Buffer.alloc(20 * 1024 * 1024 + 1); capturePNG(1, 1).copy(oversized);
+  for (const image of [{ bytes: Buffer.from('not a PNG'), width: 1, height: 1 }, { bytes: oversized, width: 1, height: 1 }, { bytes: capturePNG(1, 1), width: 0, height: 1 }, { bytes: capturePNG(1, 1), width: 1, height: NaN }]) {
+    assert.throws(() => sendItem(fixture.root, 'docs', { ...fixture.payload, image }), /SEND_FAILED/);
+  }
+  for (const payload of [null, undefined, { ...fixture.payload, password: 'forged' }, { ...fixture.payload, source: { ...fixture.payload.source, cookie: 'forged' } }]) assert.throws(() => sendItem(fixture.root, 'docs', payload), /SEND_FAILED/);
+  assert.deepEqual(readdirSync(fixture.directory), ['receiver.json']);
+});
+
+test('send truncates text at one MB of UTF-8 without splitting a character', t => {
+  const fixture = sendFixture(t), limit = 1024 * 1024;
+  for (const text of ['x'.repeat(limit + 1), 'x'.repeat(limit - 1) + '漢more']) sendItem(fixture.root, 'docs', { ...fixture.payload, text });
+  const values = readdirSync(fixture.directory).filter(name => name !== 'receiver.json').map(name => JSON.parse(readFileSync(join(fixture.directory, name, 'item.json'), 'utf8')).text);
+  assert.deepEqual(values.map(value => Buffer.byteLength(value)).sort((a, b) => a - b), [limit - 1, limit]);
+  assert.equal(values.some(value => value.includes('\ufffd')), false); assert.equal(values.every(value => /^x+$/.test(value)), true);
+});
+
+test('send removes only its partial folder after a write failure and preserves previously sent items', t => {
+  const fixture = sendFixture(t); sendItem(fixture.root, 'docs', fixture.payload);
+  const before = readdirSync(fixture.directory).sort(), fs = require('node:fs'), write = fs.writeFileSync;
+  fs.writeFileSync = (path, ...args) => { if (String(path).endsWith('image.png')) throw new Error('Synthetic image write failure'); return write(path, ...args); };
+  try { assert.throws(() => sendItem(fixture.root, 'docs', { ...fixture.payload, image: { bytes: capturePNG(1, 1), width: 1, height: 1 } }), /SEND_FAILED/); }
+  finally { fs.writeFileSync = write; }
+  assert.deepEqual(readdirSync(fixture.directory).sort(), before);
+});
+
+test('send commands validate exact fields, known apps and existing project or capture items, and refuse private windows', t => {
+  const project = sampleDesktopStore().projects[0], id = project.items[0].id, capture = sampleDesktopItem('area');
+  const projects = [project], captures = [capture], command = { type: 'send-item', project: project.id, id, app: 'docs' };
+  assert.deepEqual(validateCommand({ type: 'send-targets' }, undefined, projects, captures), { type: 'send-targets' });
+  for (const app of SEND_APPS) {
+    assert.deepEqual(validateCommand({ ...command, app }, undefined, projects, captures), { ...command, app });
+    const captureCommand = { type: 'send-item', project: null, id: capture.id, app };
+    assert.deepEqual(validateCommand(captureCommand, undefined, projects, captures), captureCommand);
+  }
+  for (const change of [{ app: 'vault' }, { app: '../docs' }, { app: null }, { project: randomUUID() }, { id: randomUUID() }, { project: null }, { project: undefined }, { id: undefined }, { extra: true }, { cookies: [] }, { image: Buffer.from('forged') }]) assert.throws(() => validateCommand({ ...command, ...change }, undefined, projects, captures));
+  for (const field of ['app', 'project', 'id']) { const missing = { ...command }; delete missing[field]; assert.throws(() => validateCommand(missing, undefined, projects, captures)); }
+  assert.throws(() => validateCommand({ type: 'send-targets', extra: true }));
+  const { assertPrivateCommand } = require('../dist/electron/private-commands.js');
+  for (const item of [command, { type: 'send-targets' }]) assert.throws(() => assertPrivateCommand(item), /SEND_PRIVATE/);
+  const browser = notebookBrowser(t, authenticatedCipher()), privateWindow = browser.addWindow({ privateWindow: true });
+  for (const item of [command, { type: 'send-targets' }]) assert.throws(() => privateWindow.command(item), /SEND_PRIVATE/);
+});
+
+test('send browser commands read targets fresh, send project items and decrypted captures, and keep private items local', async t => {
+  const fixture = sendFixture(t), previous = process.env.HORIZON_COSMIC_ROOT;
+  process.env.HORIZON_COSMIC_ROOT = fixture.root;
+  t.after(() => { if (previous === undefined) delete process.env.HORIZON_COSMIC_ROOT; else process.env.HORIZON_COSMIC_ROOT = previous; });
+  const cipher = authenticatedCipher(), bytes = capturePNG(100, 80), browser = notebookBrowser(t, cipher, { captureBytes: bytes }), { command, state } = browser;
+  assert.deepEqual(await command({ type: 'send-targets' }), readReceivers(fixture.root));
+  writeFileSync(fixture.path, JSON.stringify({ ...fixture.receiver, accepts: ['note'] }));
+  assert.deepEqual((await command({ type: 'send-targets' }))[0].accepts, ['note']);
+  writeFileSync(fixture.path, JSON.stringify(fixture.receiver));
+  command({ type: 'create-project', name: 'Travel' }); const project = state().projectInUse;
+  command({ type: 'add-note', project, title: 'Plans', text: 'Saved plans', folder: null });
+  const note = browser.notebook(project).items[0];
+  assert.equal(await command({ type: 'send-item', project, id: note.id, app: 'docs' }), undefined);
+  const source = { url: 'https://route.example/', title: 'Route source' };
+  command({ type: 'add-text', project, folder: null, text: 'Selected route text', source });
+  const text = browser.notebook(project).items.at(-1);
+  command({ type: 'update-item', project, id: text.id, note: 'Personal route note' });
+  await command({ type: 'send-item', project, id: text.id, app: 'docs' });
+  browser.navigate('https://capture.example/'); browser.area(false);
+  const shot = await command({ type: 'take-capture' });
+  command({ type: 'update-item', project: null, id: shot.id, note: 'Capture note' });
+  await command({ type: 'send-item', project: null, id: shot.id, app: 'docs' });
+  const sent = () => readdirSync(fixture.directory).filter(name => name !== 'receiver.json').map(name => ({ directory: join(fixture.directory, name), ...JSON.parse(readFileSync(join(fixture.directory, name, 'item.json'), 'utf8')) }));
+  const values = sent(); assert.equal(values.length, 3);
+  const savedNote = values.find(value => value.kind === 'note'); assert.equal(savedNote.title, 'Plans'); assert.equal(savedNote.text, 'Saved plans'); assert.equal(savedNote.source, null); assert.equal(savedNote.project, 'Travel');
+  const savedText = values.find(value => value.kind === 'text'); assert.deepEqual(savedText.source, source); assert.equal(savedText.text, 'Selected route text'); assert.equal(savedText.note, 'Personal route note'); assert.equal(savedText.project, 'Travel');
+  const savedCapture = values.find(value => value.kind === 'area'); assert.equal(savedCapture.project, null); assert.equal(savedCapture.note, 'Capture note'); assert.deepEqual(savedCapture.source, { url: 'https://capture.example/', title: 'A web page' });
+  assert.deepEqual(readFileSync(join(savedCapture.directory, 'image.png')), bytes); assert.deepEqual(savedCapture.image, { file: 'image.png', width: 100, height: 80 });
+  const profileDirectory = join(browser.directory, 'profiles', state().activeProfileId), stored = readDesktopStore(join(profileDirectory, 'notebooks.json'), cipher);
+  const capture = stored.captures.find(item => item.id === shot.id), capturePath = join(profileDirectory, 'captures', capture.image.filename);
+  assert.equal(readFileSync(capturePath).includes(bytes), false);
+  writeFileSync(capturePath, Buffer.alloc(capture.image.bytes + 28));
+  assert.throws(() => command({ type: 'send-item', project: null, id: shot.id, app: 'docs' }), /SEND_FAILED/);
+  const peer = browser.addWindow({ privateWindow: true }); peer.navigate('https://private.example/'); browser.area(false);
+  const privateShot = await peer.command({ type: 'take-capture' });
+  for (const item of [{ type: 'send-targets' }, { type: 'send-item', project, id: note.id, app: 'docs' }, { type: 'send-item', project: null, id: privateShot.id, app: 'docs' }]) assert.throws(() => peer.command(item), /SEND_PRIVATE/);
+  assert.equal(sent().length, 3); assert.equal(readdirSync(fixture.directory).some(name => name.startsWith('.partial-')), false);
+});
+
+test('packaged send commands ignore the development Cosmic root override', async t => {
+  const override = sendFixture(t), packaged = sendFixture(t, ['note']), previous = process.env.HORIZON_COSMIC_ROOT;
+  process.env.HORIZON_COSMIC_ROOT = override.root;
+  t.after(() => { if (previous === undefined) delete process.env.HORIZON_COSMIC_ROOT; else process.env.HORIZON_COSMIC_ROOT = previous; });
+  const send = require('../dist/electron/send.js'), original = send.cosmicRoot, browser = notebookBrowser(t, authenticatedCipher());
+  send.cosmicRoot = () => packaged.root;
+  try {
+    assert.deepEqual((await browser.command({ type: 'send-targets' }))[0].accepts, override.receiver.accepts);
+    browser.app.isPackaged = true;
+    assert.deepEqual((await browser.command({ type: 'send-targets' }))[0].accepts, ['note']);
+  } finally { send.cosmicRoot = original; }
 });

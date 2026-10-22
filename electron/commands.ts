@@ -10,6 +10,7 @@ import { isProfileColor, isProfileId, profileName } from './profiles';
 import { extensionId } from './extension-policy';
 import { isPermissionDecision, isSitePermission, validHost } from './site-settings';
 import { folderName, projectName, desktopInputText, desktopTitle } from './desktop';
+import { SEND_APPS } from './send';
 import { validCaptureRect } from '../src/shared/capture';
 import { groupIcon } from '../src/shared/group-icon-names';
 import { groupColor, groupId, groupName } from '../src/shared/tab-groups';
@@ -25,7 +26,7 @@ function string(value: unknown, maximum: number, empty = false): value is string
 function keys(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected browser argument');
 }
-const desktopCommands = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'open-desktop', 'open-desktop-panel', 'close-desktop-panel', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'add-capture-to-project', 'delete-capture', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'take-capture', 'capture-full-page', 'capture-screen', 'edit-capture', 'copy-capture']);
+const desktopCommands = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'open-desktop', 'open-desktop-panel', 'close-desktop-panel', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'send-targets', 'send-item', 'add-capture-to-project', 'delete-capture', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'take-capture', 'capture-full-page', 'capture-screen', 'edit-capture', 'copy-capture']);
 const importCommands = new Set(['list-import-sources', 'import-browser-data', 'choose-import-passwords-file', 'import-passwords', 'delete-import-passwords-file']);
 const favoriteCommands = new Set(['add-favorite', 'create-favorite-folder', 'rename-favorite', 'move-favorite', 'delete-favorite', 'open-favorite', 'open-favorite-new-tab', 'open-all-favorites']);
 export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
@@ -133,6 +134,8 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
         && (type === 'create-folder' || command.id !== null && folder(command.project, command.id)); break;
     case 'delete-folder': valid = exact(['project', 'id']) && project(command.project) && command.id !== null && folder(command.project, command.id); break;
     case 'move-item-folder': valid = exact(['project', 'id', 'folder']) && project(command.project) && item(command.project, command.id) && folder(command.project, command.folder); break;
+    case 'send-targets': valid = exact([]); break;
+    case 'send-item': valid = exact(['project', 'id', 'app']) && item(command.project, command.id) && SEND_APPS.includes(command.app as typeof SEND_APPS[number]); break;
     case 'move-item-project': valid = exact(['project', 'id', 'toProject', 'folder']) && project(command.project) && item(command.project, command.id) && project(command.toProject) && folder(command.toProject, command.folder); break;
     case 'add-capture-to-project': valid = exact(['id', 'project', 'folder']) && item(null, command.id) && project(command.project) && folder(command.project, command.folder); break;
     case 'delete-capture': valid = exact(['id']) && item(null, command.id); break;

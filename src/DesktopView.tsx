@@ -1,13 +1,15 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ExternalLink, Folder, FolderInput, FolderPlus, LayoutDashboard, LoaderCircle, Plus, Sparkles, Trash2, X } from 'lucide-react';
+import { Check, CodeXml, ExternalLink, FileText, Folder, FolderInput, FolderPlus, Frame, LayoutDashboard, LoaderCircle, Plus, Send, Sparkles, Trash2, X } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
-import type { BrowserCommand, BrowserState, DesktopItemContent, DesktopPanelPage, Language, ProjectContent } from './shared/api';
+import type { BrowserCommand, BrowserState, DesktopItemContent, DesktopPanelPage, Language, ProjectContent, SendApp, SendReceiver } from './shared/api';
 import type { DesktopEdits } from './shared/desktop-edits';
 import { CaptureImage, DesktopDropdown, DesktopNameDialog, desktopError, desktopCardLabel, desktopItemLabel, GrowingTextArea, itemCount, ItemMark, itemSite, ProjectNameForm, projectCounts, projectSize, relativeDesktopDate } from './Desktop';
 import { DesktopDrop } from './DesktopDrop';
 import { SidePanelFaces } from './SidePanelFaces';
+import { Menu } from './Menu';
+import { PopupAnchor } from './PopupAnchor';
 
 type DesktopProps = {
   state: BrowserState; language: Language; edits: DesktopEdits; readOnly: boolean;
@@ -93,6 +95,35 @@ function ItemDetail({ project, item, props }: { project: ProjectContent | null; 
   const breadcrumb = <button className="desktop-breadcrumb" type="button" onClick={() => { void onPage(project ? { kind: 'project', project: project.id, folder: item.folder } : { kind: 'captures' }); }}>{project?.name ?? t('captures')}{folder ? ` / ${folder.name}` : ''}</button>;
   const readOnly = props.readOnly || state.desktopLocked;
   const remove = () => { void onDelete(project ? { type: 'delete-item', project: project.id, id: item.id } : { type: 'delete-capture', id: item.id }, 'desktopItemDeleted'); };
+  const [sendOpen, setSendOpen] = useState(false), [receivers, setReceivers] = useState<SendReceiver[] | null>(null), [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(''), [sendFailure, setSendFailure] = useState<SendApp | 'targets' | null>(null);
+  const sendButton = useRef<HTMLButtonElement>(null), sendPending = useRef(false), mounted = useRef(false);
+  const sendApps = [{ app: 'docs', name: 'Docs', icon: FileText }, { app: 'blueprint', name: 'Blueprint', icon: Frame }, { app: 'nova', name: 'Nova', icon: CodeXml }] as const;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    if (!sendOpen || state.privateWindow) return;
+    let current = true;
+    void window.horizon.command({ type: 'send-targets' }).then(next => { if (current) setReceivers(next); }).catch(() => {
+      if (current) { setSendOpen(false); setSendFailure('targets'); sendButton.current?.focus(); }
+    });
+    return () => { current = false; };
+  }, [sendOpen, state.privateWindow]);
+  const openSend = () => { if (readOnly || state.privateWindow || sendPending.current) return; setReceivers(null); setSendFailure(null); setSendOpen(true); };
+  const closeSend = (focus = true) => { setSendOpen(false); if (focus) sendButton.current?.focus(); };
+  const send = async (app: SendApp) => {
+    if (readOnly || state.privateWindow || sendPending.current) return;
+    closeSend(); sendPending.current = true; setSending(true); setSent(''); setSendFailure(null);
+    try {
+      await edits.flush();
+      if (!mounted.current) return;
+      await window.horizon.command({ type: 'send-item', project: project?.id ?? null, id: item.id, app });
+      if (mounted.current) setSent(sendApps.find(entry => entry.app === app)!.name);
+    } catch { if (mounted.current) setSendFailure(app); }
+    finally { sendPending.current = false; if (mounted.current) setSending(false); }
+  };
+  const sendAction = !state.privateWindow && <div className="desktop-dropdown"><button className="desktop-action primary" ref={sendButton} type="button" disabled={readOnly || sending} aria-haspopup="menu" aria-expanded={sendOpen} aria-controls={sendOpen ? `${id}-send` : undefined} onClick={() => { if (sendOpen) closeSend(); else openSend(); }} onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); if (!sendOpen) openSend(); } }}><Send aria-hidden="true" />{t('sendTo')}</button>{sendOpen && <PopupAnchor opener={sendButton} gap={6}><Menu id={`${id}-send`} className="desktop-choice-menu desktop-send-menu" label={t('sendTo')} keyboard opener={sendButton} onDismiss={reason => closeSend(reason !== 'outside')}>
+    {sendApps.map(({ app, name, icon: Icon }) => { const available = Boolean(receivers?.find(receiver => receiver.app === app)?.accepts?.includes(item.kind)); return <button key={app} type="button" role="menuitem" aria-disabled={!available} tabIndex={-1} onClick={() => { if (available) void send(app); }}><Icon aria-hidden="true" /><span>{name}</span>{!available && <small>{t(receivers ? 'sendNotInstalled' : 'loading')}</small>}</button>; })}
+  </Menu></PopupAnchor>}</div>;
   const [lyraError, setLyraError] = useState('');
   const askLyra = async () => {
     try {
@@ -101,7 +132,11 @@ function ItemDetail({ project, item, props }: { project: ProjectContent | null; 
       await run({ type: 'lyra-ask', task: 'item', question: t('lyraItemQuestion'), tabs: [], project: project?.id ?? null, item: item.id });
     } catch (reason) { setLyraError(desktopError(reason, language)); }
   };
-  return <article className="desktop-detail" aria-label={draft.title || t('newNote')}>{item.kind === 'note' ? <>{breadcrumb}<div className="desktop-field" ref={title}><label htmlFor={`${id}-title`}>{t('noteTitle')}</label><input className="desktop-note-title" id={`${id}-title`} value={draft.title} maxLength={200} readOnly={readOnly} onChange={event => change('title', event.target.value)} /></div><div className="desktop-field"><label htmlFor={`${id}-text`}>{t('noteText')}</label><GrowingTextArea className="desktop-note-text" id={`${id}-text`} value={draft.text} maxLength={100000} readOnly={readOnly} onChange={event => change('text', event.target.value)} /></div><small>{t('savedAsYouType')}</small></> : <><div className="desktop-title-block">{breadcrumb}<h1>{draft.title || t('newNote')}</h1></div>{item.source && <div className="desktop-site"><ItemMark item={item} /><small>{itemSite(item.source.url)}</small></div>}{item.image ? <CaptureImage project={project?.id ?? null} item={item} language={language} /> : item.kind === 'link' ? <PagePreview item={item} /> : <p className="desktop-kept-text">{item.text}</p>}{item.image?.cut && <small>{t('captureCut')}</small>}<div className="desktop-field"><label htmlFor={`${id}-note`}>{t('captureNote')}</label><GrowingTextArea className="desktop-note-text annotation" id={`${id}-note`} value={draft.note} maxLength={20000} readOnly={readOnly} onChange={event => change('note', event.target.value)} /></div><div className="desktop-item-actions">{item.source && <button className="desktop-action" type="button" onClick={() => { void run({ type: 'new-tab', input: item.source!.url }); }}><ExternalLink aria-hidden="true" />{t('openPage')}</button>}{project && <DesktopDropdown label={t('moveToFolder')} variant="action" display={t('moveToFolder')} value={item.folder ?? ''} lead={<FolderInput aria-hidden="true" />} choices={[{ id: '', name: t('noFolder') }, ...project.folders.map(folder => ({ id: folder.id, name: folder.name, lead: <Folder aria-hidden="true" /> }))]} disabled={readOnly} onChoose={folder => { void run({ type: 'move-item-folder', project: project.id, id: item.id, folder: folder || null }); }} />}<button className="desktop-action" type="button" disabled={readOnly} onClick={remove}><Trash2 aria-hidden="true" />{t('delete')}</button></div></>}{!state.privateWindow && <button className="desktop-action" type="button" disabled={readOnly} onClick={() => { void askLyra(); }}><Sparkles aria-hidden="true" />{t(item.image ? 'lyraSavedText' : 'lyraAsk')}</button>}{lyraError && <Feedback language={language} error={lyraError} onRetry={() => { void askLyra(); }} />}</article>;
+  const askAction = !state.privateWindow && <button className="desktop-action primary" type="button" disabled={readOnly} onClick={() => { void askLyra(); }}><Sparkles aria-hidden="true" />{t(item.image ? 'lyraSavedText' : 'lyraAsk')}</button>;
+  return <article className="desktop-detail" aria-label={draft.title || t('newNote')}>{item.kind === 'note' ? <>{breadcrumb}<div className="desktop-field" ref={title}><label htmlFor={`${id}-title`}>{t('noteTitle')}</label><input className="desktop-note-title" id={`${id}-title`} value={draft.title} maxLength={200} readOnly={readOnly} onChange={event => change('title', event.target.value)} /></div><div className="desktop-field"><label htmlFor={`${id}-text`}>{t('noteText')}</label><GrowingTextArea className="desktop-note-text" id={`${id}-text`} value={draft.text} maxLength={100000} readOnly={readOnly} onChange={event => change('text', event.target.value)} /></div><small>{t('savedAsYouType')}</small><div className="desktop-item-actions">{sendAction}{askAction}</div></> : <><div className="desktop-title-block">{breadcrumb}<h1>{draft.title || t('newNote')}</h1></div>{item.source && <div className="desktop-site"><ItemMark item={item} /><small>{itemSite(item.source.url)}</small></div>}{item.image ? <CaptureImage project={project?.id ?? null} item={item} language={language} /> : item.kind === 'link' ? <PagePreview item={item} /> : <p className="desktop-kept-text">{item.text}</p>}{item.image?.cut && <small>{t('captureCut')}</small>}<div className="desktop-field"><label htmlFor={`${id}-note`}>{t('captureNote')}</label><GrowingTextArea className="desktop-note-text annotation" id={`${id}-note`} value={draft.note} maxLength={20000} readOnly={readOnly} onChange={event => change('note', event.target.value)} /></div>
+    <div className="desktop-item-actions">{item.source && <button className="desktop-action primary" type="button" onClick={() => { void run({ type: 'new-tab', input: item.source!.url }); }}><ExternalLink aria-hidden="true" />{t('openPage')}</button>}{askAction}{project && <DesktopDropdown label={t('moveToFolder')} variant="action" display={t('moveToFolder')} value={item.folder ?? ''} lead={<FolderInput aria-hidden="true" />} choices={[{ id: '', name: t('noFolder') }, ...project.folders.map(folder => ({ id: folder.id, name: folder.name, lead: <Folder aria-hidden="true" /> }))]} disabled={readOnly} onChoose={folder => { void run({ type: 'move-item-folder', project: project.id, id: item.id, folder: folder || null }); }} />}{sendAction}<button className="desktop-action outline" type="button" disabled={readOnly} onClick={remove}><Trash2 aria-hidden="true" />{t('delete')}</button></div></>}
+    {!state.privateWindow && sent && <div className="desktop-sent" role="status"><Check aria-hidden="true" /><small>{t('sentTo').replace('{app}', sent)}</small></div>}{!state.privateWindow && sendFailure && <Feedback language={language} error={t('sendFailed')} onRetry={() => { if (sendFailure === 'targets') openSend(); else void send(sendFailure); }} />}{lyraError && <Feedback language={language} error={lyraError} onRetry={() => { void askLyra(); }} />}
+  </article>;
 }
 function CapturesGrid({ items, props }: { items: DesktopItemContent[]; props: DesktopProps }) {
   const { state, language, run, onPage, onModalChange } = props, t = (key: CopyKey) => text(key, language);
@@ -135,7 +170,7 @@ export function DesktopPanel({ props, onClose, onTab, onLyra }: { props: Desktop
   else if (data.error && !data.content && !data.captures) content = <Feedback language={language} error={data.error} onRetry={data.retry} />;
   else if (page.kind === 'captures' && data.captures) content = <><div className="desktop-title-block"><h1>{t('captures')}</h1><small>{t('keptOnComputer')}</small></div><CapturesGrid items={data.captures} props={props} /></>;
   else if (page.kind === 'project' && data.content) content = <ProjectBody key={page.project} project={data.content} folder={page.folder ?? null} props={props} selected={lastSelected.current} />;
-  else if (page.kind === 'item' && item) content = <ItemDetail key={item.id} project={data.content} item={item} props={props} />;
+  else if (page.kind === 'item' && item) content = <ItemDetail key={`${state.activeProfileId}:${page.project ?? 'captures'}:${item.id}`} project={data.content} item={item} props={props} />;
   else if (!data.loading && page.kind === 'item' && (data.content || data.captures)) content = <Feedback language={language} error={t('DESKTOP_ITEM_NOT_FOUND')} onRetry={data.retry} />;
   else content = <Loading language={language} />;
   return <aside ref={region} className="desktop-panel" tabIndex={-1} aria-labelledby={titleId} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); } }}><header className="desktop-panel-header"><h2 className="visually-hidden" id={titleId}>{t('desktop')}</h2><SidePanelFaces face="desktop" language={language} onDesktop={() => { void onPage({ kind: 'home' }); }} onLyra={onLyra} /><button className="icon-button" type="button" aria-label={t('openInTab')} title={t('openInTab')} onClick={onTab}><ExternalLink aria-hidden="true" /></button><button className="icon-button" type="button" aria-label={t('closePanel')} title={t('closePanel')} onClick={onClose}><X aria-hidden="true" /></button></header><hr />{page.kind !== 'project' && destination && state.projects.some(project => project.id === destination) ? <DesktopDrop props={props} project={destination} className="desktop-panel-body" transientName={state.projects.find(project => project.id === destination)!.name} onKept={() => { void onPage({ kind: 'project', project: destination }); }}><StorageState props={props} />{data.error && (data.content || data.captures) && <Feedback language={language} error={data.error} onRetry={data.retry} />}{content}</DesktopDrop> : <div className="desktop-panel-body"><StorageState props={props} />{data.error && (data.content || data.captures) && <Feedback language={language} error={data.error} onRetry={data.retry} />}{content}</div>}</aside>;

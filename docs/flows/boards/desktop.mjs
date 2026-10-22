@@ -1,6 +1,6 @@
 // Complete desktop flow; lanes read from left to right.
 import { board } from "blueprint/board.mjs";
-import { hub, desktopHome, desktopDrag, desktopNewProject, desktopProject, desktopCaptures, desktopEmpty, desktopSavedPage, desktopNote, desktop, shareDialog, withDialog, desktopTabGroup } from "../kit/horizon.mjs";
+import { hub, desktopHome, desktopDrag, desktopNewProject, desktopProject, desktopCaptures, desktopEmpty, desktopSavedPage, desktopNote, desktop, shareDialog, withDialog, desktopTabGroup, desktopSendMenu, desktopSent } from "../kit/horizon.mjs";
 function desktopStart() {
   const root = hub();
   function highlight(node) { if (node.name === "hub-desktop") { node.kids[0].stroke = "primary"; node.kids[0].strokeWidth = 2; node.kids[0].fill = "wash"; } for (const kid of node.kids ?? []) highlight(kid); }
@@ -23,6 +23,12 @@ export default board({
     { id: "tab", title: "11. Desktop in a tab", col: 4, row: 1, root: () => desktop({ share: true }), note: "The same project opens in a full tab with folders, mixed items, Share and Open as tab group." },
     { id: "share", title: "12. Share with a Space", col: 5, row: 0, root: () => withDialog(desktop({ share: true }), shareDialog()), note: "The same warning names the project and Lago Azul Studio. The project leaves this computer; Cancel has focus." },
     { id: "tab-group", title: "13. Open as tab group", col: 5, row: 2, root: desktopTabGroup, note: "The project pages open in the green Trip to Patagonia group; the first page is active." },
+    { id: "send", title: "14. Send to", col: 4, row: 2, root: () => desktopSendMenu(), note: "Send to lists Docs, Blueprint and Nova. An app that cannot receive yet shows Not installed and does nothing. Notes, saved pages, text, captures and links can all be sent." },
+    { id: "sent", title: "15. Sent to Docs", col: 4, row: 3, root: desktopSent, note: "Sent to Docs shows under the actions once the item is in Docs' inbox; Docs takes it the next time it reads its inbox. Nothing is sent from a private window." },
+    { id: "changed-item", title: "Changed 9, A saved page", col: 0, row: -1, root: desktopSavedPage, note: "Changed 2026-10-22: Send to joins the item's actions, before Delete; the actions are accent buttons, Delete a bordered secondary." },
+    { id: "changed-note", title: "Changed 10, A note", col: 1, row: -1, root: desktopNote, note: "Changed 2026-10-22: a note gets Send to under Saved as you type." },
+    { id: "new-send", title: "New 14, Send to", col: 2, row: -1, root: () => desktopSendMenu(), note: "Approved 2026-10-22. Blueprint receives at its Release, so it shows Not installed in the Beta." },
+    { id: "new-sent", title: "New 15, Sent to Docs", col: 3, row: -1, root: desktopSent, note: "Approved 2026-10-22." },
   ],
   links: [
     {"from":"start","at":"hub-desktop","to":"home","label":"Desktop"},
@@ -35,6 +41,8 @@ export default board({
     {"from":"project","at":"item-inn","to":"item","label":"Lago Azul Inn"},
     {"from":"project","at":"desktop-new-note","to":"note","label":"New note"},
     {"from":"item","at":"panel-open-tab","to":"tab","label":"Open in a tab"},
+    {"from":"item","at":"item-send","to":"send","label":"Send to"},
+    {"from":"send","at":"send-docs","to":"sent","label":"Docs"},
     {"from":"tab","at":"project-share","to":"share","label":"Share"},
     {"from":"tab","at":"project-tab-group","to":"tab-group","label":"Open as tab group"},
   ],

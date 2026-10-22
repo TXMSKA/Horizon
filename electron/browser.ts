@@ -42,6 +42,7 @@ import { listSites, translationChoice, setTranslationChoice, PermissionQueue, re
 import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages';
 import { desktopInputText } from '../src/shared/desktop-input';
 import { createDesktop, desktopAddress } from './desktop';
+import { cosmicRoot, readReceivers, sendItem } from './send';
 import { captureWholePage, deadline, pngSize } from './captures';
 import { validCaptureRect } from '../src/shared/capture';
 import { addFavorite, createFavoriteFolder, deletedFavorite, favoriteDestination, favoriteLinks, favoriteLocation, favoriteName, favoriteTitle, moveFavorite, restoreFavorite } from './favorites';
@@ -145,6 +146,7 @@ export interface BrowserOptions { id?: string; profileId?: string; privateWindow
 
 // Development builds can point the importers at synthetic browser folders; shipped builds always read the user's own.
 const importEnvironment = () => ({ local: app.isPackaged ? process.env.LOCALAPPDATA : process.env.HORIZON_IMPORT_LOCALAPPDATA ?? process.env.LOCALAPPDATA, roaming: app.isPackaged ? process.env.APPDATA : process.env.HORIZON_IMPORT_APPDATA ?? process.env.APPDATA });
+const sendRoot = () => app.isPackaged ? cosmicRoot() : process.env.HORIZON_COSMIC_ROOT ?? cosmicRoot();
 
 export function createBrowser(window: BrowserWindow, userData: string, downloads: string, settings: ThemeSettings, initialRegistry?: ProfileRegistry, defaultBrowserOverride?: ReturnType<typeof createDefaultBrowser>, options: BrowserOptions = {}) {
   const registryPath = resolve(userData, 'profiles.json');
@@ -1497,6 +1499,16 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'rename-folder': desktop.renameFolder(command.project, command.id, command.name); break;
         case 'delete-folder': forget(); desktop.deleteFolder(command.project, command.id); break;
         case 'move-item-folder': desktop.moveItemFolder(command.project, command.id, command.folder); break;
+        case 'send-targets': return readReceivers(sendRoot());
+        case 'send-item': {
+          desktop.assertUnlocked();
+          const item = desktop.item(command.project, command.id), bytes = item.image ? desktop.image(command.project, command.id) : null;
+          if (item.image && !bytes) throw new Error('SEND_FAILED');
+          sendItem(sendRoot(), command.app, { kind: item.kind, title: item.title, text: item.text, note: item.note, source: item.source,
+            project: command.project === null ? null : desktop.get(command.project).name,
+            image: item.image && bytes ? { bytes, width: item.image.width, height: item.image.height } : null });
+          return;
+        }
         case 'move-item-project': desktop.moveItemProject(command.project, command.id, command.toProject, command.folder); break;
         case 'add-capture-to-project': desktop.addCaptureToProject(command.id, command.project, command.folder); break;
         case 'add-link': desktop.addLink(command.project, command.folder, command.address, command.title); break;
@@ -1940,6 +1952,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   handleChrome(window, IPC.command, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
     if (args.length !== 1) throw new Error('Invalid command arguments');
+    if (privateWindow && args[0] && typeof args[0] === 'object' && 'type' in args[0]
+      && (args[0].type === 'send-item' || args[0].type === 'send-targets')) throw new Error('SEND_PRIVATE');
     if (deleting) throw new Error('Profile deletion is in progress');
     return run(validateCommand(args[0], new Set(registry.profiles.map(profile => profile.id)), current().desktop.list(), current().desktop.captureList(), current().state().store.favorites));
   });

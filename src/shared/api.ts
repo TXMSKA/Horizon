@@ -103,6 +103,8 @@ export interface ContextMenuItem { id: ContextMenuItemId; enabled: boolean; labe
 export interface PageContextMenu { id: string; x: number; y: number; keyboard: boolean; groups: ContextMenuItem[][]; selection?: string }
 export type BrowserShortcut = 'new-window' | 'new-private-window' | 'reopen-tab' | 'focus-search' | 'home' | 'clear-browsing-data' | 'reload-no-cache' | 'find-next' | 'find-previous' | 'print' | 'menu' | 'capture' | 'focus-address' | 'new-tab' | 'close-tab' | 'next-tab' | 'previous-tab' | 'back' | 'forward' | 'reload' | 'stop' | 'history' | 'downloads' | 'favorites' | 'fullscreen' | 'bookmark' | 'find' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | `tab-${number}`;
 export type DesktopItemKind = 'note' | 'text' | 'area' | 'page' | 'link';
+export type SendApp = 'docs' | 'blueprint' | 'nova';
+export interface SendReceiver { app: SendApp; name: string; accepts: DesktopItemKind[] | null }
 export interface CaptureRect { x: number; y: number; width: number; height: number }
 export interface CaptureShot { id: string; bytes: Uint8Array; width: number; height: number; cut: boolean }
 export interface CaptureImage { filename: string; width: number; height: number; bytes: number; cut: boolean }
@@ -152,6 +154,8 @@ export type BrowserCommand = VaultCommand | SyncCommand | ServicesCommand
   | { type: 'rename-folder'; project: string; id: string; name: string }
   | { type: 'delete-folder'; project: string; id: string }
   | { type: 'move-item-folder'; project: string; id: string; folder: string | null }
+  | { type: 'send-targets' }
+  | { type: 'send-item'; project: string | null; id: string; app: SendApp }
   | { type: 'move-item-project'; project: string; id: string; toProject: string; folder: string | null }
   | { type: 'add-capture-to-project'; id: string; project: string; folder: string | null }
   | { type: 'add-link'; address: string; title: string; project: string; folder: string | null }
@@ -225,6 +229,7 @@ export interface HorizonAPI {
   getFavoriteFavicons(origins: string[]): Promise<Record<string, string>>;
   command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
   command(command: Extract<BrowserCommand, { type: 'list-import-sources' }>): Promise<ImportSource[]>;
+  command(command: Extract<BrowserCommand, { type: 'send-targets' }>): Promise<SendReceiver[]>;
   command(command: Extract<BrowserCommand, { type: 'sync-reveal-key' }>): Promise<string>;
   command(command: Extract<BrowserCommand, { type: 'sync-save-key' }>): Promise<boolean>;
   command(command: Extract<BrowserCommand, { type: 'import-browser-data' }>): Promise<ImportResult>;

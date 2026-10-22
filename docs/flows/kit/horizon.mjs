@@ -892,11 +892,29 @@ function findNode(root, name) {
   for (const kid of root.kids ?? []) { const found = findNode(kid, name); if (found) return found; }
 }
 
+// Item actions are accent buttons (the owner, 2026-10-22); Delete stays a bordered secondary so it never reads as the main action.
+const itemActions = () => col({ gap: 8 }, action("Open page", { primary: true, glyph: "externalLink", ref: "item-open-page" }),
+  action("Ask Lyra", { primary: true, glyph: "sparkles", ref: "item-ask-lyra" }), action("Move to folder", { primary: true, glyph: "folderInput", ref: "item-move" }),
+  action("Send to", { primary: true, glyph: "send", ref: "item-send" }), { ...action("Delete", { ghost: true, glyph: "trash2", ref: "item-delete" }), stroke: "primary" });
 export const desktopSavedPage = () => panelWindow("Desktop", col({ gap: 4 }, note("Trip to Patagonia / Lodging"), heading("Lago Azul Inn: your booking")),
   row({ gap: 8 }, badge("site-inn", { initial: "L", size: 22, radius: "sm", ink: "site-ink" }), note("lagoazul.example")),
   pagePreview("Lago Azul Inn", "info"), col({ gap: 8 }, label("Note"), text("Allow two nights beside the lake before heading north.", { size: "sm", color: "text" })),
-  col({ gap: 8 }, action("Open page", { glyph: "externalLink", ref: "item-open-page" }), action("Ask Lyra", { glyph: "sparkles", ref: "item-ask-lyra" }),
-    action("Move to folder", { glyph: "folderInput", ref: "item-move" }), action("Delete", { glyph: "trash2", ref: "item-delete" })));
+  itemActions());
+// Docs, Blueprint and Nova read their own inbox folder; an app that does not receive yet shows Not installed, with no action.
+const sendMenu = (place) => popover({ w: 240, radius: "lg", shadow: false, place, name: "send-menu", label: "Send to" },
+  menuRow("Docs", { glyph: "fileText", ref: "send-docs" }),
+  menuRow("Blueprint", { glyph: "frame", tone: "dim", hint: "Not installed", ref: "send-blueprint" }),
+  menuRow("Nova", { glyph: "codeXml", ref: "send-nova" }));
+// The menu opens 6 px under Send to, right-aligned to it.
+export function desktopSendMenu(item = desktopSavedPage) {
+  const root = item(), at = locate(root, 1440, "item-send", 900);
+  return stack({ w: 1440, h: 900, theme: AMBER }, root, sendMenu({ x: at.x + at.w - 240, y: at.y + at.h + 6 }));
+}
+export const desktopSent = () => panelWindow("Desktop", col({ gap: 4 }, note("Trip to Patagonia / Lodging"), heading("Lago Azul Inn: your booking")),
+  row({ gap: 8 }, badge("site-inn", { initial: "L", size: 22, radius: "sm", ink: "site-ink" }), note("lagoazul.example")),
+  pagePreview("Lago Azul Inn", "info"), col({ gap: 8 }, label("Note"), text("Allow two nights beside the lake before heading north.", { size: "sm", color: "text" })),
+  itemActions(),
+  row({ gap: 8, name: "sent-status", label: "Sent to Docs" }, icon("check", { size: 16, color: "primary" }), note("Sent to Docs")));
 export const desktopNote = () => panelWindow("Desktop", note("Trip to Patagonia"),
   col({ gap: 8 }, label("Title"),
     col({ pad: [0, 0, 8, 0], edge: { side: "bottom", color: "frame" }, name: "note-title", label: "Note title" },
@@ -904,7 +922,7 @@ export const desktopNote = () => panelWindow("Desktop", note("Trip to Patagonia"
   col({ gap: 8 }, label("Text"),
     col({ pad: [0, 0, 8, 0], edge: { side: "bottom", color: "frame" }, name: "note-editor", label: "Note text" },
       text("Allow two nights beside the lake.\nKeep a reserve for fuel and gravel-road delays.", { size: "sm", color: "text" }))),
-  note("Saved as you type"));
+  note("Saved as you type"), col({ gap: 8 }, action("Send to", { primary: true, glyph: "send", ref: "item-send" })));
 export const desktopTabGroup = () => horizonWindow(AMBER, [routesSite()], {
   tabs: [SITE_TABS[0], { ...SITE_TABS[1], group: "patagonia" }, { title: "Lago Azul Inn: your booking", color: "site-inn", initial: "L", group: "patagonia" },
     { title: "El Chaltén: trails open in April", color: "site-trails", initial: "E", group: "patagonia" }],

@@ -683,6 +683,8 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .desktop-action.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .desktop-action.primary:not(:disabled):hover { background: var(--accent-hover); }
 .desktop-action.primary:not(:disabled):active { background: var(--accent-pressed); }
+.desktop-action.outline { background: transparent; border-color: var(--accent); color: var(--text-title); }
+.desktop-action.outline:not(:disabled):hover { background: var(--surface-selected); }
 .desktop-action:disabled, .desktop-dropdown-control:disabled { opacity: var(--opacity-disabled); }
 .desktop-home-new { margin-top: auto; }
 .desktop-actions, .desktop-filters { display: flex; flex-wrap: wrap; gap: var(--space-8); }
@@ -706,6 +708,9 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .desktop-choice-menu > button > svg { width: var(--icon-control); height: var(--icon-control); }
 .desktop-choice-menu > button[aria-checked=true] { background: var(--surface-selected); }
 .desktop-choice-menu > button > small { font-size: var(--type-caption); color: var(--text-secondary); }
+.desktop-send-menu { width: min(15rem, calc(100vw - var(--space-12))); }
+.desktop-send-menu > button[aria-disabled=true] { opacity: var(--opacity-disabled); cursor: default; }
+.desktop-send-menu > button[aria-disabled=true]:hover, .desktop-send-menu > button[aria-disabled=true]:active { background: transparent; }
 .desktop-project-foot { display: flex; flex-direction: column; gap: var(--space-16); margin-top: auto; }
 .desktop-drop { display: flex; align-items: center; justify-content: center; gap: var(--space-8); min-height: var(--height-desktop-drop); padding: var(--space-12); border: var(--border-width) dashed var(--accent); border-radius: var(--radius-panel); background: var(--surface-selected); color: var(--accent); text-align: center; }
 .desktop-drop svg { width: var(--size-18); height: var(--size-18); }
@@ -729,6 +734,8 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .desktop-site .desktop-mark { width: var(--size-desktop-mark); height: var(--size-desktop-mark); }
 .desktop-item-actions { display: flex; flex-direction: column; gap: var(--space-8); }
 .desktop-item-actions .desktop-action { width: 100%; }
+.desktop-sent { display: flex; align-items: center; gap: var(--space-8); }
+.desktop-sent > svg { color: var(--accent); }
 .desktop-kept-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .desktop-image { min-width: 0; overflow: hidden; border-radius: var(--radius-control); background: var(--surface-sunken); }
 .desktop-image.preview { aspect-ratio: var(--aspect-desktop-preview); }
