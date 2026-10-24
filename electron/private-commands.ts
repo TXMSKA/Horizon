@@ -5,6 +5,7 @@ const desktopWrites = new Set(['retry-desktop-storage', 'create-project', 'renam
 
 export function assertPrivateCommand(command: BrowserCommand): void {
   if (command.type.startsWith('account-')) throw new Error('ACCOUNT_PRIVATE');
+  if (command.type.startsWith('space-')) throw new Error('SPACE_PRIVATE');
   if (command.type === 'send-item' || command.type === 'send-targets') throw new Error('SEND_PRIVATE');
   if (command.type.startsWith('sync-')) throw new Error('SYNC_PRIVATE');
   if (command.type.includes('extension') || command.type === 'open-settings' && command.section === 'extensions') throw new Error('EXTENSIONS_UNAVAILABLE');

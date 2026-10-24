@@ -134,12 +134,11 @@ export async function fingerprint(publicKey: Uint8Array): Promise<string> {
   try {
     if (publicKey.length !== 32) throw invalid();
     const digest = new Uint8Array(await subtle.digest('SHA-256', bytes(publicKey)));
-    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567', groups: string[] = [];
-    // Each two-byte group is independently base32 padded to preserve the five-group display.
-    for (let index = 0; index < 10; index += 2) {
-      const value = (digest[index]! << 8 | digest[index + 1]!) << 4;
-      groups.push([15, 10, 5, 0].map(shift => alphabet[value >>> shift & 31]).join(''));
-    }
-    return groups.join('-');
+    // The first 10 bytes in RFC 4648 base32 are exactly 16 characters, shown as 4 groups of 4.
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let value = 0n;
+    for (const byte of digest.subarray(0, 10)) value = value << 8n | BigInt(byte);
+    const characters = Array.from({ length: 16 }, (_, index) => alphabet[Number(value >> BigInt((15 - index) * 5) & 31n)]).join('');
+    return characters.match(/.{4}/g)!.join('-');
   } catch { throw invalid(); }
 }

@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { Check, ExternalLink, Folder, House, Languages, LayoutDashboard, LoaderCircle, Lock, LogIn, LogOut, Orbit, Palette, Pin, PinOff, Trash2, Users } from 'lucide-react';
+import { Check, ExternalLink, Folder, House, Languages, LayoutDashboard, LoaderCircle, Lock, LogIn, LogOut, Orbit, Palette, Pin, PinOff, Share2, Trash2, Users } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { HUB_APPS, MARKETPLACE_THEMES } from './shared/api';
 import type { BrowserCommand, BrowserState, HubApp, Language, MarketplaceTheme } from './shared/api';
 import { Menu } from './Menu';
 import { settingsError } from './Settings';
+import { ShareProjectDialog } from './ShareProject';
 import { ToolbarPopover } from './ToolbarPopover';
 
 export const hubApps = { translate: { label: 'translate', icon: Languages }, themes: { label: 'themes', icon: Palette }, desktop: { label: 'desktop', icon: LayoutDashboard }, nebula: { label: 'nebula', icon: Orbit } } as const;
@@ -93,10 +94,10 @@ function InstalledThemes({ state, language, onInstalled }: { state: BrowserState
 }
 
 const memberInitials = (name: string | null) => name ? name.split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]!.toUpperCase()).join('') : '';
-// The Cosmic account of the active profile, its Spaces and what was shared with it. Sharing a project joins this page in its own step.
-function NebulaAccount({ state, language }: { state: BrowserState; language: Language }) {
+// The Cosmic account of the active profile, its Spaces, what was shared with it, and sharing a project.
+function NebulaAccount({ state, language, onShared }: { state: BrowserState; language: Language; onShared: (space: string, dataset: string) => void }) {
   const t = (key: CopyKey) => text(key, language), pending = useRef(false);
-  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState<BrowserCommand | null>(null), [phrase, setPhrase] = useState('');
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState<BrowserCommand | null>(null), [phrase, setPhrase] = useState(''), [sharing, setSharing] = useState(false), shareButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (state.account.status === 'signedIn' && state.account.phrase === 'ready') void window.horizon.command({ type: 'account-refresh' }).catch(() => undefined); }, [state.account.status]);
   const run = async (command: BrowserCommand) => {
     if (pending.current) return;
@@ -137,8 +138,10 @@ function NebulaAccount({ state, language }: { state: BrowserState; language: Lan
         </div>)}
       </section>
       {account.shared.length > 0 && <><hr /><section className="hub-nebula-section" aria-labelledby="nebula-shared"><h3 id="nebula-shared">{t('sharedWithYou')}</h3>
-        {account.shared.map(item => { const space = account.spaces.find(entry => entry.id === item.spaceId); return <div className="hub-nebula-shared" key={`${item.spaceId}:${item.datasetId}`}><Folder aria-hidden="true" /><span><span>{item.title ?? t('sharedProject')}</span><small>{t('sharedBy').replace('{name}', item.sharedBy.displayName ?? t('spaceMember'))}{space ? ` · ${space.name || t('sharedSpace')}` : ''}</small></span></div>; })}
+        {account.shared.map(item => { const space = account.spaces.find(entry => entry.id === item.spaceId); return <button className="hub-nebula-shared" type="button" key={`${item.spaceId}:${item.datasetId}`} onClick={() => onShared(item.spaceId, item.datasetId)}><Folder aria-hidden="true" /><span><span>{item.title ?? t('sharedProject')}</span><small>{t('sharedBy').replace('{name}', item.sharedBy.displayName ?? t('spaceMember'))}{space ? ` · ${space.name || t('sharedSpace')}` : ''}</small></span></button>; })}
       </section></>}
+      {account.spaces.some(space => !space.pending) && <button className="desktop-action primary" ref={shareButton} type="button" aria-disabled={busy} onClick={() => setSharing(true)}><Share2 aria-hidden="true" />{t('shareProject')}</button>}
+      {sharing && <ShareProjectDialog state={state} language={language} opener={shareButton} onClose={() => setSharing(false)} />}
       {account.spacesError && <div className="settings-feedback error" role="alert"><span>{settingsError(new Error(account.spacesError), language)}</span><button className="text-button" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-refresh' }); }}>{t('retry')}</button></div>}
       <hr />
       <div className="hub-nebula-actions"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-manage' }); }}><ExternalLink aria-hidden="true" />{t('nebulaManage')}</button>
@@ -149,9 +152,9 @@ function NebulaAccount({ state, language }: { state: BrowserState; language: Lan
   </div>;
 }
 
-export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnounce }: {
+export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnounce, onShared }: {
   state: BrowserState; language: Language; page: HubPage; opener: RefObject<HTMLButtonElement | null>;
-  onPage: (page: HubPage) => void; onDismiss: (focus: boolean) => void; onAnnounce: (message: string) => void;
+  onPage: (page: HubPage) => void; onDismiss: (focus: boolean) => void; onAnnounce: (message: string) => void; onShared: (space: string, dataset: string) => void;
 }) {
   const t = (key: CopyKey) => text(key, language), ref = useRef<HTMLDivElement>(null), tile = useRef<HTMLButtonElement>(null), menu = useRef<HTMLDivElement>(null);
   const dismiss = useRef(onDismiss), pending = useRef(false);
@@ -209,7 +212,7 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
         if (!step) return;
         event.preventDefault(); const next = (index + step + apps.length * 3) % apps.length;
         (event.currentTarget.parentElement?.children[next] as HTMLButtonElement | undefined)?.focus();
-      }}><span className="hub-tile-icon"><Icon aria-hidden="true" /></span><span>{t(label)}</span></button>; })}</div> : page === 'nebula' ? <NebulaAccount state={state} language={language} /> : <InstalledThemes state={state} language={language} onInstalled={() => onDismiss(true)} />}
+      }}><span className="hub-tile-icon"><Icon aria-hidden="true" /></span><span>{t(label)}</span></button>; })}</div> : page === 'nebula' ? <NebulaAccount state={state} language={language} onShared={onShared} /> : <InstalledThemes state={state} language={language} onInstalled={() => onDismiss(true)} />}
       {error && <div className="settings-feedback error" role="alert"><span>{error}</span>{retry && <button className="text-button" type="button" ref={retryButton} aria-disabled={busy} onClick={() => { void pin(retry); }}>{t('retry')}</button>}</div>}
     </div></div>
     {tileMenu && <ToolbarPopover opener={tile} within={ref} className="hub-menu-anchor"><div ref={menu}><Menu id="hub-tile-menu" className="hub-tile-menu" label={t('appActions').replace('{name}', t(hubApps[tileMenu].label))} keyboard opener={tile} onDismiss={reason => closeMenu(reason !== 'outside')}>

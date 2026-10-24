@@ -1,5 +1,6 @@
 import { createVault } from './vault';
 import { createAccount } from './account';
+import { sharedItemId } from './space-reader';
 import type { VaultCommand } from '../src/shared/api';
 import { app, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, WebContentsView } from 'electron';
 import type { BrowserWindow, DownloadItem, Session, WebContents } from 'electron';
@@ -162,6 +163,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const privateWindow = options.privateWindow === true;
   const windowId = options.id ?? (shared.owners.size ? randomUUID() : LEGACY_WINDOW_ID);
   let selectedProfile = options.profileId ?? registry.activeId;
+  let profileRevision = 0;
   if (!registry.profiles.some(profile => profile.id === selectedProfile)) selectedProfile = registry.activeId;
   if (privateWindow) { shared.privatePartition ??= `private-${randomUUID()}`; shared.privateCount++; }
   let registryError = false;
@@ -277,6 +279,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!profile) throw new Error('Unknown profile');
     const next = runtimeFor(profile);
     if (id !== selectedProfile) {
+      profileRevision++;
       selectedProfile = id;
       saveRegistry({ ...registry, activeId: id });
       invalidateMenu();
@@ -296,11 +299,21 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   };
   const systemDarkPages = () => { if (settings.darkPages === 'system') updateDarkPages(); };
   nativeTheme.on('updated', systemDarkPages);
+  const readShared = async <T>(read: (account: ReturnType<typeof createAccount>) => Promise<T>): Promise<T> => {
+    const revision = profileRevision, account = shared.profiles.get(selectedProfile)?.account;
+    if (privateWindow || !account) throw new Error('SPACE_SHARED_UNAVAILABLE');
+    const value = await read(account);
+    if (closing || shared.quitting || revision !== profileRevision) throw new Error('SPACE_SHARED_UNAVAILABLE');
+    return value;
+  };
   const run = (command: BrowserCommand) => {
     if (closing || shared.quitting) throw new Error('Browser is closing');
     if (command.type.startsWith('vault-') || command.type === 'set-vault-timeout') return vault.run(command as VaultCommand);
     if (['navigate', 'activate-tab', 'close-tab', 'switch-profile', 'home', 'back', 'forward', 'reload', 'new-tab', 'open-settings', 'zoom', 'fullscreen', 'move-tab-to-window'].includes(command.type)) vault.invalidate();
     if (privateWindow) assertPrivateCommand(command);
+    if (command.type === 'space-share-project') return shared.profiles.get(selectedProfile)!.account!.shareProject(command.project, command.space);
+    if (command.type === 'space-stop-sharing') return shared.profiles.get(selectedProfile)!.account!.stopSharing(command.project);
+    if (command.type === 'space-open-shared') return readShared(account => account.openSharedProject(command.space, command.dataset));
     if (command.type.startsWith('account-')) {
       const account = shared.profiles.get(selectedProfile)!.account!;
       switch (command.type) {
@@ -485,14 +498,14 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (!data) {
       const status = { readError: false, memoryOnly: false }, sessionStatus = { readError: false, memoryOnly: false };
       const store = readStore(storePath, safeStorage, status);
-      const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { shared.sync?.markDirty('desktop'); for (const owner of shared.owners.values()) { owner.persistSessions(); owner.publish(); } });
+      const desktop = createDesktop(resolve(dirname(storePath), 'notebooks.json'), safeStorage, () => { shared.sync?.markDirty('desktop'); shared.profiles.get(profile.id)?.account?.desktopChanged?.(); for (const owner of shared.owners.values()) { owner.persistSessions(); owner.publish(); } });
       const own = (url: string) => url === LYRA_ADDRESS || url.startsWith('horizon://desktop/') && !desktop.state().desktopLocked && (url === 'horizon://desktop/captures' || desktop.list().some(project => desktopAddress(project.name) === url));
       data = { store, status, desktop, sessions: readWindowSessions(resolve(dirname(storePath), 'session.json'), safeStorage, own, sessionStatus), sessionStatus, favoritesVersion: 0, importProgress: null };
       shared.profiles.set(profile.id, data);
     }
     const profileData = data;
     if (!privateWindow && !profileData.account) {
-      const account = createAccount({ directory: dirname(storePath), userData, cipher: safeStorage, isPackaged: app.isPackaged,
+      const account = createAccount({ directory: dirname(storePath), userData, cipher: safeStorage, isPackaged: app.isPackaged, desktop: profileData.desktop,
         language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { for (const owner of shared.owners.values()) owner.publish(); },
         // The default session refuses every web request, so the account talks to Quantum through its own in-memory session.
         openExternal: url => shell.openExternal(url), fetch: (input, init) => session.fromPartition('horizon-account').fetch(String(input), init) });
@@ -512,6 +525,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let sessionWrite: ReturnType<typeof setTimeout> | undefined;
     let sessionError = false;
     const desktopPanel: DesktopPanelState = { open: false, page: { kind: 'home' } };
+    let panelRequest = 0;
     const tabs: Tab[] = [];
     let tabGroups = privateWindow || options.fresh || settings.onStart !== 'restore' ? [] : structuredClone(savedSession.groups ?? []);
     let groupEditorId: string | null = null;
@@ -534,7 +548,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         try { saveNow(); } catch { store.siteSettings.permissions = previous; throw new Error('SITE_SETTINGS_SAVE_FAILED'); }
       },
       project: id => { desktop.assertUnlocked(); return desktop.content(id); },
-      item: (project, id) => { desktop.assertUnlocked(); return desktop.item(project, id); },
+      item: (project, id) => {
+        if (sharedItemId(id)) {
+          if (privateWindow || !profileData.account) throw new Error('SPACE_SHARED_UNAVAILABLE');
+          return profileData.account.sharedItem(project, id);
+        }
+        desktop.assertUnlocked(); return desktop.item(project, id);
+      },
       save: (project, title, answer, sources) => {
         desktop.addLyra(project, title, answer, sources); desktopPanel.open = true; desktopPanel.page = { kind: 'project', project };
       },
@@ -652,7 +672,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     sessionOwner.completed = details => { requests.delete(details.id); };
     sessionOwner.failed = details => { requests.delete(details.id); };
 
-    const state = () => ({ ...desktop.state(), lyra: lyra.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), translation: tab.translation?.state() ?? tab.state.translation, blocked: { ...tab.state.blocked } })), activeId, store, favoriteFaviconVersion: favicons?.version ?? 0, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
+    const state = () => ({ ...desktop.state(), projects: desktop.state().projects.map(project => ({ ...project,
+      ...(!privateWindow ? profileData.account?.projectState?.(project.id) : undefined) })), lyra: lyra.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), translation: tab.translation?.state() ?? tab.state.translation, blocked: { ...tab.state.blocked } })), activeId, store, favoriteFaviconVersion: favicons?.version ?? 0, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
       clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
       extensions: extensions?.list(page(active()?.view)) ?? [], extensionsUpdating: extensions?.status().updating ?? false, extensionsError: extensions?.status().storageError ?? false,
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
@@ -1407,6 +1428,18 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       } finally { captureRequests.delete(request); }
     };
     const run = (command: BrowserCommand) => {
+      const request = ++panelRequest;
+      if (command.type === 'open-desktop-panel' && command.page.kind === 'shared') {
+        const target = structuredClone(command.page), revision = profileRevision;
+        return (async () => {
+          const content = await profileData.account!.openSharedProject(target.space, target.dataset);
+          if (disposed || closing || !isCurrent() || revision !== profileRevision || request !== panelRequest) throw new Error('SPACE_SHARED_UNAVAILABLE');
+          if (target.item && !content.items.some(item => item.id === target.item)) throw new Error('SPACE_SHARED_UNAVAILABLE');
+          void lyra.run({ type: 'lyra-close' });
+          desktopPanel.open = true; desktopPanel.page = target;
+          window.webContents.focus(); update();
+        })();
+      }
       if (command.type.startsWith('translate-')) {
         if (privateWindow) throw new Error('TRANSLATE_PRIVATE');
         const tab = active();
@@ -1946,6 +1979,11 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   });
   handleChrome(window, IPC.captureImage, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
+    if (args.length === 2 && sharedItemId(args[1])) {
+      if (privateWindow) throw new Error('SPACE_PRIVATE');
+      if (args[0] !== null) throw new Error('SPACE_SHARED_UNAVAILABLE');
+      return readShared(account => account.sharedImage(null, args[1] as string));
+    }
     if (args.length !== 2 || args[0] !== null && !isProfileId(args[0]) || !isProfileId(args[1])) throw new Error('Invalid capture image arguments');
     return current().desktop.image(args[0], args[1]);
   });
@@ -1980,8 +2018,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (args.length !== 1) throw new Error('Invalid command arguments');
     if (privateWindow && args[0] && typeof args[0] === 'object' && 'type' in args[0]
       && (args[0].type === 'send-item' || args[0].type === 'send-targets')) throw new Error('SEND_PRIVATE');
+    if (privateWindow && args[0] && typeof args[0] === 'object' && 'type' in args[0]
+      && typeof args[0].type === 'string' && args[0].type.startsWith('space-')) throw new Error('SPACE_PRIVATE');
     if (deleting) throw new Error('Profile deletion is in progress');
-    return run(validateCommand(args[0], new Set(registry.profiles.map(profile => profile.id)), current().desktop.list(), current().desktop.captureList(), current().state().store.favorites));
+    const account = privateWindow ? undefined : shared.profiles.get(selectedProfile)?.account?.state();
+    return run(validateCommand(args[0], new Set(registry.profiles.map(profile => profile.id)), current().desktop.list(), current().desktop.captureList(), current().state().store.favorites,
+      account?.status === 'signedIn' ? account.spaces : []));
   });
   handleChrome(window, IPC.contentArea, (event, ...args: unknown[]) => {
     validateSender(event, window.webContents);
@@ -2109,6 +2151,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       for (const id of runtimes.keys()) if (!registry.profiles.some(profile => profile.id === id)) owner.disposeProfile(id);
       if (!registry.profiles.some(profile => profile.id === selectedProfile)) {
         if (privateWindow) { window.close(); return; }
+        profileRevision++;
         selectedProfile = registry.activeId;
         const next = runtimeFor(registry.profiles.find(profile => profile.id === selectedProfile)!); if (!next.active()) next.newTab();
       }

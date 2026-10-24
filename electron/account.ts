@@ -9,14 +9,19 @@ import type { StoreCipher } from './store';
 import { vaultTokenStore } from './vault-storage';
 import { cosmicRoot } from './send';
 import { createCosmicKeyStore } from './cosmic-keys';
-import { createAccountKeyPair, openAccountKeyPair, openPhrase } from './cosmic-crypto';
+import { createAccountKeyPair, openAccountKeyPair, openPhrase, unwrap } from './cosmic-crypto';
 import type { AccountKeyPair, KeyEnvelope } from './cosmic-crypto';
 import { accountId, accountSuccess, keyEnvelope, readSpaces } from './spaces';
+import { createSpaceSharing } from './space-sharing';
+import { createSharedProjects } from './space-reader';
+import { SYNC_LIMITS } from './sync-format';
+import type { createDesktop } from './desktop';
 
 interface Options {
   directory: string; userData: string; cipher: StoreCipher; isPackaged: boolean; env?: NodeJS.ProcessEnv;
   language(): Language; changed(): void; openExternal(url: string): Promise<void>; fetch: typeof globalThis.fetch;
   keyStore?: ReturnType<typeof createCosmicKeyStore>;
+  desktop?: Pick<ReturnType<typeof createDesktop>, 'get' | 'image'>;
 }
 interface Tokens { accessToken: string; refreshToken: string; tokenType: 'Bearer'; expiresIn: number; deviceId: string }
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
@@ -74,12 +79,16 @@ export function createAccount(options: Options) {
   let identity: string | undefined, key: Uint8Array<ArrayBuffer> | undefined, pair: AccountKeyPair | undefined;
   let keyStore = options.keyStore, keyStoreError = false, lastRefresh = 0, phraseWork: Promise<void> | undefined;
   let generation = 0, closed = false, checking: Promise<void> | undefined;
+  let computerId: string | undefined;
   let attempt: { server: Server; url: string; timer: ReturnType<typeof setTimeout>; used: boolean } | undefined;
   const requests = new Set<AbortController>();
-  const publish = (next: AccountState) => { state = next; if (!closed) options.changed(); };
+  const spaceGenerations = new Map<string, number>();
+  const titleCache = new Map<string, { updatedAt: string; title: string | null }>();
+  let sharing: ReturnType<typeof createSpaceSharing> | undefined;
+  const publish = (next: AccountState) => { state = next; if (!closed) { sharing?.changed(); options.changed(); } };
   const check = (ticket: number) => { if (closed || ticket !== generation) throw new Error('ACCOUNT_DENIED'); };
   const stopAttempt = () => { if (attempt) { clearTimeout(attempt.timer); attempt.server.close(); attempt.server.closeAllConnections(); attempt = undefined; } };
-  const clearKeys = () => { key?.fill(0); key = undefined; pair = undefined; identity = undefined; keyStoreError = false; };
+  const clearKeys = () => { sharedProjects?.clear(); key?.fill(0); key = undefined; pair = undefined; identity = undefined; keyStoreError = false; spaceGenerations.clear(); titleCache.clear(); };
   const invalidate = () => { generation++; checking = undefined; phraseWork = undefined; lastRefresh = 0; clearKeys(); stopAttempt(); for (const controller of requests) controller.abort(); requests.clear(); };
   const fail = (error: unknown, ticket: number) => { if (!closed && ticket === generation) { stopAttempt(); publish({ status: 'error', code: errorCode(error) }); } };
   const readToken = async () => {
@@ -96,16 +105,20 @@ export function createAccount(options: Options) {
     try { unlinkSync(path); }
     catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw new Error('ACCOUNT_STORAGE'); }
   };
-  const request = async (route: string, method: 'GET' | 'POST' | 'PUT', ticket: number, body?: unknown, bearer?: string) => {
+  const request = async (route: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', ticket: number, body?: unknown, bearer?: string) => {
     check(ticket);
     const controller = new AbortController(); requests.add(controller);
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 20000); timer.unref?.();
     try {
       const { api } = accountEndpoints(options.isPackaged, options.env);
+      const binary = Buffer.isBuffer(body), download = method === 'GET' && route.includes('/objects/');
       const response = await options.fetch(`${api}${route}`, { method, signal: controller.signal, redirect: 'manual', credentials: 'omit', cache: 'no-store',
-        headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+        headers: { Accept: download ? 'application/octet-stream' : 'application/json', ...(body === undefined ? {} : binary ? {
+          // Chromium's fetch writes Content-Length itself from the byte body and refuses a request that sets it.
+          'Content-Type': 'application/octet-stream', 'X-Content-SHA256': createHash('sha256').update(body).digest('hex'),
+        } : { 'Content-Type': 'application/json' }), ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}) },
+        ...(body === undefined ? {} : { body: binary ? Uint8Array.from(body) : JSON.stringify(body) }) });
       check(ticket);
       if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new Error('ACCOUNT_INVALID_RESPONSE'); }
       const reader = response.body?.getReader();
@@ -115,15 +128,21 @@ export function createAccount(options: Options) {
           const { done, value } = await reader.read();
           if (done) break;
           size += value.byteLength;
-          if (size > (route.startsWith('/v1/spaces') ? 2 * 1024 * 1024 : 65536)) { await reader.cancel(); throw new Error('ACCOUNT_INVALID_RESPONSE'); }
+          if (size > (download ? /\/blobs\/[^/]+\.hzs$/.test(route) ? SYNC_LIMITS.blob : SYNC_LIMITS.package : route.startsWith('/v1/spaces') ? 2 * 1024 * 1024 : 65536)) { await reader.cancel(); throw new Error('ACCOUNT_INVALID_RESPONSE'); }
           chunks.push(value);
         }
       } finally { reader.releaseLock(); }
       check(ticket);
+      const bytes = Buffer.concat(chunks);
       let value: unknown;
-      try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      if (download && response.ok) {
+        if (response.headers.get('content-length') !== String(bytes.length) || response.headers.get('x-content-sha256') !== createHash('sha256').update(bytes).digest('hex')) throw new Error('ACCOUNT_INVALID_RESPONSE');
+        value = bytes;
+      } else try { value = JSON.parse(bytes.toString('utf8')); }
       catch { if (response.ok) throw new Error('ACCOUNT_INVALID_RESPONSE'); }
-      return { status: response.status, ok: response.ok, value };
+      const retry = response.headers.get('retry-after');
+      const retryAfter = retry !== null && /^\d+$/.test(retry) && Number.isSafeInteger(Number(retry)) ? Number(retry) : undefined;
+      return { status: response.status, ok: response.ok, value, retryAfter };
     } catch (error) { throw new Error(timedOut ? 'ACCOUNT_TIMEOUT' : errorCode(error)); }
     finally { clearTimeout(timer); requests.delete(controller); }
   };
@@ -145,7 +164,7 @@ export function createAccount(options: Options) {
     }
     requireSuccess(response); return saveTokens(response.value, ticket);
   };
-  const authorized = async (route: string, method: 'GET' | 'PUT', ticket: number, body?: unknown) => {
+  const authorized = async (route: string, method: 'GET' | 'PUT' | 'DELETE', ticket: number, body?: unknown) => {
     let bearer = access && access.expires > Date.now() ? access.token : await refresh(ticket);
     if (!bearer) throw new Error('ACCOUNT_DENIED');
     let response = await request(route, method, ticket, body, bearer);
@@ -156,6 +175,37 @@ export function createAccount(options: Options) {
     }
     return response;
   };
+  const spaceKey = async (spaceId: string, requestedGeneration?: number) => {
+    const ticket = generation, account = identity, accountPair = pair;
+    if (!account || !accountPair || !key) throw new Error('ACCOUNT_DENIED');
+    const keyGeneration = requestedGeneration ?? spaceGenerations.get(spaceId);
+    if (!keyGeneration || !Number.isSafeInteger(keyGeneration) || keyGeneration < 1) throw new Error('ACCOUNT_INVALID_RESPONSE');
+    const response = await authorized(`/v1/spaces/${encodeURIComponent(spaceId)}/key${requestedGeneration === undefined ? '' : `?generation=${keyGeneration}`}`, 'GET', ticket);
+    let opened: Uint8Array<ArrayBuffer>;
+    try { opened = await unwrap(accountPair, keyEnvelope(accountSuccess(response)), `space-key:${spaceId}:${keyGeneration}:member:${account}`); }
+    catch (error) {
+      if (requestedGeneration === undefined) {
+        await me(); check(ticket);
+        if (spaceGenerations.get(spaceId) !== keyGeneration) return spaceKey(spaceId);
+      }
+      throw error;
+    }
+    try { check(ticket); if (opened.length !== 32) throw new Error('ACCOUNT_INVALID_RESPONSE'); return { generation: keyGeneration, key: opened }; }
+    catch (error) { opened.fill(0); throw error; }
+  };
+  const sharedProjects = createSharedProjects({
+    context: () => !closed && state.status === 'signedIn' && state.phrase === 'ready' && identity && pair ? {
+      accountId: identity, session: generation, spaces: state.spaces, shared: state.shared,
+    } : undefined,
+    key: spaceKey, request: route => authorized(route, 'GET', generation),
+  });
+  if (options.desktop) sharing = createSpaceSharing({ directory: options.directory, cipher: options.cipher, changed: options.changed,
+    context: () => !closed && state.status === 'signedIn' && state.phrase === 'ready' && identity && pair ? {
+      accountId: identity, computerId: computerId ??= installationId(options.userData), session: generation, spaces: state.spaces,
+    } : undefined,
+    key: spaceKey, request: (route, method, body) => authorized(route, method, generation, body),
+    project: id => options.desktop!.get(id), image: (project, item) => options.desktop!.image(project, item),
+  });
   const envelopes = async (ticket: number): Promise<{ phrase?: KeyEnvelope; public?: KeyEnvelope }> => {
     const value = accountSuccess(await authorized('/v1/keys', 'GET', ticket));
     if (!record(value) || !Array.isArray(value.keys) || value.keys.length > 10000) throw new Error('ACCOUNT_INVALID_RESPONSE');
@@ -167,6 +217,7 @@ export function createAccount(options: Options) {
     return found;
   };
   const loadSpaces = async (ticket: number, card: Extract<AccountState, { status: 'signedIn' }>, keys?: { phrase?: KeyEnvelope; public?: KeyEnvelope }) => {
+    sharedProjects?.clear();
     if (!identity || !key) return;
     try {
       if (!pair) {
@@ -185,7 +236,8 @@ export function createAccount(options: Options) {
         }
         check(ticket); pair = openedPair;
       }
-      Object.assign(card, await readSpaces({ get: route => authorized(route, 'GET', ticket), account: identity, pair, directory: options.directory, cipher: options.cipher,
+      Object.assign(card, await readSpaces({ get: route => authorized(route, 'GET', ticket), account: identity, pair, directory: options.directory, cipher: options.cipher, titleCache,
+        rememberGeneration: (space, keyGeneration) => { check(ticket); spaceGenerations.set(space, keyGeneration); }, key: spaceKey,
         check: () => check(ticket), fallbackName: options.language() === 'es' ? 'Space compartido' : 'Shared Space' }));
       if (keyStoreError && !card.spacesError) card.spacesError = 'ACCOUNT_KEYSTORE';
     } catch (error) { check(ticket); card.spacesError = errorCode(error); }
@@ -229,7 +281,21 @@ export function createAccount(options: Options) {
   const cancel = () => { invalidate(); access = undefined; publish({ status: 'signedOut' }); };
   return {
     state: (): AccountState => structuredClone(state), me, retry: me, cancel,
+    shareProject: (project: string, space: string) => {
+      if (!sharing) return Promise.reject(new Error('SPACE_SHARE_FAILED'));
+      return sharing.shareProject(project, space);
+    },
+    stopSharing: (project: string) => {
+      if (!sharing) return Promise.reject(new Error('SPACE_SHARE_FAILED'));
+      return sharing.stopSharing(project);
+    },
+    projectState: (project: string) => sharing?.projectState(project) ?? { sharedTo: null, shareError: null },
+    openSharedProject: (space: string, dataset: string) => sharedProjects!.openSharedProject(space, dataset),
+    sharedItem: (project: string | null, id: string) => sharedProjects!.item(project, id),
+    sharedImage: (project: string | null, id: string) => sharedProjects!.image(project, id),
+    desktopChanged: () => sharing?.changed(),
     refreshSpaces() {
+      sharedProjects.clear();
       if (state.status !== 'signedIn' || Date.now() - lastRefresh < 30000) return Promise.resolve();
       lastRefresh = Date.now(); return me();
     },
@@ -263,7 +329,8 @@ export function createAccount(options: Options) {
       invalidate(); access = undefined; const ticket = generation;
       publish({ status: 'signingIn' });
       try {
-        const { site } = accountEndpoints(options.isPackaged, options.env), pkce = createPKCE(), computerId = installationId(options.userData);
+        const { site } = accountEndpoints(options.isPackaged, options.env), pkce = createPKCE();
+        computerId ??= installationId(options.userData);
         const deviceName = hostname().replace(/[\x00-\x1f\x7f-\x9f]/g, '').trim().slice(0, 128).trim() || 'Horizon';
         const server = createServer({ requestTimeout: 20000, headersTimeout: 20000, maxHeaderSize: 8192 }, (req, res) => {
           const match = /^\/callback\?code=([A-Za-z0-9_-]{43})$/.exec(req.url ?? ''), current = attempt;
@@ -327,6 +394,6 @@ export function createAccount(options: Options) {
       try { await open(`${accountEndpoints(options.isPackaged, options.env).site}/`); }
       catch (error) { fail(error, ticket); throw new Error(errorCode(error)); }
     },
-    close() { closed = true; invalidate(); access = undefined; state = { status: 'signedOut' }; },
+    close() { closed = true; sharing?.close(); invalidate(); access = undefined; state = { status: 'signedOut' }; },
   };
 }

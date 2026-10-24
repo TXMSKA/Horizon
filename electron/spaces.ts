@@ -6,7 +6,13 @@ import type { StoreCipher } from './store';
 import { readVaultFile, writeVaultFile } from './vault-storage';
 import { deriveKey, openPublicKey, openSealed, unwrap } from './cosmic-crypto';
 import type { AccountKeyPair, KeyEnvelope } from './cosmic-crypto';
+import { openProjectManifest } from './space-sharing';
 
+// Quantum sends a dataset's newest object time as Unix milliseconds; an ISO string is accepted too. Both become ISO.
+const datasetTime = (value: unknown): string | null => {
+  const time = typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : typeof value === 'string' && value.length <= 40 ? Date.parse(value) : NaN;
+  return Number.isFinite(time) ? new Date(time).toISOString() : null;
+};
 export const accountRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 export const accountId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
 const role = (value: unknown): value is 'owner' | 'member' => value === 'owner' || value === 'member';
@@ -16,7 +22,7 @@ export function keyEnvelope(value: unknown): KeyEnvelope {
   if (!accountRecord(value) || typeof value.algorithm !== 'string' || typeof value.wrapped !== 'string') throw new Error('ACCOUNT_INVALID_RESPONSE');
   return { algorithm: value.algorithm, wrapped: value.wrapped };
 }
-export interface AccountResponse { status: number; ok: boolean; value: unknown }
+export interface AccountResponse { status: number; ok: boolean; value: unknown; retryAfter?: number }
 export function accountSuccess(response: AccountResponse): unknown {
   if (!response.ok) throw new Error([400, 401, 403].includes(response.status) ? 'ACCOUNT_DENIED' : 'ACCOUNT_NETWORK');
   return response.value;
@@ -57,7 +63,40 @@ function profile(value: unknown): Pick<AccountSpace, 'name' | 'code' | 'colour' 
     || !string(value.icon, 64, 1) || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(value.icon)) return;
   return { name: value.name as string, code: value.code, colour: value.colour, icon: value.icon };
 }
-export async function readSpaces(options: { get: Get; account: string; pair: AccountKeyPair; directory: string; cipher: StoreCipher; check(): void; fallbackName: string }) {
+async function datasetTitle(options: { get: Get; check(): void; key(space: string, generation: number): Promise<{ key: Uint8Array }> }, space: string, dataset: string): Promise<string> {
+  const route = `/v1/spaces/${encodeURIComponent(space)}/datasets/${encodeURIComponent(dataset)}/objects`;
+  const manifests: { path: string; createdAt: number }[] = [], cursors = new Set<string>();
+  let after: string | null = null, count = 0;
+  do {
+    const query = new URLSearchParams({ prefix: 'project/', limit: '1000', ...(after === null ? {} : { after }) });
+    const value = accountSuccess(await options.get(`${route}?${query}`)); options.check();
+    if (!accountRecord(value) || !Array.isArray(value.objects) || value.objects.length > 1000 || !(value.after === null || typeof value.after === 'string' && /^[A-Za-z0-9_./-]{1,255}$/.test(value.after))) throw new Error('ACCOUNT_INVALID_RESPONSE');
+    count += value.objects.length;
+    if (count > 10000) throw new Error('ACCOUNT_INVALID_RESPONSE');
+    for (const object of value.objects) {
+      if (!accountRecord(object) || typeof object.path !== 'string' || !/^[A-Za-z0-9_./-]{1,255}$/.test(object.path)) throw new Error('ACCOUNT_INVALID_RESPONSE');
+      if (/^project\/[A-Za-z0-9._:-]{1,128}\/[0-9a-f-]{36}\/dataset\.hzs$/.test(object.path)) {
+        const createdAt = typeof object.createdAt === 'number' ? object.createdAt : typeof object.createdAt === 'string' ? Date.parse(object.createdAt) : NaN;
+        if (!Number.isFinite(createdAt)) throw new Error('ACCOUNT_INVALID_RESPONSE');
+        manifests.push({ path: object.path, createdAt });
+      }
+    }
+    after = value.after;
+    if (after !== null) { if (cursors.has(after)) throw new Error('ACCOUNT_INVALID_RESPONSE'); cursors.add(after); }
+  } while (after !== null);
+  const newest = manifests.sort((a, b) => b.createdAt - a.createdAt || b.path.localeCompare(a.path))[0];
+  if (!newest) throw new Error('ACCOUNT_INVALID_RESPONSE');
+  const bytes = accountSuccess(await options.get(`${route}/${newest.path.split('/').map(encodeURIComponent).join('/')}`)); options.check();
+  if (!Buffer.isBuffer(bytes) || bytes.length > 8 * 1024 * 1024) throw new Error('ACCOUNT_INVALID_RESPONSE');
+  const descriptor: unknown = JSON.parse(bytes.toString('utf8'));
+  if (!accountRecord(descriptor) || !Number.isSafeInteger(descriptor.keyGeneration) || (descriptor.keyGeneration as number) < 1) throw new Error('ACCOUNT_INVALID_RESPONSE');
+  const { key } = await options.key(space, descriptor.keyGeneration as number);
+  try { const manifest = await openProjectManifest(key, space, dataset, bytes); options.check(); return manifest.title; }
+  finally { key.fill(0); }
+}
+export async function readSpaces(options: { get: Get; account: string; pair: AccountKeyPair; directory: string; cipher: StoreCipher; check(): void; fallbackName: string;
+  rememberGeneration(space: string, generation: number): void; key(space: string, generation: number): Promise<{ key: Uint8Array }>;
+  titleCache: Map<string, { updatedAt: string; title: string | null }> }) {
   const spaces: AccountSpace[] = [], shared: AccountSharedDataset[] = [];
   const path = resolve(options.directory, 'spaces-pins.json'), pins = pinsFile(path, options.cipher);
   const accountPins = Object.hasOwn(pins.accounts, options.account) ? pins.accounts[options.account]! : {};
@@ -65,10 +104,13 @@ export async function readSpaces(options: { get: Get; account: string; pair: Acc
   const publicKeys = new Map<string, boolean>(), ids = new Set<string>();
   for (const entry of await pages(options.get, '/v1/spaces', 'spaces')) {
     if (!accountRecord(entry) || !accountId(entry.id) || !role(entry.role) || !Array.isArray(entry.members) || entry.members.length > 10000 || ids.has(entry.id)
-      || entry.generation !== undefined && (!Number.isSafeInteger(entry.generation) || (entry.generation as number) < 1)) throw new Error('ACCOUNT_INVALID_RESPONSE');
+      || [entry.currentGeneration, entry.generation].some(value => value !== undefined && (!Number.isSafeInteger(value) || (value as number) < 1))) throw new Error('ACCOUNT_INVALID_RESPONSE');
     ids.add(entry.id);
     const space: AccountSpace = { id: entry.id, name: options.fallbackName, code: null, colour: null, icon: null, role: entry.role, pending: true, members: [] };
-    const route = `/v1/spaces/${encodeURIComponent(entry.id)}`, generation = typeof entry.generation === 'number' ? entry.generation : 1;
+    const route = `/v1/spaces/${encodeURIComponent(entry.id)}`;
+    // Quantum names the Space's key generation currentGeneration; records from before that change have none and are generation 1.
+    const generation = typeof entry.currentGeneration === 'number' ? entry.currentGeneration : typeof entry.generation === 'number' ? entry.generation : 1;
+    options.rememberGeneration(entry.id, generation);
     const memberIds = new Set<string>();
     for (const member of entry.members) {
       if (!accountRecord(member) || !accountId(member.accountId) || !role(member.role) || memberIds.has(member.accountId)) throw new Error('ACCOUNT_INVALID_RESPONSE');
@@ -108,9 +150,17 @@ export async function readSpaces(options: { get: Get; account: string; pair: Acc
       const datasets = new Set<string>();
       for (const dataset of await pages(options.get, `${route}/datasets?app=horizon`, 'datasets')) {
         if (!accountRecord(dataset) || !accountId(dataset.id) || datasets.has(dataset.id) || !accountRecord(dataset.sharedBy) || !accountId(dataset.sharedBy.accountId)
-          || !string(dataset.updatedAt, 40, 1) || !Number.isFinite(Date.parse(dataset.updatedAt)) || typeof dataset.size !== 'number' || !Number.isSafeInteger(dataset.size) || dataset.size < 0) throw new Error('ACCOUNT_INVALID_RESPONSE');
+          || !datasetTime(dataset.updatedAt) || typeof dataset.size !== 'number' || !Number.isSafeInteger(dataset.size) || dataset.size < 0) throw new Error('ACCOUNT_INVALID_RESPONSE');
         datasets.add(dataset.id);
-        shared.push({ spaceId: space.id, datasetId: dataset.id, sharedBy: { accountId: dataset.sharedBy.accountId, displayName: name(dataset.sharedBy.displayName) }, updatedAt: dataset.updatedAt, size: dataset.size, title: null });
+        if (dataset.sharedBy.accountId === options.account) continue;
+        const cacheId = `${space.id}:${dataset.id}`, cached = options.titleCache.get(cacheId);
+        const updatedAt = datasetTime(dataset.updatedAt)!;
+        let title = cached?.updatedAt === updatedAt ? cached.title : null;
+        if (cached?.updatedAt !== updatedAt) {
+          try { title = await datasetTitle(options, space.id, dataset.id); } catch { options.check(); }
+          options.titleCache.set(cacheId, { updatedAt, title });
+        }
+        shared.push({ spaceId: space.id, datasetId: dataset.id, sharedBy: { accountId: dataset.sharedBy.accountId, displayName: name(dataset.sharedBy.displayName) }, updatedAt, size: dataset.size, title });
       }
     } catch { error = 'ACCOUNT_NETWORK'; }
   }

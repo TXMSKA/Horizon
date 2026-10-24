@@ -353,7 +353,7 @@ export function createDesktop(path: string, cipher: StoreCipher, changed: () => 
       if (storageError) throw new Error('DESKTOP_STORAGE_FAILED');
     },
     state: () => ({
-      projects: store.projects.map(({ id, name, items, updatedAt, usedAt }): ProjectSummary => ({ id, name, updatedAt, usedAt,
+      projects: store.projects.map(({ id, name, items, updatedAt, usedAt }): ProjectSummary => ({ id, name, updatedAt, usedAt, sharedTo: null, shareError: null,
         pages: items.filter(item => item.kind === 'link').length, notes: items.filter(item => item.kind === 'note').length,
         captures: items.filter(item => item.kind === 'area' || item.kind === 'page' || item.kind === 'text').length,
         folders: get(id).folders.map(folder => ({ ...folder, count: items.filter(item => item.folder === folder.id).length })),

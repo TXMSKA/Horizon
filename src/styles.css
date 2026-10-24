@@ -522,7 +522,9 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .hub-nebula-section h3 { color: var(--text-secondary); font-size: var(--type-caption); }
 .hub-nebula-row, .hub-nebula-shared { display: flex; align-items: center; gap: var(--space-10); min-height: var(--size-36); padding: 0 var(--space-10); border-radius: var(--radius-control); color: var(--text-title); font-size: var(--type-body); }
 .hub-nebula-row svg, .hub-nebula-shared svg { flex: none; width: var(--size-16); height: var(--size-16); color: var(--text-secondary); }
-.hub-nebula-shared { min-height: calc(var(--size-36) + var(--space-16)); }
+.hub-nebula-shared { min-height: calc(var(--size-36) + var(--space-16)); width: 100%; padding-block: var(--space-6); border: 0; background: transparent; text-align: start; cursor: pointer; }
+.hub-nebula-shared:hover { background: var(--surface-hover); }
+.hub-nebula-shared:active { background: var(--surface-pressed); }
 .hub-nebula-shared > span { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .hub-nebula-shared small, .hub-nebula-pending { color: var(--text-secondary); font-size: var(--type-caption); }
 .hub-nebula-space { display: flex; flex-direction: column; gap: var(--space-2); }
@@ -822,6 +824,12 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .desktop-home-row > span:last-of-type { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-home-row > small { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-dialog { margin: auto; position: fixed; inset: 0; width: min(var(--width-settings-dialog), calc(100vw - var(--space-32))); max-height: calc(100vh - var(--space-32)); overflow-y: auto; padding: var(--space-24); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-sheet); background: var(--surface-raised); color: var(--text-primary); }
+.share-dialog .desktop-field { display: flex; flex-direction: column; gap: var(--space-8); }
+.share-label { color: var(--text-secondary); font-size: var(--type-caption); font-weight: var(--weight-emphasis); }
+.share-warning { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.share-actions { display: flex; justify-content: flex-end; gap: var(--space-10); }
+.desktop-shared-note { color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); }
+.desktop-actions .desktop-shared-note { align-self: center; }
 .desktop-dialog::backdrop { background: var(--surface-overlay); }
 :root[data-contrast=high] .desktop-dialog::backdrop { background: light-dark(var(--palette-contrast-light-overlay), var(--palette-contrast-dark-overlay)); }
 .desktop-dialog > * + * { margin-top: var(--space-16); }

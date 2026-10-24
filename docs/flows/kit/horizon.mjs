@@ -831,6 +831,19 @@ export const nebulaSigningIn = () => siteWindow([nebulaBeta(
   note("Horizon continues here once the browser returns."),
   col({ gap: 8 }, action("Open the sign-in page again", { primary: true, glyph: "externalLink", ref: "nebula-reopen" }),
     { ...action("Cancel", { ghost: true, ref: "nebula-cancel" }), stroke: "primary" }))]);
+// A project someone shared with the account opens in the Desktop panel to read: no drop zone, no new notes, no moving or deleting.
+export const sharedProject = () => panelWindow("Desktop",
+  col({ gap: 4 }, note("Shared by Mateo Luna in Lago Azul Studio"), heading("Lake photo locations")),
+  note("Read only. Changes made by Mateo Luna appear here."),
+  col({ gap: 4 },
+    desktopItem("Capture: north shore at sunrise", "Saved yesterday", icon("scan", { size: 22, color: "primary" }), { ref: "shared-capture" }),
+    desktopItem("Mirador del Lago: parking and trail", "miradordellago.example", badge("site-trails", { initial: "M", size: 24, radius: "sm", ink: "site-ink" }), { ref: "shared-item" }),
+    desktopItem("Best light by month", "Golden hour moves earlier after March.", icon("fileText", { size: 22, color: "soft" }))));
+export const sharedItem = () => panelWindow("Desktop",
+  col({ gap: 4 }, note("Lake photo locations"), heading("Mirador del Lago: parking and trail")),
+  row({ gap: 8 }, badge("site-trails", { initial: "M", size: 22, radius: "sm", ink: "site-ink" }), note("miradordellago.example")),
+  pagePreview("Mirador del Lago", "info"), col({ gap: 8 }, label("Note"), text("Park by the gate; the trail takes twenty minutes.", { size: "sm", color: "text" })),
+  col({ gap: 8 }, action("Open page", { primary: true, glyph: "externalLink", ref: "shared-open-page" }), action("Ask Lyra", { primary: true, glyph: "sparkles", ref: "shared-ask-lyra" })));
 // When Horizon is the first Cosmic app on the computer, it asks once for the recovery phrase; every later app reads the key from this computer.
 export const nebulaPhrase = () => siteWindow([nebulaBeta(
   text("Enter the recovery phrase", { size: "base", weight: 650, color: "title" }),

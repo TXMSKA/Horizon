@@ -2,7 +2,7 @@ import { IMPORT_BROWSERS, SYNC_ITEMS } from '../src/shared/api';
 import { validateLyraCommand } from '../src/shared/lyra';
 import { validateServicesCommand } from '../src/shared/services';
 import { validateTranslateCommand } from '../src/shared/translate';
-import type { BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
+import type { AccountSpace, BrowserCommand, ContentArea, DesktopItem, DesktopPanelPage, FavoritesTree, Project } from '../src/shared/api';
 import { isWebURL } from './browsing';
 import { isMarketplaceTheme, isContrast, isDarkPagesMode, isDarkStrength, isDarkTone, isTheme, isLanguageSetting, isSearchEngine, isHubApp, isOnStart, isVaultTimeout } from './settings';
 import { isContextMenuItemId } from './context-menu';
@@ -14,6 +14,9 @@ import { SEND_APPS } from './send';
 import { validCaptureRect } from '../src/shared/capture';
 import { groupIcon } from '../src/shared/group-icon-names';
 import { groupColor, groupId, groupName } from '../src/shared/tab-groups';
+import { accountId } from './spaces';
+import { sharedItemId } from './space-reader';
+import { uuid } from './sync-format';
 import { favoriteDestination, favoriteId, favoriteLocation, favoriteName, favoriteParent, favoritePosition, favoriteTitle, favoriteURL, moveFavorite } from './favorites';
 
 function object(value: unknown): Record<string, unknown> {
@@ -29,8 +32,8 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
 const desktopCommands = new Set(['retry-desktop-storage', 'create-project', 'rename-project', 'delete-project', 'set-project', 'open-desktop', 'open-desktop-panel', 'close-desktop-panel', 'create-folder', 'rename-folder', 'delete-folder', 'move-item-folder', 'move-item-project', 'send-targets', 'send-item', 'add-capture-to-project', 'delete-capture', 'add-link', 'add-text', 'add-note', 'update-item', 'delete-item', 'take-capture', 'capture-full-page', 'capture-screen', 'edit-capture', 'copy-capture']);
 const importCommands = new Set(['list-import-sources', 'import-browser-data', 'choose-import-passwords-file', 'import-passwords', 'delete-import-passwords-file']);
 const favoriteCommands = new Set(['add-favorite', 'create-favorite-folder', 'rename-favorite', 'move-favorite', 'delete-favorite', 'open-favorite', 'open-favorite-new-tab', 'open-all-favorites']);
-export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
-  try { return validatedCommand(value, profileIds, projects, captures, favorites); }
+export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }, spaces: readonly AccountSpace[] = []): BrowserCommand {
+  try { return validatedCommand(value, profileIds, projects, captures, favorites, spaces); }
   catch (error) {
     if (value && typeof value === 'object' && 'type' in value && desktopCommands.has(value.type as string)
       && !(error instanceof Error && /^(PROJECT_|FOLDER_|DESKTOP_|LINK_INVALID$|TEXT_INVALID$)/.test(error.message))) throw new Error('DESKTOP_COMMAND_INVALID');
@@ -41,9 +44,21 @@ export function validateCommand(value: unknown, profileIds?: ReadonlySet<string>
     throw error;
   }
 }
-function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }): BrowserCommand {
+function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, projects: readonly Project[] = [], captures: readonly DesktopItem[] = [], favorites: FavoritesTree = { bar: [], other: [] }, spaces: readonly AccountSpace[] = []): BrowserCommand {
   const command = object(value);
   const type = command.type;
+  if (typeof type === 'string' && type.startsWith('space-')) {
+    if (type === 'space-open-shared') {
+      if (Object.keys(command).length !== 3 || !['type', 'space', 'dataset'].every(key => Object.hasOwn(command, key))
+        || !accountId(command.space) || !uuid(command.dataset) || !spaces.some(space => space.id === command.space && !space.pending)) throw new Error('SPACE_SHARED_UNAVAILABLE');
+      return value as BrowserCommand;
+    }
+    const share = type === 'space-share-project', fields = share ? ['type', 'project', 'space'] : ['type', 'project'];
+    if (!(share || type === 'space-stop-sharing') || Object.keys(command).length !== fields.length || !fields.every(key => Object.hasOwn(command, key))
+      || !isProfileId(command.project) || !projects.some(project => project.id === command.project)
+      || share && (typeof command.space !== 'string' || !spaces.some(space => space.id === command.space))) throw new Error('SPACE_SHARE_FAILED');
+    return value as BrowserCommand;
+  }
   if (typeof type === 'string' && type.startsWith('account-')) {
     const phrase = type === 'account-phrase';
     if (!(phrase || ['account-sign-in', 'account-reopen', 'account-cancel', 'account-sign-out', 'account-manage', 'account-retry', 'account-refresh'].includes(type))
@@ -289,7 +304,11 @@ export function validateDesktopPanelPage(value: unknown, projects: readonly Proj
   if (!Object.hasOwn(page, 'kind')) throw new Error('DESKTOP_COMMAND_INVALID');
   let valid = false;
   if (page.kind === 'home' || page.kind === 'captures' || page.kind === 'new-project') valid = Object.keys(page).length === 1;
-  else if (page.kind === 'project') {
+  else if (page.kind === 'shared') {
+    keys(page, ['kind', 'space', 'dataset', 'item']);
+    valid = Object.hasOwn(page, 'space') && Object.hasOwn(page, 'dataset') && accountId(page.space) && uuid(page.dataset)
+      && (!Object.hasOwn(page, 'item') || sharedItemId(page.item));
+  } else if (page.kind === 'project') {
     keys(page, ['kind', 'project', 'folder']);
     const project = projects.find(project => project.id === page.project);
     valid = !!project && Object.hasOwn(page, 'project') && (!Object.hasOwn(page, 'folder') || page.folder === null || isProfileId(page.folder) && project.folders.some(folder => folder.id === page.folder));

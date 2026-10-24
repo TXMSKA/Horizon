@@ -5,11 +5,14 @@ import type { TranslateCommand, TranslateState, TranslationChoices } from './tra
 export type Language = 'en' | 'es';
 export interface AccountSpaceMember { accountId: string; displayName: string | null; role: 'owner' | 'member'; keyChanged: boolean }
 export interface AccountSpace { id: string; name: string; code: string | null; colour: string | null; icon: string | null; role: 'owner' | 'member'; pending: boolean; members: AccountSpaceMember[] }
-export interface AccountSharedDataset { spaceId: string; datasetId: string; sharedBy: { accountId: string; displayName: string | null }; updatedAt: string; size: number; title: null }
+export interface AccountSharedDataset { spaceId: string; datasetId: string; sharedBy: { accountId: string; displayName: string | null }; updatedAt: string; size: number; title: string | null }
 export type AccountState = { status: 'signedOut' } | { status: 'signingIn' }
   | { status: 'signedIn'; email: string; displayName: string | null; plan: string | null; phrase: 'ready' | 'needed' | 'wrong'; keyStore: 'shared' | 'session' | 'error'; spaces: AccountSpace[]; shared: AccountSharedDataset[]; spacesError: string | null } | { status: 'error'; code: string };
 export type AccountCommand = { type: 'account-sign-in' | 'account-reopen' | 'account-cancel' | 'account-sign-out' | 'account-manage' | 'account-retry' | 'account-refresh' }
   | { type: 'account-phrase'; phrase: string };
+export type SpaceCommand = { type: 'space-share-project'; project: string; space: string }
+  | { type: 'space-stop-sharing'; project: string }
+  | { type: 'space-open-shared'; space: string; dataset: string };
 export type VaultTimeout = 'close' | '5' | '15' | '60';
 export interface VaultLogin { id: string; origin: string; title: string; username: string }
 export interface VaultSuggestion { id: string; origin: string; x: number; y: number; width: number; locked: boolean; logins: VaultLogin[] }
@@ -118,14 +121,19 @@ export interface CaptureImage { filename: string; width: number; height: number;
 export interface DesktopItem { id: string; folder: string | null; kind: DesktopItemKind; title: string; text: string; note: string; source: { url: string; title: string } | null; image: CaptureImage | null; createdAt: number; updatedAt: number }
 export interface ProjectFolder { id: string; name: string; createdAt: number }
 export interface Project { id: string; name: string; createdAt: number; updatedAt: number; usedAt: number; folders: ProjectFolder[]; items: DesktopItem[] }
-export interface ProjectSummary { id: string; name: string; pages: number; notes: number; captures: number; folders: (ProjectFolder & { count: number })[]; updatedAt: number; usedAt: number; latest: Pick<DesktopItem, 'id' | 'folder' | 'kind' | 'title' | 'source' | 'createdAt' | 'updatedAt'>[] }
+export interface ProjectSummary { id: string; name: string; sharedTo: { spaceId: string; spaceName: string } | null; shareError: string | null; pages: number; notes: number; captures: number; folders: (ProjectFolder & { count: number })[]; updatedAt: number; usedAt: number; latest: Pick<DesktopItem, 'id' | 'folder' | 'kind' | 'title' | 'source' | 'createdAt' | 'updatedAt'>[] }
 export type DesktopItemContent = Omit<DesktopItem, 'image'> & { image: Omit<CaptureImage, 'filename'> | null };
 export type ProjectContent = Omit<Project, 'items'> & { items: DesktopItemContent[] };
+export interface SharedProjectContent {
+  spaceId: string; datasetId: string; title: string; sharedBy: { displayName: string | null }; spaceName: string; updatedAt: string;
+  readOnly: true; folders: ProjectFolder[]; items: DesktopItemContent[];
+}
 export type CaptureSummary = Pick<DesktopItem, 'id' | 'title' | 'source' | 'createdAt'>;
-export type DesktopPanelPage = { kind: 'home' | 'captures' | 'new-project' } | { kind: 'project'; project: string; folder?: string | null } | { kind: 'item'; project: string | null; id: string };
+export type DesktopPanelPage = { kind: 'home' | 'captures' | 'new-project' } | { kind: 'project'; project: string; folder?: string | null } | { kind: 'item'; project: string | null; id: string }
+  | { kind: 'shared'; space: string; dataset: string; item?: string };
 export interface DesktopPanelState { open: boolean; page: DesktopPanelPage }
 export type DesktopError = 'DESKTOP_COMMAND_INVALID' | 'DESKTOP_LOCKED' | 'FOLDER_NAME_INVALID' | 'FOLDER_NAME_EMPTY' | 'FOLDER_NAME_LONG' | 'FOLDER_NAME_DUPLICATE' | 'FOLDER_LIMIT' | 'FOLDER_NOT_FOUND' | 'CAPTURE_LIMIT' | 'LINK_INVALID' | 'TEXT_INVALID' | 'DESKTOP_NOT_FOUND' | 'PROJECT_NAME_INVALID' | 'PROJECT_NAME_EMPTY' | 'PROJECT_NAME_LONG' | 'PROJECT_NAME_DUPLICATE' | 'PROJECT_ADDRESS_CONFLICT' | 'PROJECT_LIMIT' | 'PROJECT_ITEM_LIMIT' | 'PROJECT_NOT_FOUND' | 'DESKTOP_ITEM_NOT_FOUND' | 'DESKTOP_ITEM_INVALID' | 'DESKTOP_STORAGE_FAILED' | 'DESKTOP_STORAGE_FULL' | 'CAPTURE_TOO_LARGE' | 'CAPTURE_UNAVAILABLE' | 'CAPTURE_CHANGED' | 'CAPTURE_AREA_SMALL' | 'CAPTURE_PAGE_HIDDEN' | 'CAPTURE_TIMEOUT' | 'CAPTURE_FAILED' | 'CAPTURE_LOADING' | 'CAPTURE_CRASHED' | 'CAPTURE_DESKTOP' | 'CAPTURE_SETTINGS';
-export type BrowserCommand = AccountCommand | VaultCommand | SyncCommand | ServicesCommand
+export type BrowserCommand = AccountCommand | SpaceCommand | VaultCommand | SyncCommand | ServicesCommand
   | { type: 'set-extension-enabled'; id: string; enabled: boolean }
   | { type: 'set-extension-pinned'; id: string; pinned: boolean }
   | { type: 'remove-extension'; id: string }
@@ -231,12 +239,14 @@ export interface HorizonAPI {
   capture(): Promise<Uint8Array | null>;
   getProject(id: string): Promise<ProjectContent>;
   getCaptures(): Promise<DesktopItemContent[]>;
+  // Shared item IDs are scoped to the account's in-memory view and use project: null.
   getCaptureImage(project: string | null, item: string): Promise<Uint8Array | null>;
   getFavicon(id: string, hash: string): Promise<Uint8Array | null>;
   getFavoriteFavicons(origins: string[]): Promise<Record<string, string>>;
   command(command: Extract<BrowserCommand, { type: 'clear-browsing-data' }>): Promise<ClearedBrowsingData>;
   command(command: Extract<BrowserCommand, { type: 'list-import-sources' }>): Promise<ImportSource[]>;
   command(command: Extract<BrowserCommand, { type: 'send-targets' }>): Promise<SendReceiver[]>;
+  command(command: Extract<BrowserCommand, { type: 'space-open-shared' }>): Promise<SharedProjectContent>;
   command(command: Extract<BrowserCommand, { type: 'sync-reveal-key' }>): Promise<string>;
   command(command: Extract<BrowserCommand, { type: 'sync-save-key' }>): Promise<boolean>;
   command(command: Extract<BrowserCommand, { type: 'import-browser-data' }>): Promise<ImportResult>;

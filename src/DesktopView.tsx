@@ -1,14 +1,15 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Check, CodeXml, ExternalLink, FileText, Folder, FolderInput, FolderPlus, Frame, LayoutDashboard, LoaderCircle, Plus, Send, Sparkles, Trash2, X } from 'lucide-react';
+import { Check, CodeXml, ExternalLink, FileText, Folder, FolderInput, FolderPlus, Frame, LayoutDashboard, LoaderCircle, Plus, Send, Share2, Sparkles, Trash2, X } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
-import type { BrowserCommand, BrowserState, DesktopItemContent, DesktopPanelPage, Language, ProjectContent, SendApp, SendReceiver } from './shared/api';
+import type { BrowserCommand, BrowserState, DesktopItemContent, DesktopPanelPage, Language, ProjectContent, SendApp, SendReceiver, SharedProjectContent } from './shared/api';
 import type { DesktopEdits } from './shared/desktop-edits';
 import { CaptureImage, DesktopDropdown, DesktopNameDialog, desktopError, desktopCardLabel, desktopItemLabel, GrowingTextArea, itemCount, ItemMark, itemSite, ProjectNameForm, projectCounts, projectSize, relativeDesktopDate } from './Desktop';
 import { DesktopDrop } from './DesktopDrop';
 import { SidePanelFaces } from './SidePanelFaces';
 import { Menu } from './Menu';
+import { ShareProjectDialog } from './ShareProject';
 import { PopupAnchor } from './PopupAnchor';
 
 type DesktopProps = {
@@ -52,8 +53,8 @@ function Filters({ project, folder, onFilter, language, tab = false }: { project
 }
 function ProjectBody({ project, folder, props, tab = false, selected }: { project: ProjectContent; folder: string | null; props: DesktopProps; tab?: boolean; selected?: string | null }) {
   const { state, language, edits, run, onPage, onModalChange } = props, t = (key: CopyKey) => text(key, language);
-  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [newFolder, setNewFolder] = useState(false), [tabFolder, setTabFolder] = useState<string | null>(null);
-  const pending = useRef(false), folderButton = useRef<HTMLButtonElement>(null);
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [newFolder, setNewFolder] = useState(false), [tabFolder, setTabFolder] = useState<string | null>(null), [sharing, setSharing] = useState(false);
+  const pending = useRef(false), folderButton = useRef<HTMLButtonElement>(null), shareButton = useRef<HTMLButtonElement>(null);
   const chosenFolder = tab ? project.folders.some(entry => entry.id === tabFolder) ? tabFolder : null : folder;
   const items = [...project.items].reverse().filter(item => !chosenFolder || item.folder === chosenFolder);
   const summary = state.projects.find(entry => entry.id === project.id);
@@ -71,9 +72,19 @@ function ProjectBody({ project, folder, props, tab = false, selected }: { projec
     finally { pending.current = false; setBusy(false); }
   };
   const noteButton = <button className="desktop-action" type="button" disabled={disabled} onClick={() => { void add(); }}><Plus aria-hidden="true" />{t('newNote')}</button>;
+  // Share appears once the account can reach a Space; a shared project shows where it is shared and can stop.
+  const account = state.account.status === 'signedIn' && state.account.phrase === 'ready' ? state.account : null;
+  const canShare = !state.privateWindow && !!account?.spaces.some(space => !space.pending);
+  const stopSharing = async () => {
+    if (pending.current) return;
+    pending.current = true; setBusy(true); setError('');
+    try { await window.horizon.command({ type: 'space-stop-sharing', project: project.id }); } catch (reason) { setError(desktopError(reason, language)); }
+    finally { pending.current = false; setBusy(false); }
+  };
+  const shareControls = summary?.sharedTo ? <><small className="desktop-shared-note">{t('sharedWith').replace('{space}', summary.sharedTo.spaceName)}</small><button className="desktop-action outline" type="button" disabled={disabled} onClick={() => { void stopSharing(); }}><Share2 aria-hidden="true" />{t('stopSharing')}</button></> : canShare ? <button className="desktop-action primary" ref={shareButton} type="button" disabled={disabled} onClick={() => setSharing(true)}><Share2 aria-hidden="true" />{t('share')}</button> : null;
   const filter = (folder: string | null) => { if (tab) setTabFolder(folder); else void onPage({ kind: 'project', project: project.id, folder }); };
   if (!project.items.length) return <><div className="desktop-title-block"><h1>{project.name}</h1><small>{itemCount(0, language)}</small></div><DesktopDrop props={props} project={project.id} folder={chosenFolder} className="desktop-empty"><p className="desktop-empty-hint">{t('emptyProject')}</p></DesktopDrop>{noteButton}{error && <Feedback language={language} error={error} onRetry={() => { void add(); }} />}</>;
-  return <>{tab ? <><div className="desktop-tab-heading"><h1>{project.name}</h1><small>{summary && projectCounts(summary, language)}</small></div><div className="desktop-actions">{noteButton}</div></> : <div className="desktop-project-heading"><DesktopDropdown label={t('chooseProject')} value={project.id} lead={<LayoutDashboard className="accent" aria-hidden="true" />} choices={state.projects.map(entry => ({ id: entry.id, name: entry.name, lead: <Folder aria-hidden="true" /> }))} disabled={disabled} onChoose={id => { void onPage({ kind: 'project', project: id }); }} /><small>{summary && projectCounts(summary, language)}</small></div>}
+  return <>{tab ? <><div className="desktop-tab-heading"><h1>{project.name}</h1><small>{summary && projectCounts(summary, language)}</small></div><div className="desktop-actions">{shareControls}{noteButton}</div>{summary?.shareError && <p className="settings-feedback error" role="alert">{desktopError(new Error(summary.shareError), language)}</p>}</> : <div className="desktop-project-heading"><DesktopDropdown label={t('chooseProject')} value={project.id} lead={<LayoutDashboard className="accent" aria-hidden="true" />} choices={state.projects.map(entry => ({ id: entry.id, name: entry.name, lead: <Folder aria-hidden="true" /> }))} disabled={disabled} onChoose={id => { void onPage({ kind: 'project', project: id }); }} /><small>{summary && projectCounts(summary, language)}</small></div>}
     <Filters project={project} folder={chosenFolder} onFilter={filter} language={language} tab={tab} />
     {error && <Feedback language={language} error={error} onRetry={() => { void add(); }} />}
     <DesktopDrop props={props} project={project.id} folder={chosenFolder} className={tab ? 'desktop-cards' : 'desktop-items'}>{items.length ? items.map(item => tab ? <article className={`desktop-card${selected === item.id || added === item.id ? ' selected' : ''}`} key={item.id}>
@@ -81,6 +92,7 @@ function ProjectBody({ project, folder, props, tab = false, selected }: { projec
       <button className="desktop-card-target" type="button" onClick={event => { void onPage({ kind: 'item', project: project.id, id: item.id }, event.currentTarget); }}><div className="desktop-card-title">{item.kind === 'link' && <ItemMark item={item} />}<strong>{item.title || t('newNote')}</strong></div><small>{added === item.id ? t('desktopAddedNow') : desktopCardLabel(item, language)}</small>{!item.image && item.kind !== 'link' && <p>{item.text}</p>}
     </button></article> : <button className={`desktop-item-row${selected === item.id || added === item.id ? ' selected' : ''}`} type="button" key={item.id} onClick={() => { void onPage({ kind: 'item', project: project.id, id: item.id }); }}><ItemMark item={item} /><span><strong>{item.title || t('newNote')}</strong><small>{added === item.id ? t('desktopAddedNow') : item.kind === 'note' ? item.text || desktopItemLabel(item, language) : item.kind === 'link' ? itemSite(item.source?.url ?? '') : t('savedDate').replace('{date}', relativeDesktopDate(item.createdAt, language))}</small></span></button>) : <p className="desktop-empty-hint">{t('emptyFolder')}</p>}</DesktopDrop>
     {!tab && <div className="desktop-project-foot"><DesktopDrop props={props} project={project.id} folder={chosenFolder} /><div className="desktop-actions">{noteButton}<button className="desktop-action" ref={folderButton} type="button" disabled={disabled} onClick={() => setNewFolder(true)}><FolderPlus aria-hidden="true" />{t('newFolder')}</button></div></div>}
+    {sharing && <ShareProjectDialog state={state} language={language} project={project.id} opener={shareButton} onModalChange={onModalChange} onClose={() => setSharing(false)} />}
     {newFolder && <DesktopNameDialog state={state} language={language} folder={project.id} opener={folderButton} onModalChange={onModalChange} onClose={() => setNewFolder(false)} onSuccess={async () => { setNewFolder(false); await run({ type: 'set-project', id: project.id }); }} />}
   </>;
 }
@@ -151,6 +163,38 @@ function Home({ props }: { props: DesktopProps }) {
   return <><h1>{t('desktop')}</h1>{!state.projects.length && !state.captures.length ? <div className="desktop-empty"><p>{t('emptyDesktop')}</p><button className="desktop-action primary" type="button" onClick={() => { void onPage({ kind: 'new-project' }); }}>{t('newProject')}</button></div> : <><section className="desktop-latest"><div className="desktop-section-heading"><h2>{t('captures')}</h2><button className="desktop-small-link" type="button" onClick={() => { void onPage({ kind: 'captures' }); }}>{t('seeAll')}</button></div>{state.captures.length ? <div className="desktop-latest-images">{[...state.captures].sort((a, b) => b.createdAt - a.createdAt).slice(0, 3).map(item => <div key={item.id}><CaptureImage project={null} item={item} language={language} preview /><button className="desktop-preview-target" type="button" aria-label={t('openItem').replace('{title}', item.title)} onClick={() => { void onPage({ kind: 'item', project: null, id: item.id }); }} /></div>)}</div> : <small>{t('noCaptures')}</small>}</section><section className="desktop-project-list"><h2>{t('projects')}</h2>{state.projects.map(project => <button className="desktop-project-row" type="button" key={project.id} onClick={() => { void onPage({ kind: 'project', project: project.id }); }}><span className="desktop-mark"><Folder aria-hidden="true" /></span><span>{project.name}</span><small>{itemCount(projectSize(project), language)}</small></button>)}</section><button className="desktop-action desktop-home-new" type="button" onClick={() => { void onPage({ kind: 'new-project' }); }}><Plus aria-hidden="true" />{t('newProject')}</button></>}</>;
 }
 
+// A project another member shared: read only, items open to read, with Open page and Ask Lyra and nothing that changes it.
+function SharedBody({ page, props }: { page: Extract<DesktopPanelPage, { kind: 'shared' }>; props: DesktopProps }) {
+  const { state, language, onPage, run } = props, t = (key: CopyKey) => text(key, language);
+  const [content, setContent] = useState<SharedProjectContent | null>(null), [error, setError] = useState(''), [attempt, setAttempt] = useState(0), [lyraError, setLyraError] = useState('');
+  useEffect(() => {
+    let current = true; setError('');
+    void window.horizon.command({ type: 'space-open-shared', space: page.space, dataset: page.dataset }).then(next => { if (current) setContent(next); }, reason => { if (current) setError(desktopError(reason, language)); });
+    return () => { current = false; };
+  }, [page.space, page.dataset, attempt, language]);
+  if (error && !content) return <Feedback language={language} error={error} onRetry={() => setAttempt(value => value + 1)} />;
+  if (!content) return <Loading language={language} />;
+  const by = content.sharedBy.displayName ?? t('spaceMember'), item = page.item ? content.items.find(entry => entry.id === page.item) : null;
+  if (page.item && !item) return <Feedback language={language} error={t('DESKTOP_ITEM_NOT_FOUND')} onRetry={() => { void onPage({ kind: 'shared', space: page.space, dataset: page.dataset }); }} />;
+  if (item) {
+    const askLyra = async () => { try { setLyraError(''); await run({ type: 'lyra-ask', task: 'item', question: t('lyraItemQuestion'), tabs: [], project: null, item: item.id }); } catch (reason) { setLyraError(desktopError(reason, language)); } };
+    return <article className="desktop-detail" aria-label={item.title || t('newNote')}>
+      <div className="desktop-title-block"><button className="desktop-breadcrumb" type="button" onClick={() => { void onPage({ kind: 'shared', space: page.space, dataset: page.dataset }); }}>{content.title}</button><h1>{item.title || t('newNote')}</h1></div>
+      {item.source && <div className="desktop-site"><ItemMark item={item} /><small>{itemSite(item.source.url)}</small></div>}
+      {item.image ? <CaptureImage project={null} item={item} language={language} /> : item.kind === 'link' ? <PagePreview item={item} /> : <p className="desktop-kept-text">{item.text}</p>}
+      {item.note && <div className="desktop-field"><span className="share-label">{t('captureNote')}</span><p className="desktop-kept-text">{item.note}</p></div>}
+      <div className="desktop-item-actions">{item.source && <button className="desktop-action primary" type="button" onClick={() => { void run({ type: 'new-tab', input: item.source!.url }); }}><ExternalLink aria-hidden="true" />{t('openPage')}</button>}
+        {!state.privateWindow && <button className="desktop-action primary" type="button" onClick={() => { void askLyra(); }}><Sparkles aria-hidden="true" />{t(item.image ? 'lyraSavedText' : 'lyraAsk')}</button>}</div>
+      {lyraError && <Feedback language={language} error={lyraError} onRetry={() => { void askLyra(); }} />}
+    </article>;
+  }
+  return <>
+    <div className="desktop-title-block"><small>{t('sharedByIn').replace('{name}', by).replace('{space}', content.spaceName)}</small><h1>{content.title}</h1></div>
+    <small className="desktop-shared-note">{t('sharedReadOnly').replace('{name}', by)}</small>
+    <div className="desktop-items">{content.items.length ? [...content.items].reverse().map(entry => <button className="desktop-item-row" type="button" key={entry.id} onClick={() => { void onPage({ kind: 'shared', space: page.space, dataset: page.dataset, item: entry.id }); }}><ItemMark item={entry} /><span><strong>{entry.title || t('newNote')}</strong><small>{entry.kind === 'note' ? entry.text || desktopItemLabel(entry, language) : entry.kind === 'link' ? itemSite(entry.source?.url ?? '') : t('savedDate').replace('{date}', relativeDesktopDate(entry.createdAt, language))}</small></span></button>) : <p className="desktop-empty-hint">{t('emptyFolder')}</p>}</div>
+  </>;
+}
+
 export function DesktopPanel({ props, onClose, onTab, onLyra }: { props: DesktopProps; onClose: () => void; onTab: () => void; onLyra: () => void }) {
   const { state, language, onPage } = props, page = state.desktopPanel.page, t = (key: CopyKey) => text(key, language);
   const titleId = useId(), region = useRef<HTMLElement>(null), lastSelected = useRef<string | null>(null);
@@ -165,6 +209,7 @@ export function DesktopPanel({ props, onClose, onTab, onLyra }: { props: Desktop
   const destination = project ?? state.projectInUse;
   let content: ReactNode;
   if (page.kind === 'home') content = <Home props={props} />;
+  else if (page.kind === 'shared') content = <SharedBody key={`${page.space}:${page.dataset}`} page={page} props={props} />;
   else if (page.kind === 'new-project') content = <><h1>{t('newProject')}</h1><ProjectNameForm state={state} language={language} onSuccess={project => { void onPage({ kind: 'project', project: project.id }); }} /></>;
   else if (state.desktopLocked) content = null;
   else if (data.error && !data.content && !data.captures) content = <Feedback language={language} error={data.error} onRetry={data.retry} />;
@@ -173,7 +218,7 @@ export function DesktopPanel({ props, onClose, onTab, onLyra }: { props: Desktop
   else if (page.kind === 'item' && item) content = <ItemDetail key={`${state.activeProfileId}:${page.project ?? 'captures'}:${item.id}`} project={data.content} item={item} props={props} />;
   else if (!data.loading && page.kind === 'item' && (data.content || data.captures)) content = <Feedback language={language} error={t('DESKTOP_ITEM_NOT_FOUND')} onRetry={data.retry} />;
   else content = <Loading language={language} />;
-  return <aside ref={region} className="desktop-panel" tabIndex={-1} aria-labelledby={titleId} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); } }}><header className="desktop-panel-header"><h2 className="visually-hidden" id={titleId}>{t('desktop')}</h2><SidePanelFaces face="desktop" language={language} onDesktop={() => { void onPage({ kind: 'home' }); }} onLyra={onLyra} /><button className="icon-button" type="button" aria-label={t('openInTab')} title={t('openInTab')} onClick={onTab}><ExternalLink aria-hidden="true" /></button><button className="icon-button" type="button" aria-label={t('closePanel')} title={t('closePanel')} onClick={onClose}><X aria-hidden="true" /></button></header><hr />{page.kind !== 'project' && destination && state.projects.some(project => project.id === destination) ? <DesktopDrop props={props} project={destination} className="desktop-panel-body" transientName={state.projects.find(project => project.id === destination)!.name} onKept={() => { void onPage({ kind: 'project', project: destination }); }}><StorageState props={props} />{data.error && (data.content || data.captures) && <Feedback language={language} error={data.error} onRetry={data.retry} />}{content}</DesktopDrop> : <div className="desktop-panel-body"><StorageState props={props} />{data.error && (data.content || data.captures) && <Feedback language={language} error={data.error} onRetry={data.retry} />}{content}</div>}</aside>;
+  return <aside ref={region} className="desktop-panel" tabIndex={-1} aria-labelledby={titleId} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); } }}><header className="desktop-panel-header"><h2 className="visually-hidden" id={titleId}>{t('desktop')}</h2><SidePanelFaces face="desktop" language={language} onDesktop={() => { void onPage({ kind: 'home' }); }} onLyra={onLyra} /><button className="icon-button" type="button" aria-label={t('openInTab')} title={t('openInTab')} onClick={onTab}><ExternalLink aria-hidden="true" /></button><button className="icon-button" type="button" aria-label={t('closePanel')} title={t('closePanel')} onClick={onClose}><X aria-hidden="true" /></button></header><hr />{page.kind !== 'project' && page.kind !== 'shared' && destination && state.projects.some(project => project.id === destination) ? <DesktopDrop props={props} project={destination} className="desktop-panel-body" transientName={state.projects.find(project => project.id === destination)!.name} onKept={() => { void onPage({ kind: 'project', project: destination }); }}><StorageState props={props} />{data.error && (data.content || data.captures) && <Feedback language={language} error={data.error} onRetry={data.retry} />}{content}</DesktopDrop> : <div className="desktop-panel-body"><StorageState props={props} />{data.error && (data.content || data.captures) && <Feedback language={language} error={data.error} onRetry={data.retry} />}{content}</div>}</aside>;
 }
 export function DesktopTab({ id, selected, props, onOpen }: { id: string; selected: string | null; props: DesktopProps; onOpen: (id: string) => void }) {
   const { state, language, onPage } = props, t = (key: CopyKey) => text(key, language), data = useDesktopContent(id === 'captures' ? null : id, props);

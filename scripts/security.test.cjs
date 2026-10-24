@@ -941,7 +941,7 @@ test('Hub tiles, dock and menus support keyboard opening, pending saves, retry a
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), sent = [], dismissed = [], announced = [], events = new Map();
   let page = 'home', complete, reject, focused = 0;
   const document = { addEventListener: (name, callback) => events.set(name, callback), removeEventListener: name => events.delete(name), activeElement: null };
-  const { Hub } = interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: (_reason, language) => copy.text('SETTINGS_SAVE_FAILED', language) } }, {
+  const { Hub } = interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: (_reason, language) => copy.text('SETTINGS_SAVE_FAILED', language) } }, {
     document, window: { horizon: { command: command => { sent.push(command); return new Promise((resolve, fail) => { complete = resolve; reject = fail; }); } } },
   });
   const state = { quickAccess: [], showCapture: true, tabs: [] }, opener = { current: { contains: () => false } }, focus = { focus: () => focused++ };
@@ -991,7 +991,7 @@ test('installed theme radios save explicit choices, follow system changes and se
   let complete, changed;
   const system = { matches: true, addEventListener(_name, callback) { changed = callback; }, removeEventListener() {} };
   const state = { theme: 'system', contrast: 'standard', quickAccess: [], showCapture: true };
-  const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check' }, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: () => 'Failed' } }, {
+  const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check' }, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: () => 'Failed' } }, {
     matchMedia: query => query === '(forced-colors: active)' ? { matches: false, addEventListener() {}, removeEventListener() {} } : system, window: { horizon: { command: command => { commands.push(command); return new Promise(resolve => { complete = () => { state[command.type] = command.value; resolve(); }; }); } } },
   });
   // A Hub page supplies the radio component's props without needing a browser window.
@@ -1021,7 +1021,7 @@ test('Hub offers Fjord, Dune, Graphite and Moss, serializes Get and retries remo
     const state = { theme: 'daylight', contrast: 'standard', installedThemes: [], quickAccess: [] };
     const react = Object.fromEntries(Object.keys(hubHooks.react).map(key => [key, (...args) => hooks.react[key](...args)]));
     const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check', Trash2: 'Trash2' }, './copy': copy,
-      './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Settings': { settingsError: () => 'Failed' } }, {
+      './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: () => 'Failed' } }, {
       matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
       window: { horizon: { command: async command => {
         commands.push(command);
@@ -5075,7 +5075,7 @@ function desktopInterface(react = {}, globals = {}) {
   return interfaceModule('src/Desktop.tsx', { react, 'react-dom': { createPortal: node => node }, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' }, './shared/capture': require('../dist/src/shared/capture.js') }, globals);
 }
 function desktopViewInterface(react, desktop, globals = {}) {
-  return interfaceModule('src/DesktopView.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': desktop, './DesktopDrop': { DesktopDrop: 'drop' }, './SidePanelFaces': { SidePanelFaces: 'faces' }, './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' } }, globals);
+  return interfaceModule('src/DesktopView.tsx', { react, 'lucide-react': notebookTestIcons, './copy': interfaceModule('src/copy.ts'), './Desktop': desktop, './DesktopDrop': { DesktopDrop: 'drop' }, './SidePanelFaces': { SidePanelFaces: 'faces' }, './Menu': { Menu: 'menu' }, './PopupAnchor': { PopupAnchor: 'anchor' }, './ShareProject': { ShareProjectDialog: 'share-project' } }, globals);
 }
 
 test('browser menu keeps the drawn order, shortcuts and working zoom controls', () => {
@@ -7462,16 +7462,17 @@ async function accountFixture(t, options = {}) {
   let tokens = accountTokens(), me = { email: 'person@example.test', twoFactorEnabled: false }, handler;
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+    const bytes = Buffer.concat(chunks), body = chunks.length ? request.headers['content-type']?.startsWith('application/octet-stream') ? bytes : JSON.parse(bytes.toString('utf8')) : undefined;
     const call = { path: request.url, method: request.method, headers: request.headers, body }; requests.push(call);
     const answer = handler?.(call) ?? (request.url === '/v1/oauth/token' ? { status: 200, body: tokens } : request.url === '/v1/me' ? { status: 200, body: { ...me, devices: [{ id: tokens.deviceId, userId: 'account-fixture', appId: 'horizon' }] } } : request.url === '/v1/keys' ? { status: 200, body: { keys: [] } } : { status: 200, body: { success: true } });
-    response.writeHead(answer.status, { 'content-type': 'application/json', ...answer.headers }); response.end(JSON.stringify(answer.body));
+    const binary = Buffer.isBuffer(answer.body);
+    response.writeHead(answer.status, { 'content-type': binary ? 'application/octet-stream' : 'application/json', ...(binary ? { 'content-length': answer.body.length, 'x-content-sha256': require('node:crypto').createHash('sha256').update(answer.body).digest('hex') } : {}), ...answer.headers }); response.end(binary ? answer.body : JSON.stringify(answer.body));
   });
   await new Promise(done => server.listen(0, '127.0.0.1', done));
   t.after(() => new Promise(done => { server.close(done); server.closeAllConnections(); }));
   const origin = `http://127.0.0.1:${server.address().port}`, originalFetch = globalThis.fetch;
   const host = {
-    directory: join(directory, 'profile'), userData: directory, cipher: protection, isPackaged: false, language: () => options.language ?? 'en',
+    directory: join(directory, 'profile'), userData: directory, cipher: protection, isPackaged: false, language: () => options.language ?? 'en', desktop: options.desktop,
     keyStore: options.keyStore ?? require('../dist/electron/cosmic-keys.js').createCosmicKeyStore({ root: directory, origin, platform: 'linux' }),
     changed: () => states.push(account.state()), openExternal: async url => { opened.push(url); }, env: { HORIZON_QUANTUM_API: origin, HORIZON_QUANTUM_SITE: origin },
     fetch: async (url, init) => {
@@ -7781,7 +7782,7 @@ test('Cosmic sealed profiles match independent HKDF and AES-GCM and bind their S
   for (const wrong of ['space-profile:space-b:1', 'space-profile:space-a:2']) await assert.rejects(crypto.openSealed(derived, envelope, wrong), /ACCOUNT_INVALID_RESPONSE/);
   const own = await crypto.seal(derived, profile, aad); assert.ok(Buffer.from(await crypto.openSealed(derived, own, aad)).equals(profile));
   const fingerprint = await crypto.fingerprint(Uint8Array.from({ length: 32 }, (_, index) => index));
-  assert.match(fingerprint, /^[A-Z2-7]{4}(?:-[A-Z2-7]{4}){4}$/); assert.equal(fingerprint, await crypto.fingerprint(Uint8Array.from({ length: 32 }, (_, index) => index)));
+  assert.match(fingerprint, /^[A-Z2-7]{4}(?:-[A-Z2-7]{4}){3}$/); assert.equal(fingerprint, 'MMG4-2KLG-YQZW-NEIS'); assert.equal(fingerprint, await crypto.fingerprint(Uint8Array.from({ length: 32 }, (_, index) => index)));
 });
 
 function cosmicStoreFixture(t, overrides = {}) {
@@ -7846,7 +7847,7 @@ test('Cosmic DPAPI helper compiles with the Windows Framework compiler when avai
   assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr); assert.equal(existsSync(output), true);
 });
 
-async function accountSpacesFixture(t) {
+async function accountSpacesFixture(t, options = {}) {
   const crypto = require('../dist/electron/cosmic-crypto.js'), base = await independentCosmicFixture(), pair = await crypto.createAccountKeyPair(base.key, 'account-fixture');
   const spaceKey = new Uint8Array(32).fill(63), keys = [{ recipient: 'phrase', ...base.phraseEnvelope }, { recipient: 'public', ...pair.envelope }];
   const profile = await independentCosmicSeal(spaceKey, 'cosmic/space/profile', Buffer.from(JSON.stringify({ name: 'Shared team', code: 'ST', colour: '#abc123', icon: 'star' })), 'space-profile:space-a:1');
@@ -7860,8 +7861,8 @@ async function accountSpacesFixture(t) {
     { id: 'space-c', kind: 'shared', keyPending: true, role: 'member', members: [member] },
     { id: 'space-d', kind: 'shared', algorithm: profile.algorithm, sealedProfile: profile.wrapped, role: 'member', members: [member] },
   ];
-  const fixture = await accountFixture(t, { keyStore: { kind: 'session', async get() { return base.key.slice(); }, async set() { assert.fail('An existing key must not be replaced'); } } });
-  fixture.handle(call => {
+  const fixture = await accountFixture(t, { ...options, keyStore: { kind: 'session', async get() { return base.key.slice(); }, async set() { assert.fail('An existing key must not be replaced'); } } });
+  const spacesHandler = call => {
     const url = new URL(call.path, fixture.origin);
     if (url.pathname === '/v1/keys') return { status: 200, body: { keys } };
     if (url.pathname === '/v1/spaces') { assert.equal(url.searchParams.get('limit'), '200'); return { status: 200, body: { spaces: url.searchParams.has('after') ? spaces.slice(1) : spaces.slice(0, 1), after: url.searchParams.has('after') ? null : 'space-a' } }; }
@@ -7871,11 +7872,12 @@ async function accountSpacesFixture(t) {
     if (url.pathname === '/v1/spaces/space-d/key') return { status: 200, body: keyA };
     if (url.pathname.endsWith('/datasets')) {
       assert.equal(url.searchParams.get('app'), 'horizon'); assert.equal(url.searchParams.get('limit'), '200');
-      if (url.pathname.includes('space-a')) return { status: 200, body: { datasets: [{ id: url.searchParams.has('after') ? 'dataset-b' : 'dataset-a', appId: 'horizon', sharedBy: { accountId: 'member-a', displayName: null }, updatedAt: '2026-10-22T00:00:00.000Z', size: 45 }], after: url.searchParams.has('after') ? null : 'dataset-a' } };
+      if (url.pathname.includes('space-a')) return { status: 200, body: { datasets: [{ id: url.searchParams.has('after') ? 'dataset-b' : 'dataset-a', appId: 'horizon', sharedBy: { accountId: 'member-a', displayName: null }, updatedAt: Date.parse('2026-10-22T00:00:00.000Z'), size: 45 }], after: url.searchParams.has('after') ? null : 'dataset-a' } };
       return { status: 200, body: { datasets: [], after: null } };
     }
-  });
-  return { ...fixture, base, pair, keys, changeMemberKey: async () => { const next = await crypto.createAccountKeyPair(base.key, 'member-a'); memberKey = Buffer.from(next.envelope.wrapped, 'base64').subarray(0, 33).toString('base64'); } };
+  };
+  fixture.handle(spacesHandler);
+  return { ...fixture, base, pair, keys, spaceKey, spacesHandler, changeMemberKey: async () => { const next = await crypto.createAccountKeyPair(base.key, 'member-a'); memberKey = Buffer.from(next.envelope.wrapped, 'base64').subarray(0, 33).toString('base64'); } };
 }
 
 test('account reads every Space and Horizon dataset page while isolating pending keys and invalid profiles', async t => {
@@ -7886,7 +7888,7 @@ test('account reads every Space and Horizon dataset page while isolating pending
   assert.equal(state.spaces[2].pending, true); assert.equal(state.spaces[3].pending, true); assert.equal(fixture.requests.some(call => call.path === '/v1/spaces/space-c/key'), false);
   assert.equal(fixture.requests.some(call => /^\/v1\/spaces\/space-[cd]\/datasets/.test(call.path)), false);
   assert.deepEqual(state.shared, ['dataset-a', 'dataset-b'].map(datasetId => ({ spaceId: 'space-a', datasetId, sharedBy: { accountId: 'member-a', displayName: null }, updatedAt: '2026-10-22T00:00:00.000Z', size: 45, title: null })));
-  assert.equal(fixture.requests.some(call => call.path.includes('objects') || call.method === 'PUT'), false);
+  assert.equal(fixture.requests.some(call => call.method === 'PUT'), false);
   const pin = join(fixture.host.directory, 'spaces-pins.json'); assert.equal(existsSync(pin), true); assert.ok(!readFileSync(pin).includes(Buffer.from(fixture.pair.publicKey).toString('base64')));
   state.spaces[0].members[0].displayName = 'tampered'; state.shared.length = 0;
   assert.equal(fixture.account.state().spaces[0].members[0].displayName, 'Account Name'); assert.equal(fixture.account.state().shared.length, 2);
@@ -7977,4 +7979,514 @@ test('account keeps a Space pending without a page error when a member has no pu
   await fixture.signIn();
   assert.equal(fixture.account.state().spacesError, null); assert.equal(fixture.account.state().spaces[0].pending, true);
   assert.deepEqual(fixture.account.state().shared, []);
+});
+
+function spaceProjectFixture() {
+  const folder = { id: randomUUID(), name: 'Sources', createdAt: 1 }, bytes = capturePNG(24, 18);
+  const note = { id: randomUUID(), kind: 'note', title: 'Public note', text: 'Chosen project text', note: '', source: null, image: null, folder: folder.id, createdAt: 1, updatedAt: 2 };
+  const capture = { id: randomUUID(), kind: 'area', title: 'Saved capture', text: '', note: 'Capture annotation', source: { url: 'https://source.example/', title: 'Source' }, image: { filename: `${randomUUID()}.bin`, width: 24, height: 18, bytes: bytes.length, cut: false }, folder: null, createdAt: 1, updatedAt: 2 };
+  const project = { id: randomUUID(), name: 'Chosen project', createdAt: 1, updatedAt: 2, usedAt: 2, folders: [folder], items: [note, capture] };
+  const other = { ...structuredClone(project), id: randomUUID(), name: 'Private other project', items: [{ ...note, id: randomUUID(), folder: null, text: 'OTHER_PROJECT_SECRET' }], folders: [] };
+  const projects = [project, other], images = [];
+  return { project, other, bytes, images, projects, desktop: {
+    get(id) { const value = projects.find(entry => entry.id === id); if (!value) throw new Error('PROJECT_NOT_FOUND'); return value; },
+    image(id, item) { images.push([id, item]); assert.equal(id, project.id); assert.equal(item, capture.id); return bytes; },
+  } };
+}
+async function sharingAccountFixture(t) {
+  const desktop = spaceProjectFixture(), fixture = await accountSpacesFixture(t, { desktop: desktop.desktop }), objects = new Map();
+  let reply;
+  fixture.handle(call => {
+    const override = reply?.(call); if (override) return override;
+    const url = new URL(call.path, fixture.origin);
+    if (/\/objects\/project\//.test(url.pathname) && call.method === 'PUT') {
+      assert.ok(Buffer.isBuffer(call.body)); assert.equal(Number(call.headers['content-length']), call.body.length);
+      assert.equal(call.headers['x-content-sha256'], require('node:crypto').createHash('sha256').update(call.body).digest('hex'));
+      objects.set(url.pathname, call.body); return { status: 200, body: { success: true } };
+    }
+    return fixture.spacesHandler(call);
+  });
+  await fixture.signIn();
+  return { ...fixture, ...desktop, objects, respond(value) { reply = value; } };
+}
+async function waitForShare(predicate) {
+  for (let attempt = 0; attempt < 10000; attempt++) { if (predicate()) return; await new Promise(setImmediate); }
+  assert.equal(Boolean(predicate()), true);
+}
+
+test('Space manifests bind the Space, dataset and generation, enforce titles and open with another member key', async () => {
+  const { sealProjectManifest, openProjectManifest } = require('../dist/electron/space-sharing.js');
+  const key = new Uint8Array(32).fill(67), dataset = randomUUID(), date = '2026-10-22T00:00:00.000Z';
+  const bytes = await sealProjectManifest(key, 'space-a', dataset, 2, 'Shared project', date), descriptor = JSON.parse(bytes);
+  assert.equal(descriptor.magic, 'Horizon Space Project'); assert.equal(descriptor.manifest.algorithm, 'QNT_AES256GCM_V1');
+  assert.deepEqual(await openProjectManifest(key.slice(), 'space-a', dataset, bytes), { title: 'Shared project', sharedAt: date, keyGeneration: 2 });
+  for (const [space, id, value] of [['space-b', dataset, bytes], ['space-a', randomUUID(), bytes], ['space-a', dataset, Buffer.from(JSON.stringify({ ...descriptor, keyGeneration: 3 }))]]) await assert.rejects(openProjectManifest(key, space, id, value));
+  await assert.rejects(sealProjectManifest(key, 'space-a', dataset, 1, 'x'.repeat(121), date));
+  const crypto = require('../dist/electron/cosmic-crypto.js');
+  const opened = await crypto.openSealed(await crypto.deriveKey(key, 'cosmic/space/space-a/2/horizon/manifest'), descriptor.manifest, `horizon-project-manifest:space-a:${dataset}:2`);
+  assert.deepEqual(JSON.parse(Buffer.from(opened)), { title: 'Shared project', sharedAt: date });
+});
+
+test('Space packages round trip checkpoints and blobs, authenticate identities and reject package and blob caps', () => {
+  const { sealSpacePackage, openSpacePackage } = require('../dist/electron/space-sharing.js'), { SYNC_LIMITS, openSync } = require('../dist/electron/sync-format.js');
+  const key = new Uint8Array(32).fill(68), identity = { spaceId: 'space-a', dataset: randomUUID(), device: randomUUID(), generation: randomUUID(), sequence: 1, id: randomUUID(), kind: 'checkpoint', keyGeneration: 1 };
+  const payload = { selected: 'project only' }, sealed = sealSpacePackage(key, identity, payload);
+  assert.deepEqual(openSpacePackage(key.slice(), identity, sealed), payload);
+  const derived = Buffer.from(require('node:crypto').hkdfSync('sha256', key, Buffer.alloc(0), 'cosmic/space/space-a/1/horizon/project', 32));
+  assert.deepEqual(openSync(derived, identity, sealed.subarray(12)), payload);
+  for (const change of [{ spaceId: 'space-b' }, { dataset: randomUUID() }, { keyGeneration: 2 }, { sequence: 2 }, { id: randomUUID() }]) assert.throws(() => openSpacePackage(key, { ...identity, ...change }, sealed));
+  const blobIdentity = { ...identity, sequence: 0, kind: 'blob' }, blob = Buffer.from('member image bytes');
+  assert.deepEqual(openSpacePackage(key.slice(), blobIdentity, sealSpacePackage(key, blobIdentity, blob)), blob);
+  assert.throws(() => sealSpacePackage(key, blobIdentity, Buffer.alloc(SYNC_LIMITS.blob)), /SYNC_LIMIT/);
+  assert.throws(() => openSpacePackage(key, identity, Buffer.concat([sealed, Buffer.alloc(SYNC_LIMITS.package)])), /SYNC_LIMIT/);
+});
+
+test('account shares only the chosen project with blobs and checkpoint before its manifest and stops sharing on deletion or 404', async t => {
+  const fixture = await sharingAccountFixture(t), { account, project, spaceKey } = fixture, { openSpacePackage, openProjectManifest, validateSpaceCheckpoint } = require('../dist/electron/space-sharing.js');
+  const before = fixture.requests.length; await account.shareProject(project.id, 'space-a');
+  const writes = fixture.requests.slice(before).filter(call => call.method === 'PUT'); assert.equal(writes.length, 4);
+  assert.match(writes[0].path, /^\/v1\/spaces\/space-a\/datasets\/[0-9a-f-]{36}$/);
+  assert.match(writes[1].path, /\/blobs\/[^/]+\.hzs$/); assert.match(writes[2].path, /\/checkpoints\/1-[^/]+\.hzs$/); assert.match(writes[3].path, /\/dataset\.hzs$/);
+  const match = /^\/v1\/spaces\/space-a\/datasets\/([^/]+)\/objects\/project\/([^/]+)\/([^/]+)\/checkpoints\/(\d+)-([^/]+)\.hzs$/.exec(writes[2].path);
+  assert.equal(match[2], new URL(fixture.opened[0]).searchParams.get('computerId'));
+  const identity = { spaceId: 'space-a', dataset: match[1], device: match[2], generation: match[3], sequence: Number(match[4]), id: match[5], kind: 'checkpoint', keyGeneration: 1 };
+  const checkpoint = openSpacePackage(spaceKey.slice(), identity, writes[2].body); validateSpaceCheckpoint(checkpoint, identity);
+  assert.equal(checkpoint.project.name, project.name); assert.deepEqual(checkpoint.project.folders, project.folders); assert.deepEqual(checkpoint.project.items[0], project.items[0]);
+  const image = checkpoint.project.items[1].image; assert.equal(image.bytes, fixture.bytes.length); assert.equal(Object.hasOwn(image, 'filename'), false);
+  assert.deepEqual(openSpacePackage(spaceKey.slice(), { ...identity, sequence: 0, id: image.blob.id, kind: 'blob' }, writes[1].body), fixture.bytes);
+  const manifest = await openProjectManifest(spaceKey.slice(), 'space-a', match[1], writes[3].body); assert.equal(manifest.title, project.name);
+  assert.equal(JSON.stringify(checkpoint).includes('OTHER_PROJECT_SECRET'), false); assert.equal(JSON.stringify(checkpoint).includes('lyra'), false); assert.equal(JSON.stringify(checkpoint).includes('cookies'), false); assert.equal(JSON.stringify(checkpoint).includes('password'), false);
+  assert.deepEqual(fixture.images, [[project.id, project.items[1].id]]);
+  assert.deepEqual(account.projectState(project.id), { sharedTo: { spaceId: 'space-a', spaceName: 'Shared team' }, shareError: null });
+  const path = join(fixture.host.directory, 'spaces-shares.json'); assert.equal(existsSync(path), true); assert.equal(readFileSync(path).includes(Buffer.from(match[1])), false);
+  const stored = require('../dist/electron/vault-storage.js').readVaultFile(path, fixture.protection); assert.equal(stored.accounts['account-fixture'].projects[project.id].datasetId, match[1]);
+  await assert.rejects(account.shareProject(project.id, 'space-b'), /SPACE_SHARE_FAILED/);
+  await account.stopSharing(project.id); assert.equal(fixture.requests.at(-1).method, 'DELETE'); assert.equal(fixture.requests.at(-1).path, writes[0].path);
+  assert.deepEqual(account.projectState(project.id), { sharedTo: null, shareError: null });
+  assert.equal(Object.hasOwn(require('../dist/electron/vault-storage.js').readVaultFile(path, fixture.protection).accounts['account-fixture'].projects, project.id), false);
+  await account.shareProject(project.id, 'space-a'); fixture.respond(call => call.method === 'DELETE' ? { status: 404, body: { error: { code: 'not_found' } } } : undefined);
+  await account.stopSharing(project.id); assert.deepEqual(account.projectState(project.id), { sharedTo: null, shareError: null });
+});
+
+test('account refuses sharing without a ready phrase, with pending or unlisted Spaces and absent projects', async t => {
+  const plain = await accountFixture(t, { desktop: spaceProjectFixture().desktop }); await plain.signIn();
+  await assert.rejects(plain.account.shareProject(randomUUID(), 'space-a'), /SPACE_SHARE_FAILED/);
+  const fixture = await sharingAccountFixture(t), before = fixture.requests.length;
+  for (const [id, space] of [[fixture.project.id, 'space-c'], [fixture.project.id, 'absent-space'], [randomUUID(), 'space-a']]) await assert.rejects(fixture.account.shareProject(id, space));
+  assert.equal(fixture.requests.slice(before).some(call => call.method === 'PUT'), false);
+});
+
+test('Space sharing commands require exact fields, existing projects and listed Spaces and are refused in private windows', t => {
+  const { assertPrivateCommand } = require('../dist/electron/private-commands.js'), fixture = spaceProjectFixture(), spaces = [{ id: 'space-a' }], browser = notebookBrowser(t, authenticatedCipher()), privateWindow = browser.addWindow({ privateWindow: true });
+  for (const command of [{ type: 'space-share-project', project: fixture.project.id, space: 'space-a' }, { type: 'space-stop-sharing', project: fixture.project.id }]) {
+    assert.deepEqual(validateCommand(command, undefined, fixture.projects, [], undefined, spaces), command);
+    for (const field of Object.keys(command)) { const missing = { ...command }; delete missing[field]; assert.throws(() => validateCommand(missing, undefined, fixture.projects, [], undefined, spaces)); }
+    for (const change of [{ extra: true }, { project: randomUUID() }, { project: null }, { token: 'forged' }]) assert.throws(() => validateCommand({ ...command, ...change }, undefined, fixture.projects, [], undefined, spaces));
+    assert.throws(() => assertPrivateCommand(command), /SPACE_PRIVATE/); assert.throws(() => privateWindow.command(command), /SPACE_PRIVATE/);
+  }
+  assert.throws(() => validateCommand({ type: 'space-share-project', project: fixture.project.id, space: 'absent-space' }, undefined, fixture.projects, [], undefined, spaces));
+});
+
+test('account opens the newest shared manifest with its generation, caches titles by updatedAt, retains failed rows and excludes own datasets', async t => {
+  const fixture = await accountSpacesFixture(t), { sealProjectManifest } = require('../dist/electron/space-sharing.js'), crypto = require('../dist/electron/cosmic-crypto.js');
+  const dataset = randomUUID(), bad = randomUUID(), mine = randomUUID(), writer = randomUUID(), oldest = randomUUID(), newest = randomUUID();
+  const key = await crypto.wrap(fixture.pair.publicKey, fixture.spaceKey, 'space-key:space-a:2:member:account-fixture');
+  let updatedAt = '2026-10-22T00:00:00.000Z', manifest = await sealProjectManifest(fixture.spaceKey, 'space-a', dataset, 2, 'Newest shared title', updatedAt);
+  const manifestPath = `project/${writer}/${newest}/dataset.hzs`;
+  fixture.handle(call => {
+    const url = new URL(call.path, fixture.origin);
+    if (url.pathname === '/v1/spaces/space-a/key' && url.searchParams.get('generation') === '2') return { status: 200, body: key };
+    if (url.pathname === '/v1/spaces/space-a/datasets') return { status: 200, body: { datasets: [dataset, bad, mine].map(id => ({ id, appId: 'horizon', sharedBy: { accountId: id === mine ? 'account-fixture' : 'member-a', displayName: null }, updatedAt, size: 500 })), after: null } };
+    if (url.pathname === `/v1/spaces/space-a/datasets/${dataset}/objects`) {
+      assert.equal(url.searchParams.get('prefix'), 'project/');
+      return { status: 200, body: { objects: [{ path: `project/${writer}/${oldest}/dataset.hzs`, createdAt: '2026-10-21T00:00:00.000Z' }, { path: manifestPath, createdAt: '2026-10-22T00:00:00.000Z' }], after: null } };
+    }
+    if (url.pathname === `/v1/spaces/space-a/datasets/${dataset}/objects/${manifestPath}`) return { status: 200, body: manifest };
+    if (url.pathname === `/v1/spaces/space-a/datasets/${bad}/objects`) return { status: 503, body: { error: { code: 'unavailable' } } };
+    if (url.pathname.includes(`/datasets/${mine}/objects`) || url.pathname.includes(oldest)) assert.fail('Only other accounts newest manifests may be read');
+    return fixture.spacesHandler(call);
+  });
+  await fixture.signIn();
+  assert.deepEqual(fixture.account.state().shared.map(row => [row.datasetId, row.title]), [[dataset, 'Newest shared title'], [bad, null]]);
+  const count = fixture.requests.filter(call => call.path.includes('/objects')).length;
+  await fixture.account.retry(); assert.equal(fixture.requests.filter(call => call.path.includes('/objects')).length, count);
+  updatedAt = '2026-10-22T00:01:00.000Z'; manifest = await sealProjectManifest(fixture.spaceKey, 'space-a', dataset, 2, 'Renamed shared title', updatedAt);
+  await fixture.account.retry(); assert.equal(fixture.account.state().shared[0].title, 'Renamed shared title'); assert.ok(fixture.requests.filter(call => call.path.includes('/objects')).length > count);
+});
+
+test('account debounces shared Desktop changes for 30 seconds and sends only a new checkpoint for existing blobs', async t => {
+  const fixture = await sharingAccountFixture(t), { account, project } = fixture; await account.shareProject(project.id, 'space-a');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() }); t.after(() => t.mock.timers.reset());
+  const before = fixture.requests.length, statesBefore = fixture.states.length;
+  project.items[0].text = 'First local edit'; project.updatedAt++; account.desktopChanged();
+  t.mock.timers.tick(29999); await new Promise(setImmediate); assert.equal(fixture.requests.length, before);
+  project.items[0].text = 'Second local edit'; project.updatedAt++; account.desktopChanged();
+  t.mock.timers.tick(10000); fixture.other.updatedAt++; account.desktopChanged();
+  t.mock.timers.tick(19999); await new Promise(setImmediate); assert.equal(fixture.requests.length, before);
+  t.mock.timers.tick(1); await waitForShare(() => fixture.requests.slice(before).some(call => /\/checkpoints\/2-/.test(call.path)));
+  await waitForShare(() => fixture.states.length > statesBefore && account.projectState(project.id).shareError === null);
+  const writes = fixture.requests.slice(before).filter(call => call.method === 'PUT'); assert.equal(writes.length, 1); assert.match(writes[0].path, /\/checkpoints\/2-/);
+  const { openSpacePackage } = require('../dist/electron/space-sharing.js'), parts = writes[0].path.split('/'), name = parts.at(-1);
+  const checkpoint = openSpacePackage(fixture.spaceKey, { spaceId: 'space-a', dataset: parts[5], device: parts[8], generation: parts[9], keyGeneration: 1, sequence: 2, id: name.slice(2, -4), kind: 'checkpoint' }, writes[0].body);
+  assert.equal(checkpoint.project.items[0].text, 'Second local edit'); assert.equal(fixture.images.length, 1);
+});
+
+test('account shows a per-project 429 error, preserves local edits and waits for Retry-After before resuming sharing', async t => {
+  const fixture = await sharingAccountFixture(t), { account, project } = fixture; await account.shareProject(project.id, 'space-a');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() }); t.after(() => t.mock.timers.reset());
+  let rejected = false;
+  fixture.respond(call => {
+    if (call.method === 'PUT' && call.path.includes('/checkpoints/') && !rejected) { rejected = true; return { status: 429, headers: { 'retry-after': '120' }, body: { error: { code: 'rate_limited' } } }; }
+  });
+  project.items[0].text = 'Unsynced local edit'; project.updatedAt++; account.desktopChanged(); t.mock.timers.tick(30000);
+  await waitForShare(() => account.projectState(project.id).shareError === 'SPACE_RATE_LIMITED');
+  assert.equal(project.items[0].text, 'Unsynced local edit'); const count = fixture.requests.length;
+  t.mock.timers.tick(119999); await new Promise(setImmediate); assert.equal(fixture.requests.length, count);
+  t.mock.timers.tick(1); await waitForShare(() => fixture.requests.length > count && account.projectState(project.id).shareError === null);
+  assert.equal(fixture.requests.slice(count).filter(call => call.method === 'PUT' && call.path.includes('/checkpoints/')).length, 1);
+});
+
+test('account permits at most 30 dataset PUT attempts per hour even when all share attempts have the same timestamp', async t => {
+  const fixture = await sharingAccountFixture(t), { account, project } = fixture;
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() + 7200000 }); t.after(() => t.mock.timers.reset());
+  const before = fixture.requests.length;
+  for (let index = 0; index < 31; index++) {
+    const next = { ...structuredClone(project), id: randomUUID(), name: `Project ${index}`, folders: [], items: [] }; fixture.projects.push(next);
+    if (index < 30) { try { await account.shareProject(next.id, 'space-a'); } catch (error) { assert.fail(`Dataset attempt ${index + 1}: ${error.message}; last request ${fixture.requests.at(-1)?.method} ${fixture.requests.at(-1)?.path}`); } }
+    else { await assert.rejects(account.shareProject(next.id, 'space-a'), /SPACE_RATE_LIMITED/); assert.equal(account.projectState(next.id).shareError, 'SPACE_RATE_LIMITED'); }
+  }
+  assert.equal(fixture.requests.slice(before).filter(call => call.method === 'PUT' && /^\/v1\/spaces\/space-a\/datasets\/[^/]+$/.test(call.path)).length, 30);
+});
+
+test('Space sharing discards queued commands after account switches and renewed sessions and cannot share one project twice across accounts', async t => {
+  const { createSpaceSharing } = require('../dist/electron/space-sharing.js');
+  for (const change of ['account', 'session']) {
+    const fixture = spaceProjectFixture(), directory = temporaryDirectory(t, 'space-queue'), requests = [], original = { accountId: randomUUID(), computerId: randomUUID(), session: 1, spaces: [{ id: 'space-a', name: 'Team', pending: false }] };
+    let context = original, release, entered;
+    const waiting = new Promise(done => { release = done; }), started = new Promise(done => { entered = done; });
+    const manager = createSpaceSharing({ directory, cipher: authenticatedCipher(), context: () => context, changed() {}, project: fixture.desktop.get, image: fixture.desktop.image,
+      async key() { entered(); await waiting; return { generation: 1, key: new Uint8Array(32).fill(72) }; },
+      async request(route, method) { requests.push([method, route]); return { status: 200, ok: true, value: { success: true } }; } });
+    t.after(() => manager.close());
+    const first = assert.rejects(manager.shareProject(fixture.project.id, 'space-a'), /SPACE_SHARE_FAILED/); await started;
+    const queued = assert.rejects(manager.shareProject(fixture.other.id, 'space-a'), /SPACE_SHARE_FAILED/), stopped = assert.rejects(manager.stopSharing(fixture.project.id), /SPACE_SHARE_FAILED/);
+    context = { ...original, ...(change === 'account' ? { accountId: randomUUID() } : { session: 2 }) }; release();
+    await Promise.all([first, queued, stopped]); assert.deepEqual(requests, []);
+    context = original; await manager.shareProject(fixture.project.id, 'space-a'); const before = requests.length;
+    context = { ...original, accountId: randomUUID() }; assert.deepEqual(manager.projectState(fixture.project.id), { sharedTo: null, shareError: null });
+    await assert.rejects(manager.shareProject(fixture.project.id, 'space-a'), /SPACE_SHARE_FAILED/); assert.equal(requests.length, before);
+    context = original; await manager.stopSharing(fixture.project.id); assert.equal(requests.at(-1)[0], 'DELETE');
+  }
+});
+
+test('Space sharing resumes its sealed record after restart and uses new create-only object paths after renaming and key rotation', async t => {
+  const { createSpaceSharing, openProjectManifest } = require('../dist/electron/space-sharing.js'), fixture = spaceProjectFixture(), directory = temporaryDirectory(t, 'space-resume'), cipher = authenticatedCipher();
+  const context = { accountId: randomUUID(), computerId: randomUUID(), spaces: [{ id: 'space-a', name: 'Team', pending: false }] }, objects = new Map(), requests = [], key = new Uint8Array(32).fill(73);
+  let generation = 1, changes = 0;
+  const options = { directory, cipher, context: () => context, changed() { changes++; }, project: fixture.desktop.get, image: fixture.desktop.image,
+    async key() { return { generation, key: key.slice() }; },
+    async request(route, method, body) {
+      requests.push([method, route]);
+      if (body) { assert.equal(objects.has(route), false, 'Shared objects must use unused paths'); objects.set(route, body); }
+      return { status: 200, ok: true, value: { success: true } };
+    } };
+  let manager = createSpaceSharing(options); t.after(() => manager.close());
+  try { await manager.shareProject(fixture.project.id, 'space-a'); } catch (error) { assert.fail(`Initial share: ${error.message}; requests ${JSON.stringify(requests)}`); }
+  const firstManifest = [...objects.keys()].find(path => path.endsWith('/dataset.hzs')), dataset = firstManifest.split('/')[5], first = await openProjectManifest(key, 'space-a', dataset, objects.get(firstManifest));
+  await manager.close(); fixture.project.items[0].text = 'Edited while the app was closed'; fixture.project.updatedAt++;
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() }); t.after(() => t.mock.timers.reset());
+  const before = changes; manager = createSpaceSharing(options); await new Promise(setImmediate); t.mock.timers.tick(30000); await waitForShare(() => changes > before);
+  assert.equal([...objects.keys()].filter(path => path.endsWith('/dataset.hzs')).length, 1);
+  assert.ok([...objects.keys()].some(path => /\/checkpoints\/2-/.test(path)));
+  generation = 2; fixture.project.name = 'Renamed project'; fixture.project.updatedAt++; const renamed = changes; manager.changed(); t.mock.timers.tick(30000); await waitForShare(() => changes > renamed);
+  const manifests = [...objects.keys()].filter(path => path.endsWith('/dataset.hzs')); assert.equal(manifests.length, 2); assert.notEqual(manifests[0].split('/')[9], manifests[1].split('/')[9]);
+  assert.deepEqual(await openProjectManifest(key, 'space-a', dataset, objects.get(manifests[1])), { title: 'Renamed project', sharedAt: first.sharedAt, keyGeneration: 2 });
+  assert.equal(requests.filter(([method, route]) => method === 'PUT' && !route.includes('/objects/')).length, 1);
+  assert.equal([...objects.keys()].filter(path => path.includes('/blobs/')).length, 2);
+});
+
+async function sharedReaderFixture(t) {
+  const { createSpaceSharing, openSpacePackage, sealSpacePackage, sealProjectManifest } = require('../dist/electron/space-sharing.js');
+  const { createDesktop } = require('../dist/electron/desktop.js'), source = spaceProjectFixture(), cipher = authenticatedCipher();
+  const desktopPath = join(temporaryDirectory(t, 'shared-reader-desktop'), 'notebooks.json'), desktop = createDesktop(desktopPath, cipher, () => {});
+  t.after(() => desktop.dispose());
+  const local = desktop.create('Local project'); desktop.addNote(local.id, 'Local note', 'LOCAL_DESKTOP_SECRET'); desktop.flush();
+  const fixture = await accountSpacesFixture(t, { desktop }), objects = new Map(), keys = new Map([[1, fixture.spaceKey.slice()]]);
+  const wrongSpaceKey = await require('../dist/electron/cosmic-crypto.js').wrap(fixture.pair.publicKey, fixture.spaceKey, 'space-key:space-b:1:member:account-fixture');
+  let tick = Date.parse('2026-10-22T00:00:00Z'), dataset, listed = true, sharedBy = 'member-a', listedSpace = 'space-a', reply;
+  const writerContext = { accountId: 'member-a', computerId: randomUUID(), session: 1, spaces: [{ id: 'space-a', name: 'Shared team', pending: false }] };
+  fixture.handle(call => {
+    const override = reply?.(call); if (override) return override;
+    const url = new URL(call.path, fixture.origin);
+    if (url.pathname === '/v1/spaces/space-a/key' && url.searchParams.get('generation') === '1') return fixture.spacesHandler({ ...call, path: url.pathname });
+    if (url.pathname === '/v1/spaces/space-b/key' && url.searchParams.get('generation') === '1') return { status: 200, body: wrongSpaceKey };
+    if (url.pathname.endsWith('/datasets') && call.method === 'GET') return { status: 200, body: { datasets: listed && url.pathname === `/v1/spaces/${listedSpace}/datasets` ? [{ id: dataset, sharedBy: { accountId: sharedBy, displayName: 'Alex' }, updatedAt: new Date(tick).toISOString(), size: 1000 }] : [], after: null } };
+    if (/\/datasets\/[^/]+$/.test(url.pathname) && call.method === 'PUT') { dataset = url.pathname.split('/').at(-1); return { status: 200, body: { success: true } }; }
+    if (url.pathname.includes('/objects')) {
+      if (call.method === 'PUT') { objects.set(url.pathname, { body: call.body, createdAt: ++tick }); return { status: 200, body: { success: true } }; }
+      if (url.pathname.endsWith('/objects')) {
+        const prefix = `${url.pathname}/`, rows = [...objects].filter(([path]) => path.startsWith(prefix)).map(([path, value]) => ({ path: path.slice(prefix.length), createdAt: value.createdAt, size: value.body.length }));
+        return { status: 200, body: { objects: rows, after: null } };
+      }
+      const entry = objects.get(url.pathname); return entry ? { status: 200, body: entry.body } : { status: 404, body: { error: { code: 'not_found' } } };
+    }
+    return fixture.spacesHandler(call);
+  });
+  const writer = createSpaceSharing({ directory: temporaryDirectory(t, 'shared-writer'), cipher, changed() {}, context: () => writerContext,
+    project: source.desktop.get, image: source.desktop.image, async key() { return { generation: 1, key: fixture.spaceKey.slice() }; },
+    async request(route, method, body) {
+      const response = await fetch(`${fixture.origin}${route}`, { method, headers: body ? { 'content-type': 'application/octet-stream' } : {}, ...(body ? { body } : {}) });
+      return { status: response.status, ok: response.ok, value: await response.json() };
+    } });
+  t.after(() => writer.close()); await writer.shareProject(source.project.id, 'space-a');
+  const checkpointPath = [...objects.keys()].find(path => path.includes('/checkpoints/')), parts = checkpointPath.split('/');
+  const identity = { spaceId: 'space-a', dataset, device: parts[8], generation: parts[9], keyGeneration: 1, sequence: 1, id: parts.at(-1).slice(2, -4), kind: 'checkpoint' };
+  const snapshot = openSpacePackage(fixture.spaceKey.slice(), identity, objects.get(checkpointPath).body);
+  await fixture.signIn(); const before = readFileSync(desktopPath);
+  const publish = async ({ generation = identity.generation, keyGeneration = 1, sequence = 2, mutate = () => {}, manifest = false, aad = {} } = {}) => {
+    const current = { ...identity, generation, keyGeneration, sequence, id: randomUUID(), ...aad }, value = structuredClone(snapshot);
+    value.sequence = sequence; value.keyGeneration = keyGeneration; mutate(value);
+    const base = `/v1/spaces/space-a/datasets/${dataset}/objects/project/${identity.device}/${generation}`;
+    const path = `${base}/checkpoints/${sequence}-${current.id}.hzs`;
+    objects.set(path, { body: sealSpacePackage(keys.get(keyGeneration).slice(), current, value), createdAt: ++tick });
+    if (manifest) objects.set(`${base}/dataset.hzs`, { body: await sealProjectManifest(keys.get(keyGeneration).slice(), 'space-a', dataset, keyGeneration, value.project.name, new Date(tick).toISOString()), createdAt: ++tick });
+    return { path, identity: current, value };
+  };
+  return { ...fixture, source, desktop, desktopPath, before, objects, identity, snapshot, keys, publish, dataset,
+    open: () => fixture.account.openSharedProject(listedSpace, dataset),
+    respond(value) { reply = value; }, listing(value) { if ('listed' in value) listed = value.listed; if ('sharedBy' in value) sharedBy = value.sharedBy; if ('space' in value) listedSpace = value.space; },
+    async generation(number) {
+      const key = new Uint8Array(32).fill(80 + number); keys.set(number, key);
+      const envelope = await require('../dist/electron/cosmic-crypto.js').wrap(fixture.pair.publicKey, key, `space-key:space-a:${number}:member:account-fixture`);
+      reply = call => call.path === `/v1/spaces/space-a/key?generation=${number}` ? { status: 200, body: envelope } : undefined;
+    },
+  };
+}
+
+test('Shared project reader opens the step 3 writer snapshot with another member key without changing Desktop files', async t => {
+  const fixture = await sharedReaderFixture(t), content = await fixture.open();
+  assert.deepEqual(Object.keys(content).sort(), ['datasetId', 'folders', 'items', 'readOnly', 'sharedBy', 'spaceId', 'spaceName', 'title', 'updatedAt'].sort());
+  assert.equal(content.spaceId, 'space-a'); assert.equal(content.datasetId, fixture.dataset); assert.equal(content.title, fixture.source.project.name);
+  assert.equal(content.readOnly, true); assert.deepEqual(content.sharedBy, { displayName: 'Alex' }); assert.equal(content.spaceName, 'Shared team');
+  assert.equal(content.updatedAt, fixture.account.state().shared[0].updatedAt);
+  assert.deepEqual(content.folders, fixture.source.project.folders); assert.equal(content.items[0].text, 'Chosen project text');
+  assert.ok(content.items.every(item => item.id !== fixture.source.project.items.find(local => local.title === item.title)?.id));
+  assert.equal(JSON.stringify(content).includes('filename'), false); assert.equal(JSON.stringify(content).includes('LOCAL_DESKTOP_SECRET'), false);
+  assert.equal(fixture.requests.some(call => call.method === 'GET' && call.path.includes('/blobs/')), false);
+  content.items[0].text = 'Renderer mutation'; content.folders[0].name = 'Renderer folder';
+  const reopened = await fixture.open(); assert.equal(reopened.items[0].text, 'Chosen project text'); assert.equal(reopened.folders[0].name, 'Sources');
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before); assert.equal(fixture.desktop.list().length, 1);
+  assert.deepEqual(readdirSync(dirname(fixture.desktopPath)), ['notebooks.json']);
+});
+
+test('Shared project reader chooses the newest writer generation and then its highest checkpoint sequence and refreshes opens', async t => {
+  const fixture = await sharedReaderFixture(t); await fixture.publish({ sequence: 999, mutate: value => { value.project.items[0].text = 'Old generation'; } });
+  await fixture.generation(2); const generation = randomUUID();
+  await fixture.publish({ generation, keyGeneration: 2, sequence: 3, manifest: true, mutate: value => { value.project.items[0].text = 'New generation'; value.project.items[1].image.blob.keyGeneration = 2; } });
+  await fixture.publish({ generation, keyGeneration: 2, sequence: 2, mutate: value => { value.project.items[0].text = 'Newest time but lower sequence'; value.project.items[1].image.blob.keyGeneration = 2; } });
+  const content = await fixture.open(); assert.equal(content.items[0].text, 'New generation');
+  assert.ok(fixture.requests.some(call => call.path === '/v1/spaces/space-a/key?generation=2'));
+  await fixture.publish({ generation, keyGeneration: 2, sequence: 4, mutate: value => { value.project.items[0].text = 'Refreshed checkpoint'; value.project.items[1].image.blob.keyGeneration = 2; } });
+  assert.equal((await fixture.open()).items[0].text, 'Refreshed checkpoint');
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared project reader refuses tampered checkpoints, mismatched AAD and snapshots invalid under Desktop rules', async t => {
+  const fixture = await sharedReaderFixture(t);
+  const bad = await fixture.publish(); const valid = Buffer.from(fixture.objects.get(bad.path).body);
+  fixture.objects.get(bad.path).body[valid.length - 1] ^= 1;
+  await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  fixture.objects.get(bad.path).body = valid;
+  await fixture.publish({ sequence: 3, aad: { dataset: randomUUID() } }); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  await fixture.publish({ sequence: 4, mutate: value => { value.project.items[0].folder = randomUUID(); } }); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  await fixture.publish({ sequence: 5, mutate: value => { value.project.items[0].source = { url: 'file:///local-secret', title: 'Unsafe' }; } }); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared project reader refuses own, unlisted, pending and wrong-Space datasets and forgets cached items after refresh', async t => {
+  const fixture = await sharedReaderFixture(t), content = await fixture.open(), item = content.items[0];
+  assert.equal(fixture.account.sharedItem(null, item.id).text, 'Chosen project text');
+  assert.throws(() => fixture.account.sharedItem(fixture.source.project.id, item.id));
+  assert.throws(() => fixture.account.sharedItem(null, fixture.source.project.items[0].id));
+  await assert.rejects(fixture.account.openSharedProject('space-a', randomUUID()), /SPACE_SHARED_UNAVAILABLE/);
+  await assert.rejects(fixture.account.openSharedProject('space-c', fixture.dataset), /SPACE_SHARED_UNAVAILABLE/);
+  fixture.listing({ sharedBy: 'former-member' }); await fixture.account.retry(); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  fixture.listing({ sharedBy: 'account-fixture' }); await fixture.account.retry();
+  await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/); assert.throws(() => fixture.account.sharedItem(null, item.id));
+  fixture.listing({ sharedBy: 'member-a', listed: false }); await fixture.account.retry(); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  fixture.listing({ listed: true, space: 'space-b' });
+  for (const [path, value] of [...fixture.objects]) fixture.objects.set(path.replace('/spaces/space-a/', '/spaces/space-b/'), value);
+  await fixture.account.retry(); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared capture bytes are fetched on demand only for their scoped item ids and cleared when the account refreshes', async t => {
+  const fixture = await sharedReaderFixture(t), content = await fixture.open(), capture = content.items[1], count = () => fixture.requests.filter(call => call.method === 'GET' && call.path.includes('/blobs/')).length;
+  assert.equal(count(), 0); assert.deepEqual(await fixture.account.sharedImage(null, capture.id), fixture.source.bytes); assert.equal(count(), 1);
+  const copy = await fixture.account.sharedImage(null, capture.id); copy.fill(0);
+  assert.deepEqual(await fixture.account.sharedImage(null, capture.id), fixture.source.bytes); assert.equal(count(), 1);
+  for (const [project, id] of [[fixture.source.project.id, capture.id], [null, fixture.source.project.items[1].id], [null, 'shared:' + '0'.repeat(64)], [null, content.items[0].id]]) {
+    const result = await fixture.account.sharedImage(project, id).catch(() => null); assert.equal(result, null);
+  }
+  assert.equal(count(), 1); await fixture.account.refreshSpaces();
+  assert.equal(await fixture.account.sharedImage(null, capture.id).catch(() => null), null);
+  const refreshed = await fixture.open(); assert.deepEqual(await fixture.account.sharedImage(null, refreshed.items[1].id), fixture.source.bytes); assert.equal(count(), 2);
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared capture reader refuses non-PNG, mismatched lengths, tampered blobs and objects over 64 MiB', async t => {
+  const fixture = await sharedReaderFixture(t), content = await fixture.open(), capture = content.items[1], blobPath = [...fixture.objects.keys()].find(path => path.includes('/blobs/'));
+  const blob = fixture.snapshot.project.items[1].image.blob, identity = { ...fixture.identity, sequence: 0, kind: 'blob', id: blob.id };
+  const { sealSpacePackage } = require('../dist/electron/space-sharing.js'), original = fixture.objects.get(blobPath).body;
+  for (const bytes of [Buffer.alloc(fixture.source.bytes.length), fixture.source.bytes.subarray(0, -1)]) {
+    fixture.objects.get(blobPath).body = sealSpacePackage(fixture.spaceKey.slice(), identity, bytes);
+    assert.equal(await fixture.account.sharedImage(null, capture.id).catch(() => null), null);
+  }
+  fixture.objects.get(blobPath).body = Buffer.from(original); fixture.objects.get(blobPath).body[original.length - 1] ^= 1;
+  assert.equal(await fixture.account.sharedImage(null, capture.id).catch(() => null), null);
+  fixture.respond(call => call.path === blobPath ? { status: 200, body: Buffer.alloc(64 * 1024 * 1024 + 1) } : undefined);
+  assert.equal(await fixture.account.sharedImage(null, capture.id).catch(() => null), null);
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared capture memory cache drops the least recently used bytes when its total exceeds 64 MiB', async t => {
+  const fixture = await sharedReaderFixture(t), { sealSpacePackage } = require('../dist/electron/space-sharing.js');
+  const bytes = Buffer.alloc(22 * 1024 * 1024); fixture.source.bytes.copy(bytes, 0, 0, 8);
+  const images = Array.from({ length: 3 }, (_, index) => ({ ...structuredClone(fixture.snapshot.project.items[1]), id: randomUUID(), title: `Large shared capture ${index}`,
+    image: { ...fixture.snapshot.project.items[1].image, bytes: bytes.length, blob: { id: randomUUID(), keyGeneration: 1 } } }));
+  for (const item of images) {
+    const identity = { ...fixture.identity, sequence: 0, kind: 'blob', id: item.image.blob.id };
+    const path = `/v1/spaces/space-a/datasets/${fixture.dataset}/objects/project/${identity.device}/${identity.generation}/blobs/${identity.id}.hzs`;
+    fixture.objects.set(path, { body: sealSpacePackage(fixture.spaceKey.slice(), identity, bytes), createdAt: Date.now() });
+  }
+  await fixture.publish({ mutate: value => { value.project.items = images; } }); const content = await fixture.open();
+  const count = () => fixture.requests.filter(call => call.method === 'GET' && call.path.includes('/blobs/')).length;
+  assert.equal((await fixture.account.sharedImage(null, content.items[0].id)).length, bytes.length);
+  assert.equal((await fixture.account.sharedImage(null, content.items[1].id)).length, bytes.length);
+  assert.equal((await fixture.account.sharedImage(null, content.items[0].id)).length, bytes.length); assert.equal(count(), 2);
+  assert.equal((await fixture.account.sharedImage(null, content.items[2].id)).length, bytes.length); assert.equal(count(), 3);
+  assert.equal((await fixture.account.sharedImage(null, content.items[0].id)).length, bytes.length); assert.equal(count(), 3);
+  assert.equal((await fixture.account.sharedImage(null, content.items[1].id)).length, bytes.length); assert.equal(count(), 4);
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared project commands and Desktop panel pages validate exact fields and private windows refuse them', async t => {
+  const fixture = await sharedReaderFixture(t), content = await fixture.open(), spaces = fixture.account.state().spaces;
+  const { assertPrivateCommand } = require('../dist/electron/private-commands.js'), browser = notebookBrowser(t, authenticatedCipher()), privateWindow = browser.addWindow({ privateWindow: true });
+  const command = { type: 'space-open-shared', space: 'space-a', dataset: fixture.dataset };
+  assert.deepEqual(validateCommand(command, undefined, [], [], undefined, spaces), command);
+  for (const field of Object.keys(command)) { const missing = { ...command }; delete missing[field]; assert.throws(() => validateCommand(missing, undefined, [], [], undefined, spaces)); }
+  for (const change of [{ extra: true }, { token: 'forged' }, { dataset: 'dataset-a' }, { dataset: '../local' }, { space: 'space-c' }, { space: 'absent' }, { space: null }]) assert.throws(() => validateCommand({ ...command, ...change }, undefined, [], [], undefined, spaces));
+  const pages = [{ kind: 'shared', space: 'space-a', dataset: fixture.dataset }, { kind: 'shared', space: 'space-a', dataset: fixture.dataset, item: content.items[0].id }];
+  for (const page of pages) {
+    const open = { type: 'open-desktop-panel', page }; assert.deepEqual(validateCommand(open), open);
+    for (const change of [{ extra: true }, { project: fixture.source.project.id }, { space: null }, { dataset: 'dataset-a' }, { item: fixture.source.project.items[0].id }]) assert.throws(() => validateCommand({ ...open, page: { ...page, ...change } }));
+    assert.throws(() => assertPrivateCommand(open)); assert.throws(() => privateWindow.command(open));
+  }
+  assert.throws(() => assertPrivateCommand(command), /SPACE_PRIVATE/); assert.throws(() => privateWindow.command(command), /SPACE_PRIVATE/);
+  const privateEvent = { sender: privateWindow.window.webContents, senderFrame: privateWindow.window.webContents.mainFrame };
+  assert.throws(() => browser.handlers.get('horizon:capture-image')(privateEvent, null, content.items[1].id), /SPACE_PRIVATE/);
+  assert.throws(() => privateWindow.command({ type: 'lyra-ask', task: 'item', question: 'Read shared note.', tabs: [], project: null, item: content.items[0].id }), /LYRA_PRIVATE/);
+});
+
+test('Shared project browser commands route images through the capture bridge and ask local Lyra without storing shared items', async t => {
+  const fixture = await sharedReaderFixture(t), lyra = lyraFixture(); t.after(lyra.close);
+  const browser = notebookBrowser(t, authenticatedCipher(), { accountFactory: () => ({ ...fixture.account, retry: async () => {} }), lyraConnect: lyra.host.connect });
+  await new Promise(setImmediate);
+  const content = await browser.command({ type: 'space-open-shared', space: 'space-a', dataset: fixture.dataset });
+  const page = { kind: 'shared', space: 'space-a', dataset: fixture.dataset, item: content.items[0].id };
+  await browser.command({ type: 'open-desktop-panel', page }); assert.deepEqual(browser.state().desktopPanel, { open: true, page });
+  assert.deepEqual(Buffer.from(await browser.image(null, content.items[1].id)), fixture.source.bytes);
+  assert.throws(() => browser.image(fixture.source.project.id, content.items[1].id), /SPACE_SHARED_UNAVAILABLE/);
+  await browser.command({ type: 'lyra-ask', task: 'item', question: 'Read the shared note.', tabs: [], project: null, item: content.items[0].id });
+  for (let attempt = 0; attempt < 100 && browser.state().lyra.phase !== 'answer'; attempt++) await new Promise(setImmediate);
+  assert.equal(browser.state().lyra.phase, 'answer');
+  assert.ok(lyra.calls.find(call => call[0] === 'chat')[1].context.includes('Chosen project text'));
+  assert.deepEqual(browser.state().projects, []); assert.deepEqual(browser.state().captures, []);
+  for (const command of [{ type: 'delete-item', project: null, id: content.items[0].id }, { type: 'update-item', project: null, id: content.items[0].id, text: 'Forged edit' }, { type: 'send-item', project: null, id: content.items[0].id, app: 'docs' }]) assert.throws(() => browser.command(command));
+  await assert.rejects(browser.command({ type: 'open-desktop-panel', page: { ...page, item: 'shared:' + '0'.repeat(64) } }));
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared project reader follows every object page and refuses repeated cursors, duplicate paths and malformed metadata', async t => {
+  const fixture = await sharedReaderFixture(t); await fixture.publish({ mutate: value => { value.project.items[0].text = 'Checkpoint from next page'; } });
+  const prefix = `/v1/spaces/space-a/datasets/${fixture.dataset}/objects`, rows = [...fixture.objects].map(([path, value]) => ({ path: path.slice(prefix.length + 1), createdAt: value.createdAt }));
+  fixture.respond(call => {
+    const url = new URL(call.path, fixture.origin); if (url.pathname !== prefix) return;
+    assert.equal(url.searchParams.get('prefix'), 'project/'); assert.equal(url.searchParams.get('limit'), '1000');
+    return { status: 200, body: { objects: url.searchParams.has('after') ? rows.slice(2) : rows.slice(0, 2), after: url.searchParams.has('after') ? null : 'next-page' } };
+  });
+  assert.equal((await fixture.open()).items[0].text, 'Checkpoint from next page');
+  assert.ok(fixture.requests.some(call => call.path.includes('/objects?') && new URL(call.path, fixture.origin).searchParams.get('after') === 'next-page'));
+  for (const body of [{ objects: [], after: 'same-page' }, { objects: [rows[0], rows[0]], after: null }, { objects: [{ ...rows[0], createdAt: -1 }], after: null }, { objects: [{ ...rows[0], path: '../local?secret' }], after: null }, { objects: Array(1001).fill(rows[0]), after: null }]) {
+    fixture.respond(call => new URL(call.path, fixture.origin).pathname === prefix ? { status: 200, body } : undefined);
+    await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  }
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared project reader discards stale opens after another open, a Nebula refresh or account cancellation', async t => {
+  const fixture = await sharedReaderFixture(t), fetch = fixture.host.fetch;
+  for (const action of ['open', 'refresh', 'cancel']) {
+    const previous = await fixture.open();
+    let enter, release, held = false;
+    const entered = new Promise(done => { enter = done; }), waiting = new Promise(done => { release = done; });
+    fixture.host.fetch = async (url, init) => {
+      const response = await fetch(url, init);
+      if (!held && new URL(url).pathname.includes('/checkpoints/')) { held = true; enter(); await waiting; }
+      return response;
+    };
+    const stale = assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/); await entered;
+    let latest;
+    if (action === 'open') latest = await fixture.open();
+    else if (action === 'refresh') await fixture.account.retry();
+    else fixture.account.cancel();
+    release(); await stale; fixture.host.fetch = fetch;
+    if (latest) assert.equal(fixture.account.sharedItem(null, latest.items[0].id).text, 'Chosen project text');
+    else assert.throws(() => fixture.account.sharedItem(null, previous.items[0].id), /SPACE_SHARED_UNAVAILABLE/);
+  }
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared capture requests started before a reopen or refresh cannot replace or block the current image request', async t => {
+  const fixture = await sharedReaderFixture(t), fetch = fixture.host.fetch;
+  for (const action of ['open', 'refresh']) {
+    const content = await fixture.open(); let enter, release, held = false;
+    const entered = new Promise(done => { enter = done; }), waiting = new Promise(done => { release = done; });
+    fixture.host.fetch = async (url, init) => {
+      const response = await fetch(url, init);
+      if (!held && new URL(url).pathname.includes('/blobs/')) { held = true; enter(); await waiting; }
+      return response;
+    };
+    const stale = assert.rejects(fixture.account.sharedImage(null, content.items[1].id), /SPACE_SHARED_UNAVAILABLE/); await entered;
+    if (action === 'refresh') await fixture.account.retry();
+    const latest = await fixture.open();
+    const image = assert.doesNotReject(async () => { assert.deepEqual(await fixture.account.sharedImage(null, latest.items[1].id), fixture.source.bytes); });
+    release(); await Promise.all([stale, image]); fixture.host.fetch = fetch;
+    assert.deepEqual(await fixture.account.sharedImage(null, latest.items[1].id), fixture.source.bytes);
+  }
+  assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
+});
+
+test('Shared project and capture bridge replies are discarded after switching profiles and returning to the original profile', async t => {
+  const dataset = randomUUID(), item = 'shared:' + 'a'.repeat(64), bytes = capturePNG(24, 18);
+  const space = { id: 'space-a', name: 'Team', code: null, colour: null, icon: null, role: 'member', pending: false, members: [{ accountId: 'member-a', displayName: 'Alex', role: 'member', keyChanged: false }] };
+  const shared = { spaceId: space.id, datasetId: dataset, sharedBy: { accountId: 'member-a', displayName: 'Alex' }, updatedAt: '2026-10-22T00:00:00Z', size: bytes.length, title: 'Shared project' };
+  const content = { spaceId: space.id, datasetId: dataset, sharedBy: { displayName: 'Alex' }, spaceName: space.name, updatedAt: shared.updatedAt, title: shared.title, readOnly: true, folders: [], items: [] };
+  let response = Promise.resolve(content);
+  const browser = notebookBrowser(t, authenticatedCipher(), { accountFactory: () => ({
+    state: () => ({ status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'ready', keyStore: 'session', spaces: [space], shared: [shared], spacesError: null }),
+    retry: async () => {}, close() {}, openSharedProject: async () => response, sharedImage: async () => response,
+  }) });
+  await new Promise(setImmediate);
+  const first = browser.state().activeProfileId, other = browser.state().profiles.find(profile => profile.id !== first).id;
+  for (const kind of ['project', 'image']) {
+    let release; response = new Promise(done => { release = done; });
+    const result = kind === 'project' ? browser.command({ type: 'space-open-shared', space: space.id, dataset }) : browser.image(null, item);
+    const refused = assert.rejects(result, /SPACE_SHARED_UNAVAILABLE/);
+    browser.command({ type: 'switch-profile', id: other }); browser.command({ type: 'switch-profile', id: first });
+    assert.equal(browser.state().activeProfileId, first); release(kind === 'project' ? content : bytes); await refused;
+  }
+  response = Promise.resolve(content); assert.deepEqual(await browser.command({ type: 'space-open-shared', space: space.id, dataset }), content);
+  response = Promise.resolve(bytes); assert.deepEqual(await browser.image(null, item), bytes);
 });
