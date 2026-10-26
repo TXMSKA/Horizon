@@ -44,7 +44,7 @@ test('conflict titles localize settings and unnamed items but preserve personal 
 });
 
 test('sync failures use bilingual messages without exposing arbitrary error text', () => {
-  const codes = ['INVALID', 'NEWER_FORMAT', 'WRONG_KEY', 'STORAGE', 'FOLDER', 'FULL', 'LIMIT', 'TIMEOUT', 'LOCKED', 'GAP', 'BLOB_PENDING', 'CHANGED', 'CANCELLED', 'SAVE_FAILED', 'PRIVATE', 'TAB_LIMIT'];
+  const codes = ['INVALID', 'NEWER_FORMAT', 'WRONG_KEY', 'STORAGE', 'FOLDER', 'FULL', 'LIMIT', 'TIMEOUT', 'LOCKED', 'GAP', 'BLOB_PENDING', 'CHANGED', 'SWITCH_FAILED', 'CONFLICT', 'CANCELLED', 'SAVE_FAILED', 'PRIVATE', 'TAB_LIMIT'];
   for (const suffix of codes) {
     const key = `SYNC_${suffix}`; assert.equal(syncErrorKey(new Error(`IPC failed: ${key}`)), key);
     assert.ok(copy[key].en && copy[key].es); assert.doesNotMatch(copy[key].en + copy[key].es, /[\u2010-\u2015\u2212]/);

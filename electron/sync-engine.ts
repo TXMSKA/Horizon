@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { hostname } from 'node:os';
 import { SYNC_ITEMS } from '../src/shared/api';
 import type { DesktopItem, SyncComputer, SyncFailure, SyncItem, SyncState } from '../src/shared/api';
@@ -10,7 +10,8 @@ import { blobReference, computerName, mergeOperation, projectSnapshot, recordTit
 import type { BlobReference, SyncSnapshot } from './sync-model';
 import { atomicSyncFile, readSyncState, syncStorageAvailable, writeSyncState } from './sync-storage';
 import type { SyncCipher } from './sync-storage';
-import { datasetFolder, decodeSync, FolderTransport, objectName, SYNC_ROOT_PARTS, validBatch, validCheckpoint, writerParts } from './sync-transport';
+import { decodeSync, folderSyncDataset, folderSyncTransport, objectName, validBatch, validCheckpoint, writerParts } from './sync-transport';
+import type { SyncTransport, SyncTransportSelection } from './sync-transport';
 
 export interface SyncHost {
   read(): SyncSnapshot;
@@ -23,7 +24,7 @@ interface OutgoingFile { file: string; parts: string[]; cap: number }
 interface Outbox { files: OutgoingFile[]; operations: SyncOperation[]; snapshot: SyncRecord[]; sequence: number; checkpoint: number }
 interface RecordEdit { record: SyncRecord; time: number; title: string }
 interface EngineState {
-  version: 1; folder: string; dataset: DatasetParameters; key: string; binding: string; device: string; generation: string; sequence: number;
+  version: 1; transport: SyncTransportSelection; dataset: DatasetParameters; key: string; binding: string; device: string; generation: string; sequence: number;
   mapping: Record<string, string>; switches: Record<SyncItem, boolean>; records: SyncOperation[]; snapshot: SyncRecord[]; conflicts: KeptConflict[];
   cursors: Record<string, number>; blobs: Record<string, BlobReference>; outbox: Outbox | null; operationsSinceCheckpoint: number; checkpointSequence: number;
   lastSynced: number | null; joining: boolean; fresh: SyncItem[];
@@ -37,7 +38,10 @@ const blobKey = (profile: string, item: DesktopItem) => canonical([profile, item
 const blobFileKey = (reference: BlobReference) => canonical(reference);
 const ownRecord = (record: SyncRecord, device: string) => !['tabs', 'computer'].includes(record.item) || record.key === device;
 function validateState(value: unknown): asserts value is EngineState {
-  const fields = ['version', 'folder', 'dataset', 'key', 'binding', 'device', 'generation', 'sequence', 'mapping', 'switches', 'records', 'snapshot', 'conflicts', 'cursors', 'blobs', 'outbox', 'operationsSinceCheckpoint', 'checkpointSequence', 'lastSynced', 'joining', 'fresh', 'application'];
+  if (value !== null && typeof value === 'object' && 'folder' in value && !('transport' in value)) {
+    const legacy = value as Record<string, unknown>; legacy.transport = { kind: 'folder', folder: legacy.folder }; delete legacy.folder;
+  }
+  const fields = ['version', 'transport', 'dataset', 'key', 'binding', 'device', 'generation', 'sequence', 'mapping', 'switches', 'records', 'snapshot', 'conflicts', 'cursors', 'blobs', 'outbox', 'operationsSinceCheckpoint', 'checkpointSequence', 'lastSynced', 'joining', 'fresh', 'application'];
   if (shape(value, fields)) Object.assign(value, { dirty: {}, ownBatches: {}, ownCheckpoints: {} });
   const previous = [...fields, 'dirty', 'ownBatches', 'ownCheckpoints'];
   if (shape(value, previous)) Object.assign(value, { edits: [] });
@@ -53,7 +57,7 @@ function validateState(value: unknown): asserts value is EngineState {
   requireSync(Object.keys(value.dirty as object).every(item => SYNC_ITEMS.includes(item as SyncItem)) && Object.keys(value.ownBatches as object).every(validBatch) && Object.keys(value.ownCheckpoints as object).every(validCheckpoint));
   requireSync(value.application === null || uuid(value.application));
   validateDataset(value.dataset);
-  requireSync(typeof value.folder === 'string' && value.folder.length <= 4096 && typeof value.key === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.key) && typeof value.binding === 'string' && uuid(value.device) && uuid(value.generation) && integer(value.sequence));
+  requireSync(shape(value.transport, ['kind', 'folder']) && value.transport.kind === 'folder' && typeof value.transport.folder === 'string' && value.transport.folder.length <= 4096 && typeof value.key === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.key) && typeof value.binding === 'string' && uuid(value.device) && uuid(value.generation) && integer(value.sequence));
   requireSync(shape(value.switches, [...SYNC_ITEMS]) && Object.values(value.switches).every(entry => typeof entry === 'boolean'));
   for (const field of ['mapping', 'cursors', 'blobs'] as const) requireSync(value[field] !== null && typeof value[field] === 'object' && !Array.isArray(value[field]) && Object.keys(value[field]).length <= SYNC_LIMITS.records);
   requireSync(Object.entries(value.mapping as object).every(([key, id]) => uuid(key) && uuid(id)) && Object.values(value.cursors as object).every(integer));
@@ -68,8 +72,17 @@ function validateState(value: unknown): asserts value is EngineState {
     for (const file of value.outbox.files) requireSync(shape(file, ['file', 'parts', 'cap']) && uuid(file.file) && Array.isArray(file.parts) && file.parts.length === 5 && file.parts.every(part => typeof part === 'string' && !/[\\/\x00]/.test(part) && part !== '..') && (file.cap === SYNC_LIMITS.package || file.cap === SYNC_LIMITS.blob));
   }
 }
+async function transportNames(transport: SyncTransport, parts: string[]): Promise<string[]> {
+  const prefix = parts.join('/'), names: string[] = [];
+  for await (const path of transport.listObjects(prefix)) {
+    requireSync(path.startsWith(prefix + '/') && !path.slice(prefix.length + 1).includes('/') && names.length < SYNC_LIMITS.files, 'SYNC_LIMIT');
+    names.push(path.slice(prefix.length + 1));
+  }
+  return names.sort();
+}
 export class SyncEngine {
   private local: EngineState | undefined;
+  private active: SyncTransport | undefined;
   private failure: SyncFailure | null = null;
   private readonly path: string;
   private readonly outboxPath: string;
@@ -85,22 +98,25 @@ export class SyncEngine {
   private lastRead = 0;
   private stopped = false;
   private verifyGeneration = true;
-  constructor(readonly userData: string, readonly cipher: SyncCipher, readonly host: SyncHost, readonly options: { keys?: SyncKeySource; now?: () => number; pulseMs?: number; afterSeal?: () => void; name?: string } = {}) {
+  constructor(readonly userData: string, readonly cipher: SyncCipher, readonly host: SyncHost, readonly options: { keys?: SyncKeySource; now?: () => number; pulseMs?: number; afterSeal?: () => void; name?: string; transport?: (selection: SyncTransportSelection, dataset: string) => SyncTransport } = {}) {
     this.path = resolve(userData, 'sync', 'state.sealed'); this.outboxPath = resolve(userData, 'sync', 'outbox');
     this.journalPath = resolve(userData, 'sync', 'apply.sealed'); this.incomingPath = resolve(userData, 'sync', 'incoming');
     this.binding = createHash('sha256').update(`${hostname()}\0${resolve(userData)}`).digest('hex');
     try {
       // An unconfigured install must still browse when its keyring is unavailable.
       if (!existsSync(this.path)) return;
-      const status = { restored: false }, state = readSyncState(this.path, cipher, status); validateState(state); this.local = state;
+      const status = { restored: false }, state = readSyncState(this.path, cipher, status), legacy = state !== null && typeof state === 'object' && 'folder' in state; validateState(state);
+      this.active = this.transport(state.transport, state.dataset.datasetId);
       this.dirty = new Map(Object.entries(state.dirty) as [SyncItem, number][]);
       this.edits = new Map(state.edits.map(edit => [recordId(edit.record), edit]));
       if (state.binding !== this.binding || status.restored) {
         if (state.binding !== this.binding) state.device = randomUUID();
         state.binding = this.binding; state.generation = randomUUID(); state.sequence = 0; state.checkpointSequence = 0; state.operationsSinceCheckpoint = 0; state.ownBatches = {}; state.ownCheckpoints = {}; state.fresh = [...SYNC_ITEMS]; this.save(state);
-      }
+      } else if (legacy) this.save(state);
+      this.local = state;
     } catch (error) { this.failure = syncFailure(error); }
   }
+  private transport(selection: SyncTransportSelection, dataset: string) { return (this.options.transport ?? folderSyncTransport)(selection, dataset); }
   private now() { return this.options.now?.() ?? Date.now(); }
   private keys() { return this.options.keys ?? randomSyncKeys; }
   private name() { return computerName(this.options.name ?? hostname()) || 'Computer'; }
@@ -135,7 +151,7 @@ export class SyncEngine {
       const windows = structuredClone(record.value as SyncComputer['windows']).filter(window => window.tabs.length > 0); if (!windows.length) continue;
       const entry = computers.get(record.key) ?? { ...computer(record.key), windows: [] }; entry.windows.push(...windows); computers.set(record.key, entry);
     }
-    return { configured: true, folderName: basename(local.folder), switches: { ...local.switches }, lastSynced: local.lastSynced, failure: this.failure, syncing: !!this.running,
+    return { configured: true, folderName: this.active!.describe().label, switches: { ...local.switches }, lastSynced: local.lastSynced, failure: this.failure, syncing: !!this.running,
       conflicts: local.conflicts.filter(({ operation }) => operation.item !== 'computer').map(({ id, operation }) => {
         const known = operation.value === null && operation.title === undefined ? local.records.find(record => recordId(record) === recordId(operation) && record.value !== null) : undefined;
         return { id, item: operation.item as SyncItem, title: operation.title ?? recordTitle(operation.value === null && known ? known : operation), computer: computer(operation.device), time: operation.time, deleted: operation.value === null };
@@ -161,24 +177,46 @@ export class SyncEngine {
   async create(folder: string, accepted: boolean): Promise<void> {
     return this.enqueue(async () => {
       requireSync(accepted === true && !this.local); syncStorageAvailable(this.cipher);
-      const { key, check } = await this.keys().create(), transport = new FolderTransport(folder);
-      await transport.publish([...SYNC_ROOT_PARTS, check.datasetId, 'dataset.hzs'], Buffer.from(canonical(check)), 4096);
-      const state = this.initial(folder, check, key); this.save(state); this.local = state; this.failure = null; this.host.changed();
+      const { key, check } = await this.keys().create(), transport = this.transport({ kind: 'folder', folder: resolve(folder) }, check.datasetId);
+      await transport.writeObject('dataset.hzs', Buffer.from(canonical(check)), 4096);
+      const state = this.initial(folder, check, key); this.save(state); this.local = state; this.active = transport; this.failure = null; this.host.changed();
     });
   }
   async join(folder: string, input: string, accepted: boolean): Promise<void> {
     return this.enqueue(async () => {
       requireSync(accepted === true && !this.local); syncStorageAvailable(this.cipher);
-      const transport = new FolderTransport(folder), datasets = (await transport.list([...SYNC_ROOT_PARTS])).filter(uuid); requireSync(datasets.length === 1, 'SYNC_FOLDER');
-      let parameters: unknown;
-      try { parameters = JSON.parse((await transport.read([...SYNC_ROOT_PARTS, datasets[0]!, 'dataset.hzs'], 4096)).toString('utf8')); } catch { throw new Error('SYNC_INVALID'); }
-      validateDataset(parameters); requireSync(parameters.datasetId === datasets[0]);
+      const parameters = await folderSyncDataset(folder);
+      const transport = this.transport({ kind: 'folder', folder: resolve(folder) }, parameters.datasetId);
       const key = await this.keys().open(input, parameters), state = this.initial(folder, parameters, key); state.joining = true;
-      this.save(state); this.local = state; this.failure = null; this.host.changed();
+      this.save(state); this.local = state; this.active = transport; this.failure = null; this.host.changed();
     });
   }
   private initial(folder: string, dataset: DatasetParameters, key: Buffer): EngineState {
-    return { version: 1, folder: resolve(folder), dataset, key: key.toString('base64'), binding: this.binding, device: randomUUID(), generation: randomUUID(), sequence: 0, mapping: {}, switches: switches(), records: [], snapshot: [], conflicts: [], cursors: {}, blobs: {}, outbox: null, operationsSinceCheckpoint: 0, checkpointSequence: 0, lastSynced: null, joining: false, fresh: [...SYNC_ITEMS], application: null, dirty: {}, ownBatches: {}, ownCheckpoints: {}, edits: [] };
+    return { version: 1, transport: { kind: 'folder', folder: resolve(folder) }, dataset, key: key.toString('base64'), binding: this.binding, device: randomUUID(), generation: randomUUID(), sequence: 0, mapping: {}, switches: switches(), records: [], snapshot: [], conflicts: [], cursors: {}, blobs: {}, outbox: null, operationsSinceCheckpoint: 0, checkpointSequence: 0, lastSynced: null, joining: false, fresh: [...SYNC_ITEMS], application: null, dirty: {}, ownBatches: {}, ownCheckpoints: {}, edits: [] };
+  }
+  async switchTransport(next: SyncTransportSelection): Promise<void> {
+    return this.enqueue(async () => {
+      try {
+        requireSync(this.local); this.flushDirty(); await this.recoverApplication();
+        const selection = { ...next }; requireSync(shape(selection, ['kind', 'folder']) && selection.kind === 'folder' && typeof selection.folder === 'string');
+        const transport = this.transport(selection, this.local.dataset.datasetId);
+        const descriptor: unknown = JSON.parse((await transport.readDescriptor()).toString('utf8')); validateDataset(descriptor);
+        requireSync(descriptor.datasetId === this.local.dataset.datasetId);
+        await this.keys().open(this.keys().encode(Buffer.from(this.local.key, 'base64')), descriptor);
+        const state = structuredClone(this.local); state.transport = selection; state.dataset = descriptor;
+        const references = new Map([...state.records, ...state.snapshot, ...state.conflicts.map(conflict => conflict.operation), ...(state.outbox?.operations ?? []), ...(state.outbox?.snapshot ?? [])].flatMap(record => { const reference = blobReference(record); return reference ? [[blobFileKey(reference), reference] as const] : []; }));
+        for (const [id, reference] of references) {
+          const path = [...writerParts(reference.device, reference.generation), 'blobs', `${reference.id}.hzs`].join('/');
+          const cached = resolve(this.incomingPath, createHash('sha256').update(id).digest('hex')), own = resolve(this.outboxPath, reference.id), source = existsSync(cached) ? cached : reference.device === state.device && existsSync(own) ? own : null;
+          if (source) requireSync(statSync(source).size <= SYNC_LIMITS.blob, 'SYNC_LIMIT');
+          const bytes = source ? readFileSync(source) : await this.active!.readObject(path, SYNC_LIMITS.blob);
+          await transport.writeObject(path, bytes, SYNC_LIMITS.blob);
+        }
+        // A destination may hold only its descriptor; the next pulse must publish a complete projection.
+        state.fresh = SYNC_ITEMS.filter(item => state.switches[item]);
+        this.save(state); this.local = state; this.active = transport; this.verifyGeneration = true; this.lastRead = 0; this.failure = null; this.host.changed();
+      } catch { throw new Error('SYNC_SWITCH_FAILED'); }
+    });
   }
   revealKey(): string { requireSync(this.local, 'SYNC_LOCKED'); syncStorageAvailable(this.cipher); return this.keys().encode(Buffer.from(this.local.key, 'base64')); }
   async setItem(item: SyncItem, enabled: boolean) {
@@ -222,28 +260,28 @@ export class SyncEngine {
     this.running = work.finally(() => { this.running = undefined; this.host.changed(); }); this.host.changed(); return this.running;
   }
   private async incoming(state: EngineState): Promise<{ operations: SyncOperation[]; conflicts: KeptConflict[]; cursors: Record<string, number>; waiting: SyncFailure | null }> {
-    const transport = new FolderTransport(datasetFolder(state.folder, state.dataset.datasetId)), operations: SyncOperation[] = [], conflicts: KeptConflict[] = [], cursors = { ...state.cursors }, key = Buffer.from(state.key, 'base64');
+    const transport = this.active!, operations: SyncOperation[] = [], conflicts: KeptConflict[] = [], cursors = { ...state.cursors }, key = Buffer.from(state.key, 'base64');
     let dataset: unknown;
-    try { dataset = JSON.parse((await transport.read(['dataset.hzs'], 4096)).toString('utf8')); } catch (error) { throw new Error(syncFailure(error)); }
+    try { dataset = JSON.parse((await transport.readDescriptor()).toString('utf8')); } catch (error) { throw new Error(syncFailure(error)); }
     validateDataset(dataset); requireSync(canonical(dataset) === canonical(state.dataset));
-    const devices = (await transport.list(['writers'])).filter(uuid); requireSync(devices.length <= SYNC_LIMITS.writers, 'SYNC_LIMIT'); let writers = 0, waiting: SyncFailure | null = null;
-    for (const device of devices) for (const generation of (await transport.list(['writers', device])).filter(uuid)) {
+    const devices = (await transportNames(transport, ['writers'])).filter(uuid); requireSync(devices.length <= SYNC_LIMITS.writers, 'SYNC_LIMIT'); let writers = 0, waiting: SyncFailure | null = null;
+    for (const device of devices) for (const generation of (await transportNames(transport, ['writers', device])).filter(uuid)) {
       requireSync(++writers <= SYNC_LIMITS.writers, 'SYNC_LIMIT'); if (device === state.device && generation === state.generation) continue;
       const parts = writerParts(device, generation), writer = `${device}/${generation}`; let cursor = cursors[writer] ?? 0;
       if (!cursor) {
-        const latest = (await transport.list([...parts, 'checkpoints'])).flatMap(name => { const checkpoint = validCheckpoint(name); return checkpoint ? [{ ...checkpoint, name }] : []; }).sort((a, b) => b.sequence - a.sequence || b.id.localeCompare(a.id))[0];
+        const latest = (await transportNames(transport, [...parts, 'checkpoints'])).flatMap(name => { const checkpoint = validCheckpoint(name); return checkpoint ? [{ ...checkpoint, name }] : []; }).sort((a, b) => b.sequence - a.sequence || b.id.localeCompare(a.id))[0];
         if (latest) {
           const identity: SyncIdentity = { dataset: state.dataset.datasetId, device, generation, id: latest.id, sequence: latest.sequence, kind: 'checkpoint' };
-          const payload = await decodeSync(key, identity, await transport.read([...parts, 'checkpoints', latest.name], SYNC_LIMITS.package)) as SyncPayload;
+          const payload = await decodeSync(key, identity, await transport.readObject([...parts, 'checkpoints', latest.name].join('/'), SYNC_LIMITS.package)) as SyncPayload;
           operations.push(...payload.operations); conflicts.push(...payload.conflicts); requireSync(operations.length <= SYNC_LIMITS.records && conflicts.length <= SYNC_LIMITS.records, 'SYNC_LIMIT'); cursor = latest.sequence;
         }
       }
-      const batches = (await transport.list([...parts, 'batches'])).flatMap(name => { const batch = validBatch(name); return batch && batch.sequence > cursor ? [{ ...batch, name }] : []; }).sort((a, b) => a.sequence - b.sequence);
+      const batches = (await transportNames(transport, [...parts, 'batches'])).flatMap(name => { const batch = validBatch(name); return batch && batch.sequence > cursor ? [{ ...batch, name }] : []; }).sort((a, b) => a.sequence - b.sequence);
       const sequences = new Set<number>(); for (const batch of batches) { requireSync(!sequences.has(batch.sequence)); sequences.add(batch.sequence); }
       for (const batch of batches) {
         if (batch.sequence !== cursor + 1) { waiting = 'SYNC_GAP'; break; }
         const identity: SyncIdentity = { dataset: state.dataset.datasetId, device, generation, sequence: batch.sequence, id: batch.id, kind: 'batch' };
-        const payload = await decodeSync(key, identity, await transport.read([...parts, 'batches', batch.name], SYNC_LIMITS.package)) as SyncPayload;
+        const payload = await decodeSync(key, identity, await transport.readObject([...parts, 'batches', batch.name].join('/'), SYNC_LIMITS.package)) as SyncPayload;
         operations.push(...payload.operations); cursor = batch.sequence; requireSync(operations.length <= SYNC_LIMITS.records, 'SYNC_LIMIT');
       }
       cursors[writer] = cursor;
@@ -294,12 +332,12 @@ export class SyncEngine {
     }
   }
   private async images(state: EngineState, records: SyncOperation[], available: Map<string, unknown>): Promise<Map<string, Buffer>> {
-    const images = new Map<string, Buffer>(), transport = new FolderTransport(datasetFolder(state.folder, state.dataset.datasetId)), key = Buffer.from(state.key, 'base64');
+    const images = new Map<string, Buffer>(), transport = this.active!, key = Buffer.from(state.key, 'base64');
     let total = 0;
     for (const record of records) {
       if (!syncEnabled(state.switches, record.item)) continue; const reference = blobReference(record); if (!reference || images.has(blobFileKey(reference)) || available.has(blobFileKey(reference))) continue;
       let bytes: Buffer;
-      try { bytes = await transport.read([...writerParts(reference.device, reference.generation), 'blobs', `${reference.id}.hzs`], SYNC_LIMITS.blob); }
+      try { bytes = await transport.readObject([...writerParts(reference.device, reference.generation), 'blobs', `${reference.id}.hzs`].join('/'), SYNC_LIMITS.blob); }
       catch (error) { if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') throw new Error('SYNC_BLOB_PENDING'); throw error; }
       const image = Buffer.from(await decodeSync(key, { dataset: state.dataset.datasetId, ...reference, sequence: 0, kind: 'blob' }, bytes) as Uint8Array);
       const value = record.value as { entry: { id: string; image: { bytes: number } } }; requireSync(image.length === value.entry.image.bytes);
@@ -343,8 +381,8 @@ export class SyncEngine {
   }
   private async publishOutbox(state: EngineState): Promise<void> {
     const outbox = state.outbox; if (!outbox) return;
-    const transport = new FolderTransport(datasetFolder(state.folder, state.dataset.datasetId));
-    for (const file of outbox.files) { const path = resolve(this.outboxPath, file.file); requireSync(statSync(path).size <= file.cap, 'SYNC_LIMIT'); await transport.publish(file.parts, readFileSync(path), file.cap); }
+    const transport = this.active!;
+    for (const file of outbox.files) { const path = resolve(this.outboxPath, file.file); requireSync(statSync(path).size <= file.cap, 'SYNC_LIMIT'); await transport.writeObject(file.parts.join('/'), readFileSync(path), file.cap); }
   }
   private async runPulse(force: boolean, receiveOnly: boolean) {
     this.flushDirty();
@@ -429,16 +467,16 @@ export class SyncEngine {
     return incoming.waiting;
   }
   private async checkGeneration(state: EngineState) {
-    const transport = new FolderTransport(datasetFolder(state.folder, state.dataset.datasetId)), parts = writerParts(state.device, state.generation), key = Buffer.from(state.key, 'base64');
+    const transport = this.active!, parts = writerParts(state.device, state.generation), key = Buffer.from(state.key, 'base64');
     let highest = state.sequence;
-    const batches = (await transport.list([...parts, 'batches'])).flatMap(name => { const batch = validBatch(name); return batch && batch.sequence > state.sequence ? [{ ...batch, name }] : []; });
+    const batches = (await transportNames(transport, [...parts, 'batches'])).flatMap(name => { const batch = validBatch(name); return batch && batch.sequence > state.sequence ? [{ ...batch, name }] : []; });
     for (const batch of batches) {
       const identity: SyncIdentity = { dataset: state.dataset.datasetId, device: state.device, generation: state.generation, sequence: batch.sequence, id: batch.id, kind: 'batch' };
-      await decodeSync(key, identity, await transport.read([...parts, 'batches', batch.name], SYNC_LIMITS.package)); highest = Math.max(highest, batch.sequence);
+      await decodeSync(key, identity, await transport.readObject([...parts, 'batches', batch.name].join('/'), SYNC_LIMITS.package)); highest = Math.max(highest, batch.sequence);
     }
-    const latest = (await transport.list([...parts, 'checkpoints'])).flatMap(name => { const checkpoint = validCheckpoint(name); return checkpoint && checkpoint.sequence > state.sequence ? [{ ...checkpoint, name }] : []; }).sort((a, b) => b.sequence - a.sequence || b.id.localeCompare(a.id))[0];
+    const latest = (await transportNames(transport, [...parts, 'checkpoints'])).flatMap(name => { const checkpoint = validCheckpoint(name); return checkpoint && checkpoint.sequence > state.sequence ? [{ ...checkpoint, name }] : []; }).sort((a, b) => b.sequence - a.sequence || b.id.localeCompare(a.id))[0];
     if (latest) {
-      await decodeSync(key, { dataset: state.dataset.datasetId, device: state.device, generation: state.generation, sequence: latest.sequence, id: latest.id, kind: 'checkpoint' }, await transport.read([...parts, 'checkpoints', latest.name], SYNC_LIMITS.package)); highest = Math.max(highest, latest.sequence);
+      await decodeSync(key, { dataset: state.dataset.datasetId, device: state.device, generation: state.generation, sequence: latest.sequence, id: latest.id, kind: 'checkpoint' }, await transport.readObject([...parts, 'checkpoints', latest.name].join('/'), SYNC_LIMITS.package)); highest = Math.max(highest, latest.sequence);
     }
     if (highest > state.sequence) {
       // A restored local counter must not fork packages already present in its writer namespace.
@@ -475,13 +513,13 @@ export class SyncEngine {
   }
   private async cleanup(state: EngineState) {
     if (!state.checkpointSequence) return;
-    const transport = new FolderTransport(datasetFolder(state.folder, state.dataset.datasetId));
+    const transport = this.active!;
     for (const [kind, created, parse] of [['batches', state.ownBatches, validBatch], ['checkpoints', state.ownCheckpoints, validCheckpoint]] as const) {
-      const parts = [...writerParts(state.device, state.generation), kind], names = new Set(await transport.list(parts));
+      const parts = [...writerParts(state.device, state.generation), kind], names = new Set(await transportNames(transport, parts));
       for (const [name, time] of Object.entries(created)) {
         const entry = parse(name); requireSync(entry);
         if (!names.has(name)) { delete created[name]; continue; }
-        if (entry.sequence < state.checkpointSequence && this.now() - time > 30 * 86400000) { await transport.remove([...parts, name]); delete created[name]; }
+        if (entry.sequence < state.checkpointSequence && this.now() - time > 30 * 86400000) { await transport.deleteOwnObject([...parts, name].join('/'), state.device); delete created[name]; }
       }
     }
   }
@@ -489,13 +527,13 @@ export class SyncEngine {
     return this.enqueue(async () => {
       requireSync(this.local); const state = this.local;
       if (removeOwnFiles) {
-        const transport = new FolderTransport(datasetFolder(state.folder, state.dataset.datasetId));
-        for (const generation of (await transport.list(['writers', state.device])).filter(uuid)) for (const kind of ['batches', 'blobs', 'checkpoints']) {
+        const transport = this.active!;
+        for (const generation of (await transportNames(transport, ['writers', state.device])).filter(uuid)) for (const kind of ['batches', 'blobs', 'checkpoints']) {
           const parts = [...writerParts(state.device, generation), kind];
-          for (const name of await transport.list(parts)) if (kind === 'batches' ? validBatch(name) : kind === 'checkpoints' ? validCheckpoint(name) || objectName(name) : objectName(name)) await transport.remove([...parts, name]);
+          for (const name of await transportNames(transport, parts)) if (kind === 'batches' ? validBatch(name) : kind === 'checkpoints' ? validCheckpoint(name) || objectName(name) : objectName(name)) await transport.deleteOwnObject([...parts, name].join('/'), state.device);
         }
       }
-      this.pruneOutbox({ ...state, blobs: {}, outbox: null }); if (existsSync(this.journalPath)) unlinkSync(this.journalPath); unlinkSync(this.path); this.local = undefined; this.failure = null; this.dirty.clear(); this.edits.clear(); clearTimeout(this.dirtyWrite); this.dirtyWrite = undefined; this.host.changed();
+      this.pruneOutbox({ ...state, blobs: {}, outbox: null }); if (existsSync(this.journalPath)) unlinkSync(this.journalPath); unlinkSync(this.path); this.local = undefined; this.active = undefined; this.failure = null; this.dirty.clear(); this.edits.clear(); clearTimeout(this.dirtyWrite); this.dirtyWrite = undefined; this.host.changed();
     });
   }
 }

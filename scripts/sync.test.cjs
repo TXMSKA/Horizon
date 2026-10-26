@@ -9,7 +9,7 @@ const { browserSyncHost } = require('../dist/electron/sync-browser.js');
 const { sealSync, openSync, randomSyncKeys, canonical, SYNC_LIMITS } = require('../dist/electron/sync-format.js');
 const { FolderTransport, decodeSync, deadline, SYNC_ROOT_PARTS } = require('../dist/electron/sync-transport.js');
 const transportModule = require('../dist/electron/sync-transport.js');
-const { readSyncState } = require('../dist/electron/sync-storage.js');
+const { readSyncState, writeSyncState } = require('../dist/electron/sync-storage.js');
 const { createSettings } = require('../dist/electron/settings.js');
 const { makeProfile, writeRegistry, profileStorePath } = require('../dist/electron/profiles.js');
 const { readStore, writeStore } = require('../dist/electron/store.js');
@@ -53,6 +53,109 @@ async function pair(t) {
 }
 async function converge(a, b) { await a.engine.pulse(); await b.engine.pulse(); await a.engine.pulse(); }
 function batchFiles(folder) { return files(folder).filter(path => path.includes('batches') && path.endsWith('.hzs')); }
+
+class MemoryTransport {
+  constructor(label = 'Synthetic memory') { this.label = label; this.objects = new Map(); }
+  describe() { return { kind: 'folder', label: this.label }; }
+  readDescriptor() { return this.readObject('dataset.hzs', 4096); }
+  async *listObjects(prefix) {
+    const children = new Set([...this.objects.keys()].filter(path => path.startsWith(prefix + '/')).map(path => prefix + '/' + path.slice(prefix.length + 1).split('/')[0]));
+    for (const path of [...children].sort()) { await Promise.resolve(); yield path; }
+  }
+  async readObject(path, cap) {
+    const bytes = this.objects.get(path); if (!bytes) throw Object.assign(new Error('Missing object'), { code: 'ENOENT' });
+    assert.ok(bytes.length <= cap); return Buffer.from(bytes);
+  }
+  async writeObject(path, bytes, cap) {
+    assert.ok(bytes.length <= cap); const previous = this.objects.get(path);
+    if (previous && !previous.equals(bytes)) throw new Error('SYNC_CONFLICT'); this.objects.set(path, Buffer.from(bytes));
+  }
+  async deleteOwnObject(path, device) { assert.ok(path.startsWith(`writers/${device}/`)); this.objects.delete(path); }
+}
+
+test('sync transports preserve create-only objects, caps and own-writer deletion', async t => {
+  const { folder } = setup(t), device = randomUUID(), generation = randomUUID(), dataset = randomUUID(), path = `writers/${device}/${generation}/blobs/${randomUUID()}.hzs`;
+  for (const transport of [new MemoryTransport(), new FolderTransport(folder, SYNC_LIMITS.timeout, dataset)]) {
+    await transport.writeObject(path, Buffer.from('Original'), 100); await transport.writeObject(path, Buffer.from('Original'), 100);
+    await assert.rejects(transport.writeObject(path, Buffer.from('Different'), 100), /SYNC_CONFLICT/);
+    assert.equal((await transport.readObject(path, 100)).toString(), 'Original'); await assert.rejects(transport.readObject(path, 1));
+    await assert.rejects(async () => transport.deleteOwnObject(path, randomUUID())); await transport.deleteOwnObject(path, device);
+    await assert.rejects(transport.readObject(path, 100));
+    // Only the memory transport arbitrates simultaneous writers; a folder writer owns its namespace alone and keeps plain rename for FAT, exFAT and cloud folders.
+    if (transport instanceof MemoryTransport) {
+      const raced = await Promise.allSettled([transport.writeObject(path, Buffer.from('First'), 100), transport.writeObject(path, Buffer.from('Second'), 100)]);
+      assert.equal(raced.filter(result => result.status === 'fulfilled').length, 1); assert.match(raced.find(result => result.status === 'rejected').reason.message, /SYNC_CONFLICT/);
+      const winner = await transport.readObject(path, 100); await Promise.all([transport.writeObject(path, winner, 100), transport.writeObject(path, winner, 100)]);
+    } else {
+      await transport.writeObject(path, Buffer.from('Again'), 100); await transport.writeObject(path, Buffer.from('Again'), 100);
+      await assert.rejects(transport.writeObject(path, Buffer.from('Different'), 100), /SYNC_CONFLICT/);
+    }
+  }
+  await assert.rejects(async () => new FolderTransport(folder).writeObject('unrelated.txt', Buffer.from('Rejected'), 100)); assert.equal(existsSync(join(folder, 'unrelated.txt')), false);
+});
+
+test('sync an empty destination receives checkpoints and referenced images from both writers and a new peer converges', async t => {
+  const { root, folder, a, b } = await pair(t), memory = new MemoryTransport(), next = { kind: 'folder', folder: join(root, 'memory') };
+  for (const [index, peer] of [a, b].entries()) {
+    const id = randomUUID(); peer.data.desktop.addCapture(null, { id, folder: null, kind: 'area', title: `Image ${index}`, text: '', note: '', source: { url: 'https://synthetic.example/switch', title: 'Image' }, image: null, createdAt: 1, updatedAt: 1 }, Buffer.from(`Image bytes ${index}`), { width: 10, height: 10, cut: false }); peer.engine.markDirty('desktop');
+  }
+  await converge(a, b); const c = seat(t, root, 'c'); await c.engine.join(folder, a.engine.revealKey(), true);
+  memory.objects.set('dataset.hzs', Buffer.from(canonical(a.engine.local.dataset)));
+  const factory = (selection, dataset) => selection.folder === next.folder ? memory : transportModule.folderSyncTransport(selection, dataset);
+  for (const peer of [a, b, c]) { peer.engine.options.transport = factory; await peer.engine.switchTransport(next); }
+  await converge(a, b); await c.engine.pulse();
+  assert.equal(c.data.desktop.captureList().length, 2); for (const item of c.data.desktop.captureList()) assert.ok(c.data.desktop.image(null, item.id).toString().startsWith('Image bytes '));
+  a.advance(); b.advance(2000); a.store(store => store.favorites.bar.push(favorite(undefined, 'Memory favorite'))); await converge(a, b); b.store(store => { store.favorites.bar[0].title = 'Memory edit'; }); await converge(b, a); assert.equal(a.data.store.favorites.bar[0].title, 'Memory edit');
+});
+
+test('sync switches after an upload, retains sealed retries and publishes later edits only through the new transport', async t => {
+  const { root, folder } = setup(t), memory = new MemoryTransport(), next = { kind: 'folder', folder: join(root, 'memory') };
+  const a = seat(t, root, 'a', { transport: (selection, dataset) => selection.folder === next.folder ? memory : transportModule.folderSyncTransport(selection, dataset) });
+  await a.engine.create(folder, true); await a.engine.pulse();
+  const source = new FolderTransport(folder, SYNC_LIMITS.timeout, a.engine.local.dataset.datasetId);
+  const copy = async prefix => { for await (const path of source.listObjects(prefix)) { if (path.endsWith('.hzs')) memory.objects.set(path, await source.readObject(path, SYNC_LIMITS.blob)); else await copy(path); } };
+  memory.objects.set('dataset.hzs', await source.readDescriptor()); await copy('writers');
+  let release, entered; const blocked = new Promise(done => { entered = done; }), gate = new Promise(done => { release = done; }), publish = source.writeObject.bind(source);
+  a.engine.active.writeObject = async (...args) => { entered(); await gate; return publish(...args); };
+  a.store(store => store.favorites.bar.push(favorite(undefined, 'In flight'))); const pulse = a.engine.pulse(); await blocked;
+  let switched = false; const switching = a.engine.switchTransport(next).then(() => { switched = true; }); await new Promise(done => setImmediate(done)); assert.equal(switched, false);
+  a.advance(); a.store(store => store.favorites.bar.push(favorite(undefined, 'During switch'))); release(); await assert.rejects(pulse, /SYNC_CHANGED/); const pending = structuredClone(a.engine.local.outbox); await switching;
+  assert.deepEqual(a.engine.local.outbox, pending); assert.ok(a.engine.local.edits.some(edit => edit.record.value?.entry?.title === 'During switch'));
+  const before = files(folder).map(path => [path, readFileSync(path)]); await a.engine.pulse();
+  for (const file of pending.files) assert.equal(memory.objects.has(file.parts.join('/')), true);
+  assert.equal(a.data.store.favorites.bar.length, 2); assert.equal(a.engine.local.outbox, null); assert.equal(a.engine.state().folderName, memory.label);
+  for (const [path, bytes] of before) assert.deepEqual(readFileSync(path), bytes);
+  const reopened = new SyncEngine(a.directory, a.encryption, a.host, a.engine.options); t.after(() => reopened.stop()); await reopened.pulse(); assert.deepEqual(reopened.local.transport, next);
+});
+
+for (const invalid of ['dataset', 'key', 'unavailable']) test(`sync refuses a switch with a different ${invalid} and keeps the old transport working`, async t => {
+  const { root, folder } = setup(t), memory = new MemoryTransport(), next = { kind: 'folder', folder: join(root, 'memory') }, a = seat(t, root, 'a', { transport: (selection, dataset) => selection.folder === next.folder ? memory : transportModule.folderSyncTransport(selection, dataset) });
+  await a.engine.create(folder, true); await a.engine.pulse(); const original = structuredClone(a.engine.local), other = await randomSyncKeys.create();
+  if (invalid !== 'unavailable') memory.objects.set('dataset.hzs', Buffer.from(canonical(invalid === 'dataset' ? other.check : { ...original.dataset, check: sealSync(other.key, { dataset: original.dataset.datasetId, device: original.dataset.datasetId, generation: original.dataset.datasetId, sequence: 0, id: original.dataset.datasetId, kind: 'check' }, { check: 'Horizon Sync' }).toString('base64') })));
+  await assert.rejects(a.engine.switchTransport(next), /SYNC_SWITCH_FAILED/); assert.equal(a.engine.state().failure, 'SYNC_SWITCH_FAILED'); assert.deepEqual(a.engine.local.transport, original.transport);
+  assert.equal(memory.objects.size, invalid === 'unavailable' ? 0 : 1); a.store(store => store.favorites.bar.push(favorite())); await a.engine.pulse(); assert.equal(a.engine.state().failure, null); assert.ok(batchFiles(folder).length > 1);
+});
+
+test('sync version-one migration preserves identities, key, mapping, conflicts, pending edits and outbox and never rewrites invalid state', async t => {
+  const { a, b } = await pair(t); a.store(store => store.favorites.bar.push(favorite())); await converge(a, b);
+  a.advance(); b.advance(2000); a.store(store => { store.favorites.bar[0].title = 'Older'; }); b.store(store => { store.favorites.bar[0].title = 'Newer'; }); await converge(a, b);
+  a.advance(); a.store(store => { store.favorites.bar[0].title = 'Pending'; }); a.engine.options.afterSeal = () => { throw new Error('Synthetic interruption'); }; await assert.rejects(a.engine.pulse()); a.engine.stop();
+  const path = join(a.directory, 'sync', 'state.sealed'), legacy = readSyncState(path, a.encryption); legacy.folder = legacy.transport.folder; delete legacy.transport; writeSyncState(path, legacy, a.encryption);
+  const bytes = readFileSync(path), reopened = new SyncEngine(a.directory, a.encryption, a.host); t.after(() => reopened.stop());
+  const migrated = readSyncState(path, a.encryption); assert.deepEqual(migrated, { ...Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== 'folder')), transport: { kind: 'folder', folder: legacy.folder } }); assert.notDeepEqual(readFileSync(path), bytes);
+  assert.ok(migrated.outbox.files.length && migrated.conflicts.length && migrated.edits.length); assert.equal(reopened.revealKey(), a.engine.revealKey());
+  for (const corrupt of [{ ...legacy, edits: 'invalid' }, { ...legacy, transport: { kind: 'quantum' } }]) {
+    writeSyncState(path, corrupt, a.encryption); const before = readFileSync(path), broken = new SyncEngine(a.directory, a.encryption, a.host); assert.equal(broken.state().configured, false); assert.deepEqual(readFileSync(path), before);
+  }
+  writeFileSync(path, Buffer.from('Corrupt sealed state')); const broken = new SyncEngine(a.directory, a.encryption, a.host); assert.equal(broken.state().failure, 'SYNC_STORAGE'); assert.equal(readFileSync(path).toString(), 'Corrupt sealed state');
+});
+
+test('sync folder create, cleanup and leave preserve unrelated files', async t => {
+  const { root, folder } = setup(t), unrelated = join(folder, 'personal.txt'); writeFileSync(unrelated, 'Unrelated content');
+  const a = seat(t, root, 'a'); await a.engine.create(folder, true); await a.engine.pulse(); const state = a.engine.local, nested = join(folder, ...SYNC_ROOT_PARTS, state.dataset.datasetId, 'writers', state.device, state.generation, 'batches', 'unrelated.txt'); writeFileSync(nested, 'Unrelated writer file');
+  a.advance(31 * 86400000); a.engine.local.operationsSinceCheckpoint = 499; a.store(store => store.favorites.bar.push(favorite())); await a.engine.pulse(); await a.engine.leave(true);
+  assert.equal(readFileSync(unrelated).toString(), 'Unrelated content'); assert.equal(readFileSync(nested).toString(), 'Unrelated writer file');
+});
 
 test('sync converges all items through real validators and a third install joins checkpoints', async t => {
   const { root, folder } = setup(t), a = seat(t, root, 'a'), b = seat(t, root, 'b');

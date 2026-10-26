@@ -10,7 +10,7 @@ export const integer = (value: unknown): value is number => typeof value === 'nu
 export function requireSync(condition: unknown, code: SyncFailure = 'SYNC_INVALID'): asserts condition { if (!condition) throw new Error(code); }
 export function syncFailure(error: unknown): SyncFailure {
   const code = error instanceof Error ? error.message : '';
-  if (['SYNC_INVALID', 'SYNC_NEWER_FORMAT', 'SYNC_WRONG_KEY', 'SYNC_STORAGE', 'SYNC_FOLDER', 'SYNC_FULL', 'SYNC_LIMIT', 'SYNC_TIMEOUT', 'SYNC_LOCKED', 'SYNC_GAP', 'SYNC_BLOB_PENDING', 'SYNC_CHANGED'].includes(code)) return code as SyncFailure;
+  if (['SYNC_INVALID', 'SYNC_NEWER_FORMAT', 'SYNC_WRONG_KEY', 'SYNC_STORAGE', 'SYNC_FOLDER', 'SYNC_FULL', 'SYNC_LIMIT', 'SYNC_TIMEOUT', 'SYNC_LOCKED', 'SYNC_GAP', 'SYNC_BLOB_PENDING', 'SYNC_CHANGED', 'SYNC_SWITCH_FAILED', 'SYNC_CONFLICT'].includes(code)) return code as SyncFailure;
   if (error && typeof error === 'object' && 'code' in error && ['ENOSPC', 'EDQUOT'].includes(String(error.code))) return 'SYNC_FULL';
   if (error && typeof error === 'object' && 'code' in error && ['ENOENT', 'ENOTDIR', 'EACCES', 'EIO', 'ENETUNREACH'].includes(String(error.code))) return 'SYNC_FOLDER';
   return 'SYNC_STORAGE';

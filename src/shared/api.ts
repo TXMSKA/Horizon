@@ -30,7 +30,7 @@ export type LanguageSetting = 'system' | Language;
 export type OnStart = 'restore' | 'new-page';
 export const SYNC_ITEMS = ['profiles', 'favorites', 'history', 'tabs', 'desktop', 'siteSettings', 'settings'] as const;
 export type SyncItem = typeof SYNC_ITEMS[number];
-export type SyncFailure = 'SYNC_INVALID' | 'SYNC_NEWER_FORMAT' | 'SYNC_WRONG_KEY' | 'SYNC_STORAGE' | 'SYNC_FOLDER' | 'SYNC_FULL' | 'SYNC_LIMIT' | 'SYNC_TIMEOUT' | 'SYNC_LOCKED' | 'SYNC_GAP' | 'SYNC_BLOB_PENDING' | 'SYNC_CHANGED';
+export type SyncFailure = 'SYNC_INVALID' | 'SYNC_NEWER_FORMAT' | 'SYNC_WRONG_KEY' | 'SYNC_STORAGE' | 'SYNC_FOLDER' | 'SYNC_FULL' | 'SYNC_LIMIT' | 'SYNC_TIMEOUT' | 'SYNC_LOCKED' | 'SYNC_GAP' | 'SYNC_BLOB_PENDING' | 'SYNC_CHANGED' | 'SYNC_SWITCH_FAILED' | 'SYNC_CONFLICT';
 export interface SyncComputerIdentity { id: string; name: string }
 export interface SyncConflict { id: string; item: SyncItem; title: string; computer: SyncComputerIdentity; time: number; deleted: boolean }
 export interface SyncRemoteWindow { profile: string; id: string; tabs: { title: string; url: string; group: string | null }[]; groups: { id: string; title: string }[] }
