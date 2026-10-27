@@ -794,7 +794,7 @@ export const copy = {
   importTranslationsMany: { en: '{count} translation choices', es: '{count} elecciones de traducción' },
   importPasswordsOption: { en: 'Passwords, from a file you export', es: 'Contraseñas, desde un archivo exportado' },
   importPasswordsHintChrome: { en: 'Export them from {name}: Password Manager, Settings, Export passwords.', es: 'Se exportan desde {name}: Administrador de contraseñas, Configuración, Exportar contraseñas.' },
-  importPasswordsHintEdge: { en: 'Export them from {name}: Settings, Passwords, Export passwords.', es: 'Se exportan desde {name}: Configuración, Contraseñas, Exportar contraseñas.' },
+  importPasswordsHintEdge: { en: 'Export them from {name}: menu, Passwords, More options, Export passwords.', es: 'Se exportan desde {name}: menú, Contraseñas, Más opciones, Exportar contraseñas.' },
   importPasswordsHintFirefox: { en: 'Export them from {name}: about:logins, menu, Export passwords.', es: 'Se exportan desde {name}: about:logins, menú, Exportar contraseñas.' },
   importPasswordsChoose: { en: 'Choose file', es: 'Elegir archivo' },
   importPasswordsChange: { en: 'Choose another file', es: 'Elegir otro archivo' },
