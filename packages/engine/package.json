@@ -2,7 +2,7 @@
   "name": "horizon-engine",
   "version": "0.1.0",
   "private": true,
-  "license": "GPL-3.0-or-later",
+  "license": "GPL-3.0-or-later OR LicenseRef-TXMSKA",
   "description": "Horizon's browsing engine for host apps: session protections and tabs, with no chrome of its own.",
   "type": "module",
   "exports": {
@@ -12,6 +12,7 @@
     }
   },
   "files": [
+    "LICENSE-TXMSKA.md",
     "dist"
   ],
   "dependencies": {

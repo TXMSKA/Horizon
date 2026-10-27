@@ -129,3 +129,7 @@ The debugger attaches on first use and is detached on `release()`, tab close, do
 `npm run test:security` includes the pure package tests. `npm run verify:engine` runs an offscreen Electron host against local fixtures. The `filterDownload(url, signal)` protection option is a test hook that replaces filter-list downloads without changing the blocker. Return filter text for list URLs and a JSON resource document such as `{"redirects":[],"scriptlets":[]}` for `resources.json`. Use a fresh `dataDir` to avoid loading an existing cache. Omit this hook in normal hosts.
 
 The public surface is 0.x; see [UNSTABLE.md](UNSTABLE.md) before changing it.
+
+## License
+
+GPL-3.0-or-later for everyone. TXMSKA, the sole copyright holder, also licenses horizon-engine under separate terms for its own products; see [LICENSE-TXMSKA.md](LICENSE-TXMSKA.md).
