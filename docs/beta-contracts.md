@@ -32,7 +32,7 @@ Never synced: cookies and site sessions, Chromium caches, downloaded files, exte
 - Both transports carry the same `.hzs` objects and share publication, merge, conflict, checkpoint and recovery code (`docs/sync-engine.md`).
 - Existing folder datasets stay readable after upgrading.
 - Folder sync stays free and provider-neutral: the interface names no storage provider.
-- Quantum transport (**planned**, task 038): personal dataset routes `/v1/datasets/{id}` and `/objects/{path}` exist today with Horizon's registered layout; uploads declare length and SHA-256 and identical retries succeed. Writer authorization uses the registered sign-in computer id. Quantum only ever stores encrypted objects.
+- Quantum transport (task 038, main process): account-scoped enrollment and personal dataset routes `/v1/datasets/{id}` and `/objects/{path}` use Horizon's registered layout. Uploads declare SHA-256; Chromium supplies Content-Length, and identical retries succeed. Writers use the registered sign-in computer id. Only profiles assigned to that account are projected. Quantum only stores encrypted objects; the interface follows separately.
 
 ## Capabilities
 
@@ -48,7 +48,7 @@ Never synced: cookies and site sessions, Chromium caches, downloaded files, exte
 ## Keys and encryption
 
 - The account content key follows Quantum `docs/keys.md` (approved 2026-10-22). Horizon keeps its own public GPL implementation of the shared key store (Tom, 2026-10-22 and 2026-10-26): Windows DPAPI CurrentUser today; Linux protection to the same contract in task 034; no plaintext fallback.
-- HKDF purposes used by Horizon: `cosmic/account/keypair` (account key pair), `cosmic/space/profile` (Space profile), `cosmic/space/<spaceId>/<generation>/horizon/project` and `.../manifest` (shared projects). Personal Quantum sync purposes are fixed in task 038 under `cosmic/account/horizon/<purpose>`.
+- HKDF purposes used by Horizon: `cosmic/account/keypair` (account key pair), `cosmic/space/profile` (Space profile), `cosmic/space/<spaceId>/<generation>/horizon/project` and `.../manifest` (shared projects). Personal Quantum sync derives its 32-byte dataset key from K with HKDF-SHA256, empty salt and info `cosmic/account/horizon/sync/<datasetId>`; descriptors use `keyType: 'account'`. Existing folder descriptors retain `keyType: 'random'`.
 
 ## Lyra
 

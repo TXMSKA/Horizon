@@ -3,8 +3,9 @@ import { lstat, mkdir, open, opendir, rename, unlink } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
-import { requireSync, SYNC_LIMITS, uuid, validateDataset } from './sync-format';
+import { requireSync, shape, SYNC_LIMITS, uuid, validateDataset } from './sync-format';
 import type { SyncIdentity } from './sync-format';
+import { accountId } from './spaces';
 
 export async function deadline<T>(work: Promise<T>, timeout: number = SYNC_LIMITS.timeout): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -12,7 +13,11 @@ export async function deadline<T>(work: Promise<T>, timeout: number = SYNC_LIMIT
   finally { clearTimeout(timer); }
 }
 const missing = (error: unknown) => error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
-export interface SyncTransportSelection { kind: 'folder'; folder: string }
+export type SyncTransportSelection = { kind: 'folder'; folder: string } | { kind: 'quantum'; accountId: string; datasetId: string };
+export function validTransportSelection(value: unknown): value is SyncTransportSelection {
+  return shape(value, ['kind', 'folder']) && value.kind === 'folder' && typeof value.folder === 'string' && isAbsolute(value.folder) && value.folder.length <= 4096 && !value.folder.includes('\0')
+    || shape(value, ['kind', 'accountId', 'datasetId']) && value.kind === 'quantum' && accountId(value.accountId) && uuid(value.datasetId);
+}
 export interface SyncTransport {
   describe(): { kind: 'folder' | 'quantum'; label: string };
   readDescriptor(): Promise<Buffer>;
@@ -105,7 +110,7 @@ export function decodeSync(key: Buffer, identity: SyncIdentity, bytes: Buffer): 
   });
 }
 export const SYNC_ROOT_PARTS = ['Data', 'Horizon'] as const;
-export const folderSyncTransport = (selection: SyncTransportSelection, dataset: string): SyncTransport => new FolderTransport(selection.folder, SYNC_LIMITS.timeout, dataset);
+export const folderSyncTransport = (selection: SyncTransportSelection, dataset: string): SyncTransport => { requireSync(selection.kind === 'folder'); return new FolderTransport(selection.folder, SYNC_LIMITS.timeout, dataset); };
 export async function folderSyncDataset(folder: string) {
   const transport = new FolderTransport(folder), datasets = (await transport.list([...SYNC_ROOT_PARTS])).filter(uuid); requireSync(datasets.length === 1, 'SYNC_FOLDER');
   let descriptor: unknown;

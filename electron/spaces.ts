@@ -9,7 +9,7 @@ import type { AccountKeyPair, KeyEnvelope } from './cosmic-crypto';
 import { openProjectManifest } from './space-sharing';
 
 // Quantum sends a dataset's newest object time as Unix milliseconds; an ISO string is accepted too. Both become ISO.
-const datasetTime = (value: unknown): string | null => {
+export const datasetTime = (value: unknown): string | null => {
   const time = typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : typeof value === 'string' && value.length <= 40 ? Date.parse(value) : NaN;
   return Number.isFinite(time) ? new Date(time).toISOString() : null;
 };

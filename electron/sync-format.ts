@@ -10,7 +10,8 @@ export const integer = (value: unknown): value is number => typeof value === 'nu
 export function requireSync(condition: unknown, code: SyncFailure = 'SYNC_INVALID'): asserts condition { if (!condition) throw new Error(code); }
 export function syncFailure(error: unknown): SyncFailure {
   const code = error instanceof Error ? error.message : '';
-  if (['SYNC_INVALID', 'SYNC_NEWER_FORMAT', 'SYNC_WRONG_KEY', 'SYNC_STORAGE', 'SYNC_FOLDER', 'SYNC_FULL', 'SYNC_LIMIT', 'SYNC_TIMEOUT', 'SYNC_LOCKED', 'SYNC_GAP', 'SYNC_BLOB_PENDING', 'SYNC_CHANGED', 'SYNC_SWITCH_FAILED', 'SYNC_CONFLICT'].includes(code)) return code as SyncFailure;
+  if (code === 'ACCOUNT_DENIED') return 'SYNC_NOT_ALLOWED';
+  if (['SYNC_INVALID', 'SYNC_NEWER_FORMAT', 'SYNC_WRONG_KEY', 'SYNC_STORAGE', 'SYNC_FOLDER', 'SYNC_FULL', 'SYNC_LIMIT', 'SYNC_TIMEOUT', 'SYNC_LOCKED', 'SYNC_GAP', 'SYNC_BLOB_PENDING', 'SYNC_CHANGED', 'SYNC_SWITCH_FAILED', 'SYNC_CONFLICT', 'SYNC_NOT_ALLOWED', 'SYNC_RATE_LIMITED'].includes(code)) return code as SyncFailure;
   if (error && typeof error === 'object' && 'code' in error && ['ENOSPC', 'EDQUOT'].includes(String(error.code))) return 'SYNC_FULL';
   if (error && typeof error === 'object' && 'code' in error && ['ENOENT', 'ENOTDIR', 'EACCES', 'EIO', 'ENETUNREACH'].includes(String(error.code))) return 'SYNC_FOLDER';
   return 'SYNC_STORAGE';
@@ -75,13 +76,13 @@ export function validatePayload(value: unknown, identity: SyncIdentity): asserts
   for (const conflict of value.conflicts) requireSync(shape(conflict, ['id', 'operation']) && uuid(conflict.id) && validateOperation(conflict.operation) && conflict.operation.item !== 'computer');
   requireSync(identity.kind === 'checkpoint' || value.conflicts.length === 0);
 }
-export interface DatasetParameters { magic: 'Horizon Sync'; version: 1; datasetId: string; keyType: 'random'; check: string }
+export interface DatasetParameters { magic: 'Horizon Sync'; version: 1; datasetId: string; keyType: 'random' | 'account'; check: string }
 export interface SyncKeySource { create(): Promise<{ key: Buffer; check: DatasetParameters }>; open(input: string, parameters: DatasetParameters): Promise<Buffer>; encode(key: Buffer): string }
 export const checkIdentity = (dataset: string): SyncIdentity => ({ dataset, device: dataset, generation: dataset, sequence: 0, id: dataset, kind: 'check' });
 export function validateDataset(value: unknown): asserts value is DatasetParameters {
   requireSync(shape(value, ['magic', 'version', 'datasetId', 'keyType', 'check']));
   requireSync(value.version === 1, integer(value.version) && value.version > 1 ? 'SYNC_NEWER_FORMAT' : 'SYNC_INVALID');
-  requireSync(value.magic === 'Horizon Sync' && uuid(value.datasetId) && value.keyType === 'random' && typeof value.check === 'string' && value.check.length <= 1024);
+  requireSync(value.magic === 'Horizon Sync' && uuid(value.datasetId) && (value.keyType === 'random' || value.keyType === 'account') && typeof value.check === 'string' && value.check.length <= 1024);
   requireSync(Buffer.from(value.check, 'base64').toString('base64') === value.check);
 }
 export const randomSyncKeys: SyncKeySource = {

@@ -7228,6 +7228,7 @@ require('./translate.test.cjs');
 
 require('./sync.test.cjs');
 require('./sync-ui.test.cjs');
+require('./quantum-sync.test.cjs');
 
 test('sync save uses the native destination and writes only the explicitly exported code', async t => {
   const folder = temporaryDirectory(t, 'sync-save-cloud'), destination = join(temporaryDirectory(t, 'sync-save-export'), 'code.txt');
@@ -7586,6 +7587,54 @@ test('account refreshes a rejected access token exactly once and persists the ro
   const refresh = fixture.requests.slice(before)[1]; assert.ok(refresh.body.refreshToken === previous.refreshToken);
   assert.ok(fixture.requests.at(-1).headers.authorization === `Bearer ${rotated.accessToken}`);
   assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
+});
+
+async function quantumAccountFixture(t) {
+  const material = new Uint8Array(32).fill(71), fixture = await accountFixture(t, { keyStore: { kind: 'session', async get() { return material.slice(); }, async set() { assert.fail('An existing key must not be replaced'); } } });
+  const handler = call => call.path === '/v1/me' ? { status: 200, body: { email: 'person@example.test', devices: [{ id: fixture.token().deviceId, userId: 'account-fixture', appId: 'horizon', computerId: readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8') }] } } : undefined;
+  fixture.handle(handler); await fixture.signIn();
+  return { ...fixture, material, handler };
+}
+
+test('Quantum account requests refresh a rejected bearer once, preserve bytes and bind the dataset key to the account', async t => {
+  const fixture = await quantumAccountFixture(t), profile = randomUUID(), dataset = randomUUID(), account = fixture.account.quantumSync([profile]);
+  assert.ok(account); assert.equal(fixture.account.accountId(), 'account-fixture'); assert.equal(account.accountId, 'account-fixture'); assert.deepEqual(account.profileIds, [profile]);
+  assert.equal(account.computerId, readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8'));
+  const key = await account.deriveSyncKey(dataset), expected = Buffer.from(require('node:crypto').hkdfSync('sha256', fixture.material, Buffer.alloc(0), `cosmic/account/horizon/sync/${dataset}`, 32));
+  assert.ok(key.equals(expected)); key.fill(0); expected.fill(0);
+  const previous = fixture.token(), rotated = fixture.rotate({ ...accountTokens(), deviceId: previous.deviceId }), route = `/v1/datasets/${dataset}/objects/dataset.hzs`, bytes = Buffer.from('Synthetic immutable descriptor');
+  fixture.handle(call => call.path === route && call.headers.authorization === `Bearer ${previous.accessToken}` ? { status: 401, body: { error: { code: 'unauthorized' } } } : fixture.handler(call));
+  const before = fixture.requests.length, transport = new (require('../dist/electron/sync-quantum.js').QuantumTransport)(account, dataset);
+  await transport.writeObject('dataset.hzs', bytes, 4096);
+  const calls = fixture.requests.slice(before); assert.deepEqual(calls.map(call => [call.method, call.path]), [['PUT', route], ['POST', '/v1/oauth/token'], ['PUT', route]]);
+  for (const call of [calls[0], calls[2]]) {
+    assert.ok(call.body.equals(bytes)); assert.equal(call.headers['content-type'], 'application/octet-stream');
+    assert.equal(call.headers['x-content-sha256'], require('node:crypto').createHash('sha256').update(bytes).digest('hex'));
+  }
+  assert.ok(calls[1].body.refreshToken === previous.refreshToken); assert.ok(calls[2].headers.authorization === `Bearer ${rotated.accessToken}`);
+  assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
+  fixture.handle(call => call.path === route ? { status: 401, body: { error: { code: 'unauthorized' } } } : fixture.handler(call));
+  const refused = fixture.requests.length; await assert.rejects(transport.writeObject('dataset.hzs', bytes, 4096), /SYNC_NOT_ALLOWED/);
+  assert.deepEqual(fixture.requests.slice(refused).map(call => [call.method, call.path]), [['PUT', route], ['POST', '/v1/oauth/token'], ['PUT', route]]);
+  fixture.handle(call => call.path === route ? { status: 200, body: Buffer.alloc(4097) } : fixture.handler(call));
+  await assert.rejects(transport.readDescriptor(), /SYNC_LIMIT/);
+  for (const path of ['/v1/keys', '/v1/datasets/../keys', '/v1/datasets/%2e%2e/keys']) await assert.rejects(account.request(path), /ACCOUNT_DENIED/);
+});
+
+test('Quantum account sign-out rejects a late download and invalidates its bound requests and derived keys', async t => {
+  const fixture = await quantumAccountFixture(t); fixture.account.close();
+  let started, finish; const fetching = new Promise(done => { started = done; }), pending = new Promise(done => { finish = done; });
+  const account = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {}, fetch: async (url, init) => {
+    if (new URL(url).pathname.startsWith('/v1/datasets/')) { started(); return pending; }
+    return fixture.host.fetch(url, init);
+  } }); t.after(() => account.close());
+  await account.retry(); const bound = account.quantumSync([randomUUID()]), dataset = randomUUID(); assert.ok(bound);
+  const transport = new (require('../dist/electron/sync-quantum.js').QuantumTransport)(bound, dataset), download = transport.readDescriptor();
+  const rejected = assert.rejects(download, /SYNC_NOT_ALLOWED/); await fetching; await account.signOut();
+  const bytes = Buffer.from('Synthetic late response'); finish(new Response(bytes, { headers: { 'content-length': String(bytes.length), 'x-content-sha256': require('node:crypto').createHash('sha256').update(bytes).digest('hex') } }));
+  await rejected; assert.equal(account.accountId(), null); assert.equal(account.quantumSync([randomUUID()]), undefined);
+  await assert.rejects(bound.request('/v1/datasets?limit=100'), /ACCOUNT_DENIED/); await assert.rejects(bound.deriveSyncKey(dataset), /ACCOUNT_DENIED/);
+  assert.deepEqual(account.state(), { status: 'signedOut' });
 });
 
 test('account invalid_grant signs out locally and sign-out removes the sealed file even when revocation fails', async t => {

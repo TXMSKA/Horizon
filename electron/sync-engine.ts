@@ -4,14 +4,17 @@ import { resolve } from 'node:path';
 import { hostname } from 'node:os';
 import { SYNC_ITEMS } from '../src/shared/api';
 import type { DesktopItem, SyncComputer, SyncFailure, SyncItem, SyncState } from '../src/shared/api';
-import { canonical, integer, randomSyncKeys, recordId, requireSync, sealSync, shape, syncFailure, SYNC_LIMITS, uuid, validateDataset, validateOperation } from './sync-format';
+import { canonical, checkIdentity, integer, openSync, randomSyncKeys, recordId, requireSync, sealSync, shape, syncFailure, SYNC_LIMITS, uuid, validateDataset, validateOperation } from './sync-format';
 import type { DatasetParameters, KeptConflict, SyncIdentity, SyncKeySource, SyncOperation, SyncPayload, SyncRecord } from './sync-format';
 import { blobReference, computerName, mergeOperation, projectSnapshot, recordTitle, snapshotRecords, syncEnabled, validateRecord } from './sync-model';
 import type { BlobReference, SyncSnapshot } from './sync-model';
 import { atomicSyncFile, readSyncState, syncStorageAvailable, writeSyncState } from './sync-storage';
 import type { SyncCipher } from './sync-storage';
-import { decodeSync, folderSyncDataset, folderSyncTransport, objectName, validBatch, validCheckpoint, writerParts } from './sync-transport';
+import { decodeSync, folderSyncDataset, folderSyncTransport, objectName, validBatch, validCheckpoint, validTransportSelection, writerParts } from './sync-transport';
 import type { SyncTransport, SyncTransportSelection } from './sync-transport';
+import { enrollQuantumDataset, QuantumTransport } from './sync-quantum';
+import type { QuantumAccount } from './sync-quantum';
+import { accountId } from './spaces';
 
 export interface SyncHost {
   read(): SyncSnapshot;
@@ -21,7 +24,7 @@ export interface SyncHost {
   changed(): void;
 }
 interface OutgoingFile { file: string; parts: string[]; cap: number }
-interface Outbox { files: OutgoingFile[]; operations: SyncOperation[]; snapshot: SyncRecord[]; sequence: number; checkpoint: number }
+interface Outbox { files: OutgoingFile[]; operations: SyncOperation[]; snapshot: SyncRecord[]; sequence: number; checkpoint: number; accountId?: string; profileIds?: string[] }
 interface RecordEdit { record: SyncRecord; time: number; title: string }
 interface EngineState {
   version: 1; transport: SyncTransportSelection; dataset: DatasetParameters; key: string; binding: string; device: string; generation: string; sequence: number;
@@ -31,6 +34,8 @@ interface EngineState {
   application: string | null;
   dirty: Partial<Record<SyncItem, number>>; ownBatches: Record<string, number>; ownCheckpoints: Record<string, number>;
   edits: RecordEdit[];
+  folderKey?: string;
+  quantumAccountId?: string;
 }
 const switches = (): Record<SyncItem, boolean> => ({ profiles: true, favorites: true, history: false, tabs: true, desktop: true, siteSettings: true, settings: true });
 export const emptySyncState = (): SyncState => ({ configured: false, folderName: null, lastSynced: null, switches: switches(), failure: null, conflicts: [], computers: [], syncing: false });
@@ -45,7 +50,9 @@ function validateState(value: unknown): asserts value is EngineState {
   if (shape(value, fields)) Object.assign(value, { dirty: {}, ownBatches: {}, ownCheckpoints: {} });
   const previous = [...fields, 'dirty', 'ownBatches', 'ownCheckpoints'];
   if (shape(value, previous)) Object.assign(value, { edits: [] });
-  requireSync(shape(value, [...previous, 'edits']) && value.version === 1);
+  requireSync(shape(value, [...previous, 'edits', ...(value && typeof value === 'object' && 'folderKey' in value ? ['folderKey'] : []), ...(value && typeof value === 'object' && 'quantumAccountId' in value ? ['quantumAccountId'] : [])]) && value.version === 1);
+  requireSync(value.folderKey === undefined || typeof value.folderKey === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.folderKey));
+  requireSync(value.quantumAccountId === undefined || accountId(value.quantumAccountId));
   requireSync(Array.isArray(value.edits) && value.edits.length <= SYNC_LIMITS.records);
   const edits = new Set<string>();
   for (const edit of value.edits) {
@@ -57,7 +64,7 @@ function validateState(value: unknown): asserts value is EngineState {
   requireSync(Object.keys(value.dirty as object).every(item => SYNC_ITEMS.includes(item as SyncItem)) && Object.keys(value.ownBatches as object).every(validBatch) && Object.keys(value.ownCheckpoints as object).every(validCheckpoint));
   requireSync(value.application === null || uuid(value.application));
   validateDataset(value.dataset);
-  requireSync(shape(value.transport, ['kind', 'folder']) && value.transport.kind === 'folder' && typeof value.transport.folder === 'string' && value.transport.folder.length <= 4096 && typeof value.key === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.key) && typeof value.binding === 'string' && uuid(value.device) && uuid(value.generation) && integer(value.sequence));
+  requireSync(validTransportSelection(value.transport) && (value.transport.kind !== 'quantum' || value.transport.datasetId === value.dataset.datasetId) && typeof value.key === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.key) && typeof value.binding === 'string' && uuid(value.device) && uuid(value.generation) && integer(value.sequence));
   requireSync(shape(value.switches, [...SYNC_ITEMS]) && Object.values(value.switches).every(entry => typeof entry === 'boolean'));
   for (const field of ['mapping', 'cursors', 'blobs'] as const) requireSync(value[field] !== null && typeof value[field] === 'object' && !Array.isArray(value[field]) && Object.keys(value[field]).length <= SYNC_LIMITS.records);
   requireSync(Object.entries(value.mapping as object).every(([key, id]) => uuid(key) && uuid(id)) && Object.values(value.cursors as object).every(integer));
@@ -68,7 +75,7 @@ function validateState(value: unknown): asserts value is EngineState {
   for (const reference of Object.values(value.blobs as object)) requireSync(shape(reference, ['device', 'generation', 'id']) && Object.values(reference).every(uuid));
   requireSync(integer(value.operationsSinceCheckpoint) && integer(value.checkpointSequence) && (value.lastSynced === null || integer(value.lastSynced)) && typeof value.joining === 'boolean' && Array.isArray(value.fresh) && value.fresh.every(item => SYNC_ITEMS.includes(item as SyncItem)));
   if (value.outbox !== null) {
-    requireSync(shape(value.outbox, ['files', 'operations', 'snapshot', 'sequence', 'checkpoint']) && Array.isArray(value.outbox.files) && value.outbox.files.length <= SYNC_LIMITS.files && Array.isArray(value.outbox.operations) && value.outbox.operations.every(validateOperation) && Array.isArray(value.outbox.snapshot) && integer(value.outbox.sequence) && integer(value.outbox.checkpoint));
+    requireSync(shape(value.outbox, ['files', 'operations', 'snapshot', 'sequence', 'checkpoint', ...('accountId' in Object(value.outbox) ? ['accountId'] : []), ...('profileIds' in Object(value.outbox) ? ['profileIds'] : [])]) && (value.outbox.accountId === undefined || accountId(value.outbox.accountId)) && (value.outbox.profileIds === undefined || Array.isArray(value.outbox.profileIds) && value.outbox.profileIds.every(uuid)) && Array.isArray(value.outbox.files) && value.outbox.files.length <= SYNC_LIMITS.files && Array.isArray(value.outbox.operations) && value.outbox.operations.every(validateOperation) && Array.isArray(value.outbox.snapshot) && integer(value.outbox.sequence) && integer(value.outbox.checkpoint));
     for (const file of value.outbox.files) requireSync(shape(file, ['file', 'parts', 'cap']) && uuid(file.file) && Array.isArray(file.parts) && file.parts.length === 5 && file.parts.every(part => typeof part === 'string' && !/[\\/\x00]/.test(part) && part !== '..') && (file.cap === SYNC_LIMITS.package || file.cap === SYNC_LIMITS.blob));
   }
 }
@@ -98,7 +105,9 @@ export class SyncEngine {
   private lastRead = 0;
   private stopped = false;
   private verifyGeneration = true;
-  constructor(readonly userData: string, readonly cipher: SyncCipher, readonly host: SyncHost, readonly options: { keys?: SyncKeySource; now?: () => number; pulseMs?: number; afterSeal?: () => void; name?: string; transport?: (selection: SyncTransportSelection, dataset: string) => SyncTransport } = {}) {
+  private quantumAccount: QuantumAccount | undefined;
+  private retryAt = 0;
+  constructor(readonly userData: string, readonly cipher: SyncCipher, readonly host: SyncHost, readonly options: { keys?: SyncKeySource; now?: () => number; pulseMs?: number; afterSeal?: () => void; name?: string; transport?: (selection: SyncTransportSelection, dataset: string) => SyncTransport; quantum?: (accountId: string) => QuantumAccount | undefined } = {}) {
     this.path = resolve(userData, 'sync', 'state.sealed'); this.outboxPath = resolve(userData, 'sync', 'outbox');
     this.journalPath = resolve(userData, 'sync', 'apply.sealed'); this.incomingPath = resolve(userData, 'sync', 'incoming');
     this.binding = createHash('sha256').update(`${hostname()}\0${resolve(userData)}`).digest('hex');
@@ -110,13 +119,44 @@ export class SyncEngine {
       this.dirty = new Map(Object.entries(state.dirty) as [SyncItem, number][]);
       this.edits = new Map(state.edits.map(edit => [recordId(edit.record), edit]));
       if (state.binding !== this.binding || status.restored) {
-        if (state.binding !== this.binding) state.device = randomUUID();
+        if (state.binding !== this.binding && state.transport.kind === 'folder') state.device = randomUUID();
         state.binding = this.binding; state.generation = randomUUID(); state.sequence = 0; state.checkpointSequence = 0; state.operationsSinceCheckpoint = 0; state.ownBatches = {}; state.ownCheckpoints = {}; state.fresh = [...SYNC_ITEMS]; this.save(state);
       } else if (legacy) this.save(state);
       this.local = state;
+      if (state.transport.kind === 'quantum') this.accountChanged();
     } catch (error) { this.failure = syncFailure(error); }
   }
-  private transport(selection: SyncTransportSelection, dataset: string) { return (this.options.transport ?? folderSyncTransport)(selection, dataset); }
+  private account(id: string) {
+    const account = this.options.quantum ? this.options.quantum(id) : this.quantumAccount;
+    requireSync(account && account.accountId === id && uuid(account.computerId) && account.profileIds.length > 0 && account.profileIds.every(uuid), 'SYNC_NOT_ALLOWED'); account.assertActive(); return account;
+  }
+  accountChanged() {
+    if (this.local?.transport.kind !== 'quantum') return;
+    try {
+      const account = this.account(this.local.transport.accountId);
+      if (account.computerId !== this.local.device) void this.switchTransport(this.local.transport).catch(() => undefined);
+      this.start();
+    }
+    catch { this.stop(); this.failure = 'SYNC_NOT_ALLOWED'; this.host.changed(); }
+  }
+  private assertAccount(state: EngineState) { if (state.transport.kind === 'quantum') this.account(state.transport.accountId); }
+  private mapping(state: EngineState) {
+    if (state.transport.kind === 'folder') return state.mapping;
+    const ids = new Set(this.account(state.transport.accountId).profileIds); return Object.fromEntries(Object.entries(state.mapping).filter(([id]) => ids.has(id)));
+  }
+  private selected(state: EngineState, record: SyncRecord) {
+    if (state.transport.kind === 'folder') return true;
+    const ids = new Set(Object.values(this.mapping(state))); return record.item === 'profiles' ? ids.has(record.key) : record.profile === null || ids.has(record.profile);
+  }
+  private transport(selection: SyncTransportSelection, dataset: string) {
+    if (this.options.transport) return this.options.transport(selection, dataset);
+    if (selection.kind === 'folder') return folderSyncTransport(selection, dataset);
+    // Restoring a signed-out dataset keeps its sealed state available for a later sign-in.
+    const resolveAccount = () => this.account(selection.accountId);
+    const account: QuantumAccount = { get accountId() { return selection.accountId; }, get computerId() { return resolveAccount().computerId; }, get profileIds() { return resolveAccount().profileIds; }, assertActive() { resolveAccount(); }, request(path, init, cap) { return resolveAccount().request(path, init, cap); }, deriveSyncKey(id) { return resolveAccount().deriveSyncKey(id); } };
+    const active = () => new QuantumTransport(account, dataset);
+    return { describe: () => ({ kind: 'quantum' as const, label: 'Cosmic' }), readDescriptor: () => active().readDescriptor(), listObjects: (prefix: string) => active().listObjects(prefix), readObject: (path: string, cap: number) => active().readObject(path, cap), writeObject: (path: string, bytes: Buffer, cap: number) => active().writeObject(path, bytes, cap), deleteOwnObject: (path: string, device: string) => active().deleteOwnObject(path, device) };
+  }
   private now() { return this.options.now?.() ?? Date.now(); }
   private keys() { return this.options.keys ?? randomSyncKeys; }
   private name() { return computerName(this.options.name ?? hostname()) || 'Computer'; }
@@ -139,7 +179,7 @@ export class SyncEngine {
     finally { clearTimeout(this.dirtyWrite); this.dirtyWrite = undefined; }
   }
   private enqueue<T>(work: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(work).catch(error => { this.failure = syncFailure(error); this.host.changed(); throw new Error(this.failure); });
+    const result = this.queue.then(work).catch(error => { this.failure = syncFailure(error); if (this.failure === 'SYNC_RATE_LIMITED' && error && typeof error === 'object' && 'retryAfterMs' in error && typeof error.retryAfterMs === 'number') this.retryAt = this.now() + error.retryAfterMs; this.host.changed(); throw new Error(this.failure); });
     // A rejected command must not poison later retries; its caller still receives the rejection.
     this.queue = result.then(() => undefined, () => undefined); return result;
   }
@@ -191,6 +231,18 @@ export class SyncEngine {
       this.save(state); this.local = state; this.active = transport; this.failure = null; this.host.changed();
     });
   }
+  async enrollQuantum(profileAccount: QuantumAccount): Promise<void> {
+    return this.enqueue(async () => {
+      requireSync(!this.local); syncStorageAvailable(this.cipher); profileAccount.assertActive();
+      const enrolled = await enrollQuantumDataset(profileAccount); profileAccount.assertActive();
+      this.quantumAccount = profileAccount;
+      const state = this.initial('', enrolled.descriptor, enrolled.key);
+      state.transport = { kind: 'quantum', accountId: profileAccount.accountId, datasetId: enrolled.datasetId };
+      state.quantumAccountId = profileAccount.accountId;
+      state.device = profileAccount.computerId; state.joining = true;
+      this.save(state); this.local = state; this.active = this.transport(state.transport, state.dataset.datasetId); this.failure = null; this.start(); this.host.changed();
+    });
+  }
   private initial(folder: string, dataset: DatasetParameters, key: Buffer): EngineState {
     return { version: 1, transport: { kind: 'folder', folder: resolve(folder) }, dataset, key: key.toString('base64'), binding: this.binding, device: randomUUID(), generation: randomUUID(), sequence: 0, mapping: {}, switches: switches(), records: [], snapshot: [], conflicts: [], cursors: {}, blobs: {}, outbox: null, operationsSinceCheckpoint: 0, checkpointSequence: 0, lastSynced: null, joining: false, fresh: [...SYNC_ITEMS], application: null, dirty: {}, ownBatches: {}, ownCheckpoints: {}, edits: [] };
   }
@@ -198,23 +250,64 @@ export class SyncEngine {
     return this.enqueue(async () => {
       try {
         requireSync(this.local); this.flushDirty(); await this.recoverApplication();
-        const selection = { ...next }; requireSync(shape(selection, ['kind', 'folder']) && selection.kind === 'folder' && typeof selection.folder === 'string');
+        const selection = { ...next }; requireSync(validTransportSelection(selection));
+        if (selection.kind === 'quantum') requireSync(selection.datasetId === this.local.dataset.datasetId && (this.local.transport.kind !== 'quantum' || selection.accountId === this.local.transport.accountId));
+        if (selection.kind === 'quantum' && this.local.outbox?.accountId) requireSync(selection.accountId === this.local.outbox.accountId, 'SYNC_NOT_ALLOWED');
+        if (selection.kind === 'quantum' && this.local.quantumAccountId) requireSync(selection.accountId === this.local.quantumAccountId, 'SYNC_NOT_ALLOWED');
+        const assigned = selection.kind === 'quantum' ? [...this.account(selection.accountId).profileIds] : [];
+        const assertDestination = () => { if (selection.kind === 'quantum') { const current = new Set(this.account(selection.accountId).profileIds); requireSync(assigned.every(id => current.has(id)), 'SYNC_NOT_ALLOWED'); } };
         const transport = this.transport(selection, this.local.dataset.datasetId);
         const descriptor: unknown = JSON.parse((await transport.readDescriptor()).toString('utf8')); validateDataset(descriptor);
         requireSync(descriptor.datasetId === this.local.dataset.datasetId);
-        await this.keys().open(this.keys().encode(Buffer.from(this.local.key, 'base64')), descriptor);
+        const oldKey = Buffer.from(this.local.key, 'base64');
+        const key = selection.kind === 'quantum' ? await this.account(selection.accountId).deriveSyncKey(selection.datasetId) : descriptor.keyType === 'random' && this.local.folderKey ? Buffer.from(this.local.folderKey, 'base64') : oldKey;
+        if (selection.kind === 'quantum') requireSync(descriptor.keyType === 'account');
+        const check = openSync(key, checkIdentity(descriptor.datasetId), Buffer.from(descriptor.check, 'base64'));
+        requireSync(shape(check, ['check']) && check.check === 'Horizon Sync', 'SYNC_WRONG_KEY');
+        if (selection.kind === 'quantum' && canonical(selection) === canonical(this.local.transport) && this.local.device === this.account(selection.accountId).computerId && oldKey.equals(key)) { this.failure = null; this.host.changed(); return; }
         const state = structuredClone(this.local); state.transport = selection; state.dataset = descriptor;
-        const references = new Map([...state.records, ...state.snapshot, ...state.conflicts.map(conflict => conflict.operation), ...(state.outbox?.operations ?? []), ...(state.outbox?.snapshot ?? [])].flatMap(record => { const reference = blobReference(record); return reference ? [[blobFileKey(reference), reference] as const] : []; }));
+        if (selection.kind === 'quantum') state.quantumAccountId = selection.accountId;
+        if (this.local.transport.kind === 'quantum') state.quantumAccountId ??= this.local.transport.accountId;
+        const rekey = !oldKey.equals(key) || selection.kind === 'quantum' && (this.local.transport.kind === 'folder' || state.device !== this.account(selection.accountId).computerId);
+        if (rekey) {
+          if (this.local.dataset.keyType === 'random') state.folderKey = this.local.key;
+          state.key = key.toString('base64'); state.device = selection.kind === 'quantum' ? this.account(selection.accountId).computerId : state.device;
+          state.generation = randomUUID(); state.sequence = 0; state.checkpointSequence = 0; state.operationsSinceCheckpoint = 0; state.ownBatches = {}; state.ownCheckpoints = {}; state.cursors = {};
+        }
+        const allRecords = [...state.records, ...state.snapshot, ...state.conflicts.map(conflict => conflict.operation), ...(state.outbox?.operations ?? []), ...(state.outbox?.snapshot ?? [])];
+        const selectedReferences = new Set(allRecords.filter(record => this.selected(state, record)).flatMap(record => { const reference = blobReference(record); return reference ? [blobFileKey(reference)] : []; }));
+        const references = new Map(allRecords.flatMap(record => { const reference = blobReference(record); return reference ? [[blobFileKey(reference), reference] as const] : []; }));
+        const replacements = new Map<string, BlobReference>();
         for (const [id, reference] of references) {
           const path = [...writerParts(reference.device, reference.generation), 'blobs', `${reference.id}.hzs`].join('/');
-          const cached = resolve(this.incomingPath, createHash('sha256').update(id).digest('hex')), own = resolve(this.outboxPath, reference.id), source = existsSync(cached) ? cached : reference.device === state.device && existsSync(own) ? own : null;
+          const cached = resolve(this.incomingPath, createHash('sha256').update(id).digest('hex')), own = resolve(this.outboxPath, reference.id), source = existsSync(cached) ? cached : reference.device === this.local.device && existsSync(own) ? own : null;
           if (source) requireSync(statSync(source).size <= SYNC_LIMITS.blob, 'SYNC_LIMIT');
           const bytes = source ? readFileSync(source) : await this.active!.readObject(path, SYNC_LIMITS.blob);
-          await transport.writeObject(path, bytes, SYNC_LIMITS.blob);
+          if (!selectedReferences.has(id)) {
+            // Keep other profiles' ciphertext locally so a later folder switch can recover it.
+            atomicSyncFile(cached, bytes); continue;
+          }
+          if (rekey) {
+            const replacement = { device: state.device, generation: state.generation, id: randomUUID() };
+            const identity: SyncIdentity = { dataset: descriptor.datasetId, ...reference, sequence: 0, kind: 'blob' };
+            let image: unknown;
+            try { image = openSync(oldKey, identity, bytes); }
+            catch (error) { if (!state.folderKey) throw error; image = openSync(Buffer.from(state.folderKey, 'base64'), identity, bytes); }
+            const sealed = sealSync(key, { dataset: descriptor.datasetId, ...replacement, sequence: 0, kind: 'blob' }, image);
+            assertDestination(); await transport.writeObject([...writerParts(replacement.device, replacement.generation), 'blobs', `${replacement.id}.hzs`].join('/'), sealed, SYNC_LIMITS.blob);
+            atomicSyncFile(resolve(this.outboxPath, replacement.id), sealed); replacements.set(id, replacement);
+          } else { assertDestination(); await transport.writeObject(path, bytes, SYNC_LIMITS.blob); }
+        }
+        if (rekey) {
+          const replace = (record: SyncRecord) => { const reference = blobReference(record), replacement = reference && replacements.get(blobFileKey(reference)); if (replacement) (record.value as { entry: { image: { blob: BlobReference } } }).entry.image.blob = replacement; };
+          for (const record of [...state.records, ...state.snapshot, ...state.conflicts.map(conflict => conflict.operation)]) replace(record);
+          for (const [id, reference] of Object.entries(state.blobs)) state.blobs[id] = replacements.get(blobFileKey(reference)) ?? reference;
+          // The host still holds pending edits; a new checkpoint reseals them for this key and writer.
+          state.outbox = null;
         }
         // A destination may hold only its descriptor; the next pulse must publish a complete projection.
         state.fresh = SYNC_ITEMS.filter(item => state.switches[item]);
-        this.save(state); this.local = state; this.active = transport; this.verifyGeneration = true; this.lastRead = 0; this.failure = null; this.host.changed();
+        assertDestination(); this.assertAccount(state); this.save(state); this.local = state; this.active = transport; this.verifyGeneration = true; this.lastRead = 0; this.failure = null; this.start(); this.host.changed();
       } catch { throw new Error('SYNC_SWITCH_FAILED'); }
     });
   }
@@ -244,6 +337,7 @@ export class SyncEngine {
       const records = new Map(next.records.map(record => [recordId(record), record])), old = records.get(recordId(conflict.operation));
       const op = { ...conflict.operation, id: randomUUID(), base: old?.id ?? null, time: this.now(), device: next.device, generation: next.generation }; records.set(recordId(op), op);
       const snapshot = this.host.read(), captured = this.capture(next, snapshot), desired = this.project(next, snapshot, [...records.values()]), images = await this.images(next, [...records.values()], captured.sources);
+      this.assertAccount(next); requireSync(this.selected(next, op), 'SYNC_NOT_ALLOWED');
       const undo = this.host.apply(desired, images);
       try { this.rememberImages(next, this.host.read(), [...records.values()]); next.conflicts = next.conflicts.filter(entry => entry.id !== id); this.save(next); this.local = next; } catch (error) { undo(); throw error; }
       this.markDirty(op.item as SyncItem); this.host.changed();
@@ -254,6 +348,8 @@ export class SyncEngine {
     if (this.running) return this.running;
     const work = this.enqueue(async () => {
       if (!this.local) return;
+      if (this.now() < this.retryAt) return;
+      this.assertAccount(this.local);
       try { this.failure = await this.runPulse(force, receiveOnly) ?? null; }
       finally { this.host.changed(); }
     });
@@ -262,7 +358,7 @@ export class SyncEngine {
   private async incoming(state: EngineState): Promise<{ operations: SyncOperation[]; conflicts: KeptConflict[]; cursors: Record<string, number>; waiting: SyncFailure | null }> {
     const transport = this.active!, operations: SyncOperation[] = [], conflicts: KeptConflict[] = [], cursors = { ...state.cursors }, key = Buffer.from(state.key, 'base64');
     let dataset: unknown;
-    try { dataset = JSON.parse((await transport.readDescriptor()).toString('utf8')); } catch (error) { throw new Error(syncFailure(error)); }
+    try { dataset = JSON.parse((await transport.readDescriptor()).toString('utf8')); } catch (error) { if (error instanceof SyntaxError) throw new Error('SYNC_INVALID'); throw error; }
     validateDataset(dataset); requireSync(canonical(dataset) === canonical(state.dataset));
     const devices = (await transportNames(transport, ['writers'])).filter(uuid); requireSync(devices.length <= SYNC_LIMITS.writers, 'SYNC_LIMIT'); let writers = 0, waiting: SyncFailure | null = null;
     for (const device of devices) for (const generation of (await transportNames(transport, ['writers', device])).filter(uuid)) {
@@ -290,7 +386,8 @@ export class SyncEngine {
   }
   private capture(state: EngineState, snapshot: SyncSnapshot): { records: SyncRecord[]; sources: Map<string, { profile: string; item: DesktopItem }> } {
     const sources = new Map<string, { profile: string; item: DesktopItem }>();
-    const records = snapshotRecords(snapshot, state.mapping, state.device, (profile, item) => {
+    const mapping = this.mapping(state);
+    const records = snapshotRecords({ ...snapshot, profiles: snapshot.profiles.filter(profile => mapping[profile.id]) }, mapping, state.device, (profile, item) => {
       // Desktop gives replacements a new filename, so snapshots need only metadata to identify an image revision.
       const id = blobKey(state.mapping[profile]!, item), reference = state.blobs[id] ?? { device: state.device, generation: state.generation, id: randomUUID() }; state.blobs[id] = reference;
       sources.set(blobFileKey(reference), { profile, item }); return reference;
@@ -303,7 +400,7 @@ export class SyncEngine {
   }
   private captureEdits(state: EngineState, records: SyncRecord[], markedOnly = false) {
     const baseline = new Map(state.snapshot.map(record => [recordId(record), record])), current = new Map(records.map(record => [recordId(record), record]));
-    const selected = (record: SyncRecord) => ownRecord(record, state.device) && (!markedOnly || record.item !== 'computer' && this.dirty.has(record.item));
+    const selected = (record: SyncRecord) => this.selected(state, record) && ownRecord(record, state.device) && (!markedOnly || record.item !== 'computer' && this.dirty.has(record.item));
     for (const [id, edit] of this.edits) if (selected(edit.record) && !baseline.has(id) && !current.has(id)) this.edits.delete(id);
     for (const [id, record] of new Map([...baseline, ...current])) {
       if (!selected(record)) continue; const value = current.get(id)?.value ?? null, previous = this.edits.get(id);
@@ -319,14 +416,14 @@ export class SyncEngine {
   }
   private project(state: EngineState, snapshot: SyncSnapshot, records: SyncOperation[]): SyncSnapshot {
     const existing = new Map(snapshot.profiles.flatMap(profile => [...profile.desktop.projects.flatMap(project => project.items), ...profile.desktop.captures].map(item => [canonical([profile.id, item.id]), item] as const)));
-    return projectSnapshot(snapshot, state.mapping, records, state.switches, (profile, item, reference) => {
+    return projectSnapshot(snapshot, this.mapping(state), records.filter(record => this.selected(state, record)), state.switches, (profile, item, reference) => {
       const old = existing.get(canonical([profile, item.id]));
       return old?.image && old.image.bytes === item.image?.bytes && canonical(state.blobs[blobKey(state.mapping[profile]!, old)] ?? null) === blobFileKey(reference) ? old.image.filename : `${reference.id}.bin`;
     });
   }
   private rememberImages(state: EngineState, snapshot: SyncSnapshot, records: SyncOperation[]) {
     if (!state.switches.desktop) return; const references = new Map(records.filter(record => record.item === 'desktop').map(record => [recordId(record), blobReference(record)]));
-    for (const profile of snapshot.profiles) for (const item of [...profile.desktop.projects.flatMap(project => project.items), ...profile.desktop.captures]) if (item.image) {
+    for (const profile of snapshot.profiles.filter(profile => this.mapping(state)[profile.id])) for (const item of [...profile.desktop.projects.flatMap(project => project.items), ...profile.desktop.captures]) if (item.image) {
       const reference = references.get(recordId({ item: 'desktop', profile: state.mapping[profile.id]!, key: item.id, value: null })); requireSync(reference);
       state.blobs[blobKey(state.mapping[profile.id]!, item)] = reference;
     }
@@ -356,7 +453,7 @@ export class SyncEngine {
     };
     const records = new Map(state.records.map(record => [recordId(record), record])), conflicts = new Map(state.conflicts.map(conflict => [conflict.id, conflict.operation]));
     for (const operation of operations) mergeOperation(records, operation, conflicts);
-    const blobRecords = checkpoint ? [...records.values()].filter(record => syncEnabled(state.switches, record.item)) : operations;
+    const blobRecords = checkpoint ? [...records.values()].filter(record => this.selected(state, record) && syncEnabled(state.switches, record.item)) : operations;
     let total = 0;
     for (const record of blobRecords) {
       const reference = blobReference(record); if (!reference || reference.device !== state.device || reference.generation !== state.generation || uploaded.has(reference.id)) continue;
@@ -375,16 +472,25 @@ export class SyncEngine {
     if (checkpoint) {
       const id = randomUUID(), identity: SyncIdentity = { dataset: state.dataset.datasetId, device: state.device, generation: state.generation, sequence, id, kind: 'checkpoint' };
       const name = `${sequence}-${id}.hzs`, createdAt = this.now(); state.ownCheckpoints[name] = createdAt;
-      add(identity, [...parts, 'checkpoints', name], { version: 1, kind: 'checkpoint', sequence, createdAt, operations: [...records.values()].filter(record => syncEnabled(state.switches, record.item)), conflicts: [...conflicts].map(([id, operation]) => ({ id, operation })).filter(conflict => syncEnabled(state.switches, conflict.operation.item)) } satisfies SyncPayload, SYNC_LIMITS.package);
+      add(identity, [...parts, 'checkpoints', name], { version: 1, kind: 'checkpoint', sequence, createdAt, operations: [...records.values()].filter(record => this.selected(state, record) && syncEnabled(state.switches, record.item)), conflicts: [...conflicts].map(([id, operation]) => ({ id, operation })).filter(conflict => this.selected(state, conflict.operation) && syncEnabled(state.switches, conflict.operation.item)) } satisfies SyncPayload, SYNC_LIMITS.package);
     }
-    return { files, operations, snapshot: this.baseline(state, snapshot), sequence, checkpoint: checkpoint ? sequence : state.checkpointSequence };
+    return { files, operations, snapshot: this.baseline(state, snapshot), sequence, checkpoint: checkpoint ? sequence : state.checkpointSequence, ...(state.transport.kind === 'quantum' ? { accountId: state.transport.accountId, profileIds: [...this.account(state.transport.accountId).profileIds] } : {}) };
   }
   private async publishOutbox(state: EngineState): Promise<void> {
     const outbox = state.outbox; if (!outbox) return;
+    this.assertAccount(state);
     const transport = this.active!;
-    for (const file of outbox.files) { const path = resolve(this.outboxPath, file.file); requireSync(statSync(path).size <= file.cap, 'SYNC_LIMIT'); await transport.writeObject(file.parts.join('/'), readFileSync(path), file.cap); }
+    for (const file of outbox.files) {
+      this.assertAccount(state);
+      if (state.transport.kind === 'quantum') {
+        const assigned = new Set(this.account(state.transport.accountId).profileIds);
+        requireSync(outbox.accountId === state.transport.accountId && outbox.profileIds?.every(id => assigned.has(id)) && outbox.operations.every(record => this.selected(state, record)), 'SYNC_NOT_ALLOWED');
+      }
+      const path = resolve(this.outboxPath, file.file); requireSync(statSync(path).size <= file.cap, 'SYNC_LIMIT'); await transport.writeObject(file.parts.join('/'), readFileSync(path), file.cap);
+    }
   }
   private async runPulse(force: boolean, receiveOnly: boolean) {
+    this.assertAccount(this.local!);
     this.flushDirty();
     await this.recoverApplication();
     const state = structuredClone(this.local!);
@@ -401,7 +507,7 @@ export class SyncEngine {
     if (this.verifyGeneration) await this.checkGeneration(state);
     const incoming = await this.incoming(state); this.verifyGeneration = false; this.lastRead = this.now();
     const current = this.host.read();
-    if (state.joining) for (const profile of current.profiles) {
+    if (state.joining) for (const profile of current.profiles.filter(profile => state.transport.kind === 'folder' || this.account(state.transport.accountId).profileIds.includes(profile.id))) {
       const remote = incoming.operations.find(record => record.item === 'profiles' && record.value !== null && (record.value as { name: string }).name.toLowerCase() === profile.name.toLowerCase());
       if (remote) state.mapping[profile.id] = remote.key;
     }
@@ -418,7 +524,7 @@ export class SyncEngine {
       const operation: SyncOperation = { ...record, id: randomUUID(), base: records.get(id)?.id ?? null, time: time(id), device: state.device, generation: state.generation };
       validateRecord(operation); changes.push(operation); mergeOperation(records, operation, conflicts);
     }
-    for (const [id, record] of baseline) if (!local.has(id) && syncEnabled(state.switches, record.item) && allowed && ownRecord(record, state.device)) {
+    for (const [id, record] of baseline) if (this.selected(state, record) && !local.has(id) && syncEnabled(state.switches, record.item) && allowed && ownRecord(record, state.device)) {
       const operation: SyncOperation = { ...record, value: null, title: edits.get(id)?.title ?? recordTitle(record), id: randomUUID(), base: records.get(id)?.id ?? null, time: time(id), device: state.device, generation: state.generation }; changes.push(operation); mergeOperation(records, operation, conflicts);
     }
     const outgoingRecords = [...records.values()], outgoingConflicts = [...conflicts].map(([id, operation]) => ({ id, operation }));
@@ -426,7 +532,7 @@ export class SyncEngine {
     for (const conflict of incoming.conflicts) conflicts.set(conflict.id, conflict.operation);
     requireSync(records.size <= SYNC_LIMITS.records && conflicts.size <= SYNC_LIMITS.records, 'SYNC_LIMIT');
     const live = [...records.values()]; let desired = this.project(state, current, live);
-    const images = await this.images(state, live.filter(record => desired.profiles.some(profile => state.mapping[profile.id] === record.profile)), captured.sources);
+    const images = await this.images(state, live.filter(record => this.selected(state, record) && desired.profiles.some(profile => state.mapping[profile.id] === record.profile)), captured.sources);
     const checkpoint = allowed && (state.fresh.some(item => state.switches[item]) || state.operationsSinceCheckpoint + changes.length >= 500);
     if (changes.length || checkpoint) {
       // The durable outbox includes immutable bytes before the first transport write.
@@ -436,6 +542,7 @@ export class SyncEngine {
     }
     if (state.outbox) { state.sequence = state.outbox.sequence; state.checkpointSequence = state.outbox.checkpoint; }
     await this.cleanup(state);
+    this.assertAccount(state);
     const latestSnapshot = this.host.read(), latest = this.capture(state, latestSnapshot);
     const comparable = (records: SyncRecord[]) => canonical(records.filter(record => syncEnabled(state.switches, record.item)).sort((a, b) => recordId(a).localeCompare(recordId(b))));
     requireSync(comparable(captured.records) === comparable(latest.records), 'SYNC_CHANGED');
@@ -496,7 +603,9 @@ export class SyncEngine {
       const reference = image.reference as unknown as BlobReference;
       images.set(blobFileKey(reference), Buffer.from(await decodeSync(Buffer.from(state.key, 'base64'), { dataset: state.dataset.datasetId, ...reference, sequence: 0, kind: 'blob' }, readFileSync(path)) as Uint8Array));
     }
-    const snapshot = journal.snapshot as SyncSnapshot, undo = this.host.apply(snapshot, images);
+    this.assertAccount(this.local); this.assertAccount(state);
+    if (this.local.transport.kind === 'quantum') requireSync(state.transport.kind === 'quantum' && state.transport.accountId === this.local.transport.accountId, 'SYNC_NOT_ALLOWED');
+    const snapshot = state.transport.kind === 'quantum' ? this.project(state, this.host.read(), state.records) : journal.snapshot as SyncSnapshot, undo = this.host.apply(snapshot, images);
     // Recovery may run in a copied install or a new process incarnation.
     if (state.generation !== this.local.generation || state.binding !== this.binding) {
       state.device = this.local.device; state.generation = this.local.generation; state.binding = this.binding; state.sequence = 0; state.checkpointSequence = 0; state.ownBatches = {}; state.ownCheckpoints = {}; state.fresh = [...SYNC_ITEMS];

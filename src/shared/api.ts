@@ -30,13 +30,15 @@ export type LanguageSetting = 'system' | Language;
 export type OnStart = 'restore' | 'new-page';
 export const SYNC_ITEMS = ['profiles', 'favorites', 'history', 'tabs', 'desktop', 'siteSettings', 'settings'] as const;
 export type SyncItem = typeof SYNC_ITEMS[number];
-export type SyncFailure = 'SYNC_INVALID' | 'SYNC_NEWER_FORMAT' | 'SYNC_WRONG_KEY' | 'SYNC_STORAGE' | 'SYNC_FOLDER' | 'SYNC_FULL' | 'SYNC_LIMIT' | 'SYNC_TIMEOUT' | 'SYNC_LOCKED' | 'SYNC_GAP' | 'SYNC_BLOB_PENDING' | 'SYNC_CHANGED' | 'SYNC_SWITCH_FAILED' | 'SYNC_CONFLICT';
+export type SyncFailure = 'SYNC_INVALID' | 'SYNC_NEWER_FORMAT' | 'SYNC_WRONG_KEY' | 'SYNC_STORAGE' | 'SYNC_FOLDER' | 'SYNC_FULL' | 'SYNC_LIMIT' | 'SYNC_TIMEOUT' | 'SYNC_LOCKED' | 'SYNC_GAP' | 'SYNC_BLOB_PENDING' | 'SYNC_CHANGED' | 'SYNC_SWITCH_FAILED' | 'SYNC_CONFLICT' | 'SYNC_NOT_ALLOWED' | 'SYNC_RATE_LIMITED';
 export interface SyncComputerIdentity { id: string; name: string }
 export interface SyncConflict { id: string; item: SyncItem; title: string; computer: SyncComputerIdentity; time: number; deleted: boolean }
 export interface SyncRemoteWindow { profile: string; id: string; tabs: { title: string; url: string; group: string | null }[]; groups: { id: string; title: string }[] }
 export interface SyncComputer extends SyncComputerIdentity { windows: SyncRemoteWindow[] }
 export interface SyncState { configured: boolean; folderName: string | null; lastSynced: number | null; switches: Record<SyncItem, boolean>; failure: SyncFailure | null; conflicts: SyncConflict[]; computers: SyncComputer[]; syncing: boolean }
 export type SyncCommand = { type: 'sync-create'; accepted: true } | { type: 'sync-join'; accepted: true; key: string }
+  | { type: 'sync-quantum-enroll'; profile: string }
+  | { type: 'sync-switch'; transport: { kind: 'folder' } | { kind: 'quantum'; accountId: string; datasetId: string } }
   | { type: 'sync-set-item'; item: SyncItem; enabled: boolean } | { type: 'sync-now' } | { type: 'sync-reveal-key' } | { type: 'sync-save-key' }
   | { type: 'sync-leave'; removeOwnFiles: boolean } | { type: 'sync-restore-conflict' | 'sync-dismiss-conflict'; id: string };
 export const SEARCH_ENGINES = {

@@ -71,12 +71,24 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     switch (type) {
       case 'sync-create': fields = ['accepted']; valid = command.accepted === true; break;
       case 'sync-join': fields = ['accepted', 'key']; valid = command.accepted === true && string(command.key, 128); break;
+      case 'sync-quantum-enroll': fields = ['profile']; valid = isProfileId(command.profile) && (!profileIds || profileIds.has(command.profile)); break;
+      case 'sync-switch': {
+        fields = ['transport'];
+        const transport = command.transport;
+        if (transport && typeof transport === 'object' && !Array.isArray(transport)) {
+          const selection = transport as Record<string, unknown>;
+          valid = Object.hasOwn(selection, 'kind') && (selection.kind === 'folder' && Object.keys(selection).length === 1
+            || selection.kind === 'quantum' && Object.keys(selection).length === 3 && Object.hasOwn(selection, 'accountId') && Object.hasOwn(selection, 'datasetId')
+              && accountId(selection.accountId) && uuid(selection.datasetId));
+        }
+        break;
+      }
       case 'sync-set-item': fields = ['item', 'enabled']; valid = SYNC_ITEMS.includes(command.item as typeof SYNC_ITEMS[number]) && typeof command.enabled === 'boolean'; break;
       case 'sync-now': case 'sync-reveal-key': case 'sync-save-key': valid = true; break;
       case 'sync-leave': fields = ['removeOwnFiles']; valid = typeof command.removeOwnFiles === 'boolean'; break;
       case 'sync-restore-conflict': case 'sync-dismiss-conflict': fields = ['id']; valid = isProfileId(command.id); break;
     }
-    if (!valid || Object.keys(command).length !== fields.length + 1 || !fields.every(key => Object.hasOwn(command, key))) throw new Error('SYNC_INVALID');
+    if (!valid || !Object.hasOwn(command, 'type') || Object.keys(command).length !== fields.length + 1 || !fields.every(key => Object.hasOwn(command, key))) throw new Error('SYNC_INVALID');
     return value as BrowserCommand;
   }
   if (typeof type === 'string' && type.startsWith('translate-')) return validateTranslateCommand(value);

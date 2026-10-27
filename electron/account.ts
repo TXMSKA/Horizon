@@ -9,12 +9,13 @@ import type { StoreCipher } from './store';
 import { vaultTokenStore } from './vault-storage';
 import { cosmicRoot } from './send';
 import { createCosmicKeyStore } from './cosmic-keys';
-import { createAccountKeyPair, openAccountKeyPair, openPhrase, unwrap } from './cosmic-crypto';
+import { createAccountKeyPair, deriveAccountSyncKey, openAccountKeyPair, openPhrase, unwrap } from './cosmic-crypto';
 import type { AccountKeyPair, KeyEnvelope } from './cosmic-crypto';
 import { accountId, accountSuccess, keyEnvelope, readSpaces } from './spaces';
 import { createSpaceSharing } from './space-sharing';
 import { createSharedProjects } from './space-reader';
-import { SYNC_LIMITS } from './sync-format';
+import { SYNC_LIMITS, uuid } from './sync-format';
+import type { QuantumAccount } from './sync-quantum';
 import type { createDesktop } from './desktop';
 
 interface Options {
@@ -80,6 +81,7 @@ export function createAccount(options: Options) {
   let keyStore = options.keyStore, keyStoreError = false, lastRefresh = 0, phraseWork: Promise<void> | undefined;
   let generation = 0, closed = false, checking: Promise<void> | undefined;
   let computerId: string | undefined;
+  let registeredComputerId: string | undefined;
   let attempt: { server: Server; url: string; timer: ReturnType<typeof setTimeout>; used: boolean } | undefined;
   const requests = new Set<AbortController>();
   const spaceGenerations = new Map<string, number>();
@@ -88,7 +90,7 @@ export function createAccount(options: Options) {
   const publish = (next: AccountState) => { state = next; if (!closed) { sharing?.changed(); options.changed(); } };
   const check = (ticket: number) => { if (closed || ticket !== generation) throw new Error('ACCOUNT_DENIED'); };
   const stopAttempt = () => { if (attempt) { clearTimeout(attempt.timer); attempt.server.close(); attempt.server.closeAllConnections(); attempt = undefined; } };
-  const clearKeys = () => { sharedProjects?.clear(); key?.fill(0); key = undefined; pair = undefined; identity = undefined; keyStoreError = false; spaceGenerations.clear(); titleCache.clear(); };
+  const clearKeys = () => { sharedProjects?.clear(); key?.fill(0); key = undefined; pair = undefined; identity = undefined; registeredComputerId = undefined; keyStoreError = false; spaceGenerations.clear(); titleCache.clear(); };
   const invalidate = () => { generation++; checking = undefined; phraseWork = undefined; lastRefresh = 0; clearKeys(); stopAttempt(); for (const controller of requests) controller.abort(); requests.clear(); };
   const fail = (error: unknown, ticket: number) => { if (!closed && ticket === generation) { stopAttempt(); publish({ status: 'error', code: errorCode(error) }); } };
   const readToken = async () => {
@@ -105,11 +107,11 @@ export function createAccount(options: Options) {
     try { unlinkSync(path); }
     catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw new Error('ACCOUNT_STORAGE'); }
   };
-  const request = async (route: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', ticket: number, body?: unknown, bearer?: string) => {
+  const request = async (route: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', ticket: number, body?: unknown, bearer?: string, sync = false, cap?: number) => {
     check(ticket);
     const controller = new AbortController(); requests.add(controller);
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 20000); timer.unref?.();
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, sync ? SYNC_LIMITS.timeout : 20000); timer.unref?.();
     try {
       const { api } = accountEndpoints(options.isPackaged, options.env);
       const binary = Buffer.isBuffer(body), download = method === 'GET' && route.includes('/objects/');
@@ -121,6 +123,8 @@ export function createAccount(options: Options) {
         ...(body === undefined ? {} : { body: binary ? Uint8Array.from(body) : JSON.stringify(body) }) });
       check(ticket);
       if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new Error('ACCOUNT_INVALID_RESPONSE'); }
+      const responseCap = sync && !response.ok ? 65536 : sync && cap !== undefined ? cap : download ? /\/blobs\/[^/]+\.hzs$/.test(route) ? SYNC_LIMITS.blob : SYNC_LIMITS.package : route.startsWith('/v1/spaces') ? 2 * 1024 * 1024 : 65536;
+      if (sync && Number(response.headers.get('content-length')) > responseCap) { await response.body?.cancel(); throw new Error('SYNC_LIMIT'); }
       const reader = response.body?.getReader();
       const chunks: Uint8Array[] = []; let size = 0;
       if (reader) try {
@@ -128,7 +132,7 @@ export function createAccount(options: Options) {
           const { done, value } = await reader.read();
           if (done) break;
           size += value.byteLength;
-          if (size > (download ? /\/blobs\/[^/]+\.hzs$/.test(route) ? SYNC_LIMITS.blob : SYNC_LIMITS.package : route.startsWith('/v1/spaces') ? 2 * 1024 * 1024 : 65536)) { await reader.cancel(); throw new Error('ACCOUNT_INVALID_RESPONSE'); }
+          if (size > responseCap) { await reader.cancel(); throw new Error(sync ? 'SYNC_LIMIT' : 'ACCOUNT_INVALID_RESPONSE'); }
           chunks.push(value);
         }
       } finally { reader.releaseLock(); }
@@ -136,14 +140,14 @@ export function createAccount(options: Options) {
       const bytes = Buffer.concat(chunks);
       let value: unknown;
       if (download && response.ok) {
-        if (response.headers.get('content-length') !== String(bytes.length) || response.headers.get('x-content-sha256') !== createHash('sha256').update(bytes).digest('hex')) throw new Error('ACCOUNT_INVALID_RESPONSE');
+        if (!sync && (response.headers.get('content-length') !== String(bytes.length) || response.headers.get('x-content-sha256') !== createHash('sha256').update(bytes).digest('hex'))) throw new Error('ACCOUNT_INVALID_RESPONSE');
         value = bytes;
       } else try { value = JSON.parse(bytes.toString('utf8')); }
       catch { if (response.ok) throw new Error('ACCOUNT_INVALID_RESPONSE'); }
       const retry = response.headers.get('retry-after');
       const retryAfter = retry !== null && /^\d+$/.test(retry) && Number.isSafeInteger(Number(retry)) ? Number(retry) : undefined;
-      return { status: response.status, ok: response.ok, value, retryAfter };
-    } catch (error) { throw new Error(timedOut ? 'ACCOUNT_TIMEOUT' : errorCode(error)); }
+      return { status: response.status, ok: response.ok, value, retryAfter, headers: response.headers, bytes };
+    } catch (error) { throw new Error(timedOut ? 'ACCOUNT_TIMEOUT' : sync && error instanceof Error && error.message === 'SYNC_LIMIT' ? 'SYNC_LIMIT' : errorCode(error)); }
     finally { clearTimeout(timer); requests.delete(controller); }
   };
   const requireSuccess = (response: { status: number; ok: boolean }) => {
@@ -164,14 +168,14 @@ export function createAccount(options: Options) {
     }
     requireSuccess(response); return saveTokens(response.value, ticket);
   };
-  const authorized = async (route: string, method: 'GET' | 'PUT' | 'DELETE', ticket: number, body?: unknown) => {
+  const authorized = async (route: string, method: 'GET' | 'PUT' | 'DELETE', ticket: number, body?: unknown, sync = false, cap?: number) => {
     let bearer = access && access.expires > Date.now() ? access.token : await refresh(ticket);
     if (!bearer) throw new Error('ACCOUNT_DENIED');
-    let response = await request(route, method, ticket, body, bearer);
+    let response = await request(route, method, ticket, body, bearer, sync, cap);
     if (response.status === 401) {
       access = undefined; bearer = await refresh(ticket);
       if (!bearer) throw new Error('ACCOUNT_DENIED');
-      response = await request(route, method, ticket, body, bearer);
+      response = await request(route, method, ticket, body, bearer, sync, cap);
     }
     return response;
   };
@@ -257,6 +261,7 @@ export function createAccount(options: Options) {
     const id: unknown = record(device) ? device.userId : undefined;
     if (!accountId(id)) { card.spacesError = 'ACCOUNT_INVALID_RESPONSE'; publish(card); return; }
     if (identity !== id) { clearKeys(); identity = id; }
+    registeredComputerId = record(device) && device.appId === 'horizon' && uuid(device.computerId) ? device.computerId : undefined;
     // Development builds may point at a scratch Cosmic folder, as Send to does; shipped builds use the person's own.
     keyStore ??= createCosmicKeyStore({ root: !options.isPackaged && (options.env ?? process.env).HORIZON_COSMIC_ROOT || cosmicRoot(options.env), origin: accountEndpoints(options.isPackaged, options.env).api,
       ...(options.isPackaged ? { helperPath: resolve(process.resourcesPath, 'helpers', 'cosmic-dpapi.exe') } : {}) });
@@ -281,6 +286,32 @@ export function createAccount(options: Options) {
   const cancel = () => { invalidate(); access = undefined; publish({ status: 'signedOut' }); };
   return {
     state: (): AccountState => structuredClone(state), me, retry: me, cancel,
+    accountId: () => !closed && state.status === 'signedIn' ? identity ?? null : null,
+    quantumSync(profileIds: readonly string[]): QuantumAccount | undefined {
+      if (closed || state.status !== 'signedIn' || state.phrase !== 'ready' || !identity || !key || !registeredComputerId
+        || profileIds.length === 0 || !profileIds.every(uuid) || new Set(profileIds).size !== profileIds.length) return;
+      const ticket = generation, account = identity, device = registeredComputerId;
+      const assertActive = () => {
+        check(ticket);
+        if (state.status !== 'signedIn' || state.phrase !== 'ready' || identity !== account || !key || registeredComputerId !== device) throw new Error('ACCOUNT_DENIED');
+      };
+      return { accountId: account, computerId: device, profileIds: [...profileIds], assertActive,
+        async request(route, init = {}, cap) {
+          assertActive();
+          if (!/^\/v1\/datasets(?:\?|\/|$)/.test(route) || /[\x00-\x20\\#]/.test(route) || route.split('?')[0]!.includes('%') || route.split('?')[0]!.split('/').some(part => part === '.' || part === '..')
+            || cap !== undefined && (!Number.isSafeInteger(cap) || cap < 0 || cap > SYNC_LIMITS.blob)) throw new Error('ACCOUNT_DENIED');
+          const method = init.method ?? 'GET';
+          if (!['GET', 'PUT', 'DELETE'].includes(method) || init.body !== undefined && !(init.body instanceof Uint8Array)) throw new Error('ACCOUNT_DENIED');
+          const body = init.body === undefined ? undefined : Buffer.from(init.body as Uint8Array);
+          const response = await authorized(route, method as 'GET' | 'PUT' | 'DELETE', ticket, body, true, cap); assertActive();
+          return new Response(Uint8Array.from(response.bytes), { status: response.status, headers: response.headers });
+        },
+        async deriveSyncKey(datasetId) {
+          assertActive(); const derived = await deriveAccountSyncKey(key!, datasetId);
+          try { assertActive(); return derived; } catch (error) { derived.fill(0); throw error; }
+        },
+      };
+    },
     shareProject: (project: string, space: string) => {
       if (!sharing) return Promise.reject(new Error('SPACE_SHARE_FAILED'));
       return sharing.shareProject(project, space);

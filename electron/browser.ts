@@ -6,7 +6,7 @@ import { app, clipboard, ClipboardItem, dialog, ipcMain, Menu, nativeImage, nati
 import type { BrowserWindow, DownloadItem, Session, WebContents } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
@@ -267,7 +267,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       finally { data?.favicons?.dispose(); if (data) delete data.favicons; }
     }
   };
-  const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); clearRemovedFavicons(next); shared.registry = next; registry = next; shared.sync?.markDirty('profiles'); for (const owner of shared.owners.values()) owner.registryChanged(); };
+  const saveRegistry = (next: ProfileRegistry) => { writeRegistry(registryPath, next); clearRemovedFavicons(next); shared.registry = next; registry = next; shared.sync?.accountChanged(); shared.sync?.markDirty('profiles'); for (const owner of shared.owners.values()) owner.registryChanged(); };
   const runtimeFor = (profile: Profile) => {
     let runtime = runtimes.get(profile.id);
     if (!runtime) { runtime = createRuntime(profile); runtimes.set(profile.id, runtime); }
@@ -306,6 +306,23 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (closing || shared.quitting || revision !== profileRevision) throw new Error('SPACE_SHARED_UNAVAILABLE');
     return value;
   };
+  let quantumAccountsRestored = false;
+  const restoreQuantumAccounts = () => {
+    if (quantumAccountsRestored) return;
+    quantumAccountsRestored = true;
+    for (const profile of shared.registry.profiles) if (!shared.profiles.get(profile.id)?.account
+      && existsSync(resolve(dirname(profileStorePath(userData, profile.id)), 'account.sealed'))) profileDataFor(profile);
+  };
+  const quantumAccount = (accountId: string) => {
+    restoreQuantumAccounts();
+    const profiles = shared.registry.profiles.filter(profile => shared.profiles.get(profile.id)?.account?.accountId() === accountId);
+    const ids = profiles.map(profile => profile.id);
+    for (const profile of profiles) {
+      const account = shared.profiles.get(profile.id)?.account?.quantumSync(ids);
+      if (account) return account;
+    }
+    return undefined;
+  };
   const run = (command: BrowserCommand) => {
     if (closing || shared.quitting) throw new Error('Browser is closing');
     if (command.type.startsWith('vault-') || command.type === 'set-vault-timeout') return vault.run(command as VaultCommand);
@@ -334,6 +351,27 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     if (command.type.startsWith('sync-')) {
       const sync = shared.sync!;
       switch (command.type) {
+        case 'sync-quantum-enroll': return (async () => {
+          restoreQuantumAccounts();
+          const manager = shared.profiles.get(command.profile)?.account, id = manager?.accountId();
+          if (!manager || !id) throw new Error('SYNC_NOT_ALLOWED');
+          const account = manager.quantumSync(shared.registry.profiles.filter(profile => shared.profiles.get(profile.id)?.account?.accountId() === id).map(profile => profile.id));
+          if (!account) throw new Error('SYNC_NOT_ALLOWED');
+          try { await sync.enrollQuantum(account); await sync.pulse(true); }
+          catch (error) { throw new Error(syncFailure(error)); }
+        })();
+        case 'sync-switch': return (async () => {
+          if (command.transport.kind === 'quantum') {
+            const manager = shared.profiles.get(selectedProfile)?.account;
+            if (!manager || manager.accountId() !== command.transport.accountId || !manager.quantumSync([selectedProfile])) throw new Error('SYNC_NOT_ALLOWED');
+            await sync.switchTransport(command.transport);
+          } else {
+            let choice: Electron.OpenDialogReturnValue;
+            try { choice = await dialog.showOpenDialog(window, { properties: ['openDirectory'] }); } catch { throw new Error('SYNC_FOLDER'); }
+            if (choice.canceled) throw new Error('SYNC_CANCELLED');
+            await sync.switchTransport({ kind: 'folder', folder: choice.filePaths[0] ?? '' });
+          }
+        })();
         case 'sync-create': case 'sync-join': return (async () => {
           let choice: Electron.OpenDialogReturnValue;
           try { choice = await dialog.showOpenDialog(window, { properties: ['openDirectory'] }); } catch { throw new Error('SYNC_FOLDER'); }
@@ -492,7 +530,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       default: return current().run(command);
     }
   };
-  function createRuntime(profile: Profile) {
+  function profileDataFor(profile: Profile) {
     const storePath = profileStorePath(userData, profile.id);
     let data = shared.profiles.get(profile.id);
     if (!data) {
@@ -506,11 +544,15 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const profileData = data;
     if (!privateWindow && !profileData.account) {
       const account = createAccount({ directory: dirname(storePath), userData, cipher: safeStorage, isPackaged: app.isPackaged, desktop: profileData.desktop,
-        language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { for (const owner of shared.owners.values()) owner.publish(); },
+        language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { shared.sync?.accountChanged(); for (const owner of shared.owners.values()) owner.publish(); },
         // The default session refuses every web request, so the account talks to Quantum through its own in-memory session.
         openExternal: url => shell.openExternal(url), fetch: (input, init) => session.fromPartition('horizon-account').fetch(String(input), init) });
       profileData.account = account; void account.retry().catch(() => undefined);
     }
+    return profileData;
+  }
+  function createRuntime(profile: Profile) {
+    const storePath = profileStorePath(userData, profile.id), profileData = profileDataFor(profile);
     const favicons = privateWindow ? undefined : profileData.favicons ??= createFaviconCache(resolve(dirname(storePath), 'favicons.json'), safeStorage,
       bytes => nativeImage.createFromBuffer(bytes), () => { for (const owner of shared.owners.values()) owner.publish(); });
     const readStatus = profileData.status;
@@ -2161,10 +2203,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   if (!privateWindow && !shared.sync) {
     const changed = () => { for (const owner of shared.owners.values()) owner.publish(); };
     const host = browserSyncHost(userData, safeStorage, settings, { profiles: shared.profiles, registry: () => shared.registry,
-      registryChanged: next => { clearRemovedFavicons(next); shared.registry = next; for (const owner of shared.owners.values()) owner.registryChanged(); },
+      registryChanged: next => { clearRemovedFavicons(next); shared.registry = next; shared.sync?.accountChanged(); for (const owner of shared.owners.values()) owner.registryChanged(); },
       flush: () => { for (const owner of shared.owners.values()) if (!owner.privateWindow) { owner.flush(); if (!owner.syncReady()) throw new Error('SYNC_STORAGE'); } }, changed, dirty: () => shared.sync?.markDirty('desktop'), applied: () => { for (const owner of shared.owners.values()) if (!owner.privateWindow) owner.syncApplied(); } });
     const override = app.isPackaged ? undefined : Number(process.env.HORIZON_SYNC_PULSE_MS);
-    shared.sync = new SyncEngine(userData, safeStorage, host, { pulseMs: typeof override === 'number' && Number.isSafeInteger(override) && override >= 50 && override <= 60000 ? override : undefined });
+    shared.sync = new SyncEngine(userData, safeStorage, host, { quantum: quantumAccount, pulseMs: typeof override === 'number' && Number.isSafeInteger(override) && override >= 50 && override <= 60000 ? override : undefined });
     shared.sync.start();
   }
   app.on('before-quit', beforeQuit);
