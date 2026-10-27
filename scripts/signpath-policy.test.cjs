@@ -23,7 +23,7 @@ test('NSIS shows the privacy policy as plain text and preserves assisted per-use
   assert.deepEqual(config.nsis, {
     license: 'build/privacy.txt', oneClick: false, perMachine: false, allowElevation: true,
     allowToChangeInstallationDirectory: true, createDesktopShortcut: true, createStartMenuShortcut: true,
-    shortcutName: 'Horizon', deleteAppDataOnUninstall: false,
+    shortcutName: 'Horizon', menuCategory: 'Cosmic', deleteAppDataOnUninstall: false,
   });
 });
 
