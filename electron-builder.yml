@@ -31,6 +31,8 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Horizon
+  # Every Cosmic app keeps its Start menu shortcut in one shared folder; an update moves an older loose shortcut there.
+  menuCategory: Cosmic
   deleteAppDataOnUninstall: false
 linux:
   target:
