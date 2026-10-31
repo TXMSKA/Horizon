@@ -46,5 +46,11 @@
     "letter": "SV",
     "short": "Services",
     "title": "Installing Vault and Lyra when a feature needs them"
+  },
+  {
+    "id": "sync",
+    "letter": "SY",
+    "short": "Sync",
+    "title": "Sync: a Cosmic account or a folder"
   }
 ]
