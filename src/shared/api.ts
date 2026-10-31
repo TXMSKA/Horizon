@@ -4,8 +4,8 @@ import type { ServiceReason } from './services';
 import type { TranslateCommand, TranslateState, TranslationChoices } from './translate';
 export type Language = 'en' | 'es';
 export interface AccountSpaceMember { accountId: string; displayName: string | null; role: 'owner' | 'member'; keyChanged: boolean }
-export interface AccountSpace { id: string; name: string; code: string | null; colour: string | null; icon: string | null; role: 'owner' | 'member'; pending: boolean; members: AccountSpaceMember[] }
-export interface AccountSharedDataset { spaceId: string; datasetId: string; sharedBy: { accountId: string; displayName: string | null }; updatedAt: string; size: number; title: string | null }
+export interface AccountSpace { id: string; name: string; code: string | null; colour: string | null; icon: string | null; role: 'owner' | 'member'; pending: boolean; currentGeneration: number; rotationRequired: boolean; members: AccountSpaceMember[]; stale?: true }
+export interface AccountSharedDataset { spaceId: string; datasetId: string; sharedBy: { accountId: string; displayName: string | null }; updatedAt: string; size: number; title: string | null; contentRevision?: string; stale?: true }
 export type AccountState = { status: 'signedOut' } | { status: 'signingIn' }
   | { status: 'signedIn'; email: string; displayName: string | null; plan: string | null; phrase: 'ready' | 'needed' | 'wrong'; keyStore: 'shared' | 'session' | 'error'; consent: 'accepted' | 'required'; managedSync: boolean; spaces: AccountSpace[]; shared: AccountSharedDataset[]; spacesError: string | null } | { status: 'error'; code: string };
 export type AccountCommand = { type: 'account-sign-in' | 'account-reopen' | 'account-cancel' | 'account-sign-out' | 'account-manage' | 'account-retry' | 'account-refresh' }

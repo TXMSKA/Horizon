@@ -50,7 +50,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
   if (typeof type === 'string' && type.startsWith('space-')) {
     if (type === 'space-open-shared') {
       if (Object.keys(command).length !== 3 || !['type', 'space', 'dataset'].every(key => Object.hasOwn(command, key))
-        || !accountId(command.space) || !uuid(command.dataset) || !spaces.some(space => space.id === command.space && !space.pending)) throw new Error('SPACE_SHARED_UNAVAILABLE');
+        || !accountId(command.space) || !uuid(command.dataset) || !spaces.some(space => space.id === command.space && (!space.pending || space.stale))) throw new Error('SPACE_SHARED_UNAVAILABLE');
       return value as BrowserCommand;
     }
     const share = type === 'space-share-project', fields = share ? ['type', 'project', 'space'] : ['type', 'project'];

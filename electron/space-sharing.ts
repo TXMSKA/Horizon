@@ -6,13 +6,13 @@ import type { StoreCipher } from './store';
 import { deriveKey, openSealed, seal } from './cosmic-crypto';
 import type { KeyEnvelope } from './cosmic-crypto';
 import { validateDesktopStore } from './desktop';
-import { accountId, accountRecord, keyEnvelope } from './spaces';
+import { accountId, accountRecord, keyEnvelope, spaceGeneration } from './spaces';
 import { canonical, integer, openSync, requireSync, sealSync, shape, SYNC_LIMITS, uuid } from './sync-format';
 import type { SyncIdentity } from './sync-format';
 import { readVaultFile, writeVaultFile } from './vault-storage';
 
 const magic = Buffer.from('HZSPACE\n');
-const generation = (value: unknown): value is number => integer(value) && value > 0 && value <= 0xffffffff;
+const generation = (value: unknown): value is number => spaceGeneration(value);
 const info = (space: string, keyGeneration: number, purpose: string) => `cosmic/space/${space}/${keyGeneration}/horizon/${purpose}`;
 export interface SpaceIdentity extends SyncIdentity { spaceId: string; keyGeneration: number }
 function identityValid(identity: SpaceIdentity) {
@@ -79,12 +79,12 @@ export function validateSpaceCheckpoint(value: unknown, identity: SpaceIdentity)
 interface Share {
   spaceId: string; datasetId: string; writerGeneration: string; keyGeneration: number; sequence: number; sharedAt: string;
   writer: string; created: boolean; generations: number; title: string; manifest: KeyEnvelope | null; published: boolean;
-  digest: string | null; blobs: Record<string, { id: string; bytes: number }>;
+  digest: string | null; blobs: Record<string, { id: string; bytes: number; updatedAt?: number; sha256?: string }>;
   retryAt: number; shareError: string | null;
 }
 interface AccountShares { projects: Record<string, Share>; puts: number[] }
 interface Shares { version: 1; accounts: Record<string, AccountShares> }
-interface Context { accountId: string; computerId: string; session?: number; spaces: AccountSpace[] }
+interface Context { accountId: string; computerId: string; session?: number; capabilityRevision?: string; accessRevision?: number; accessRevisions?: Record<string, number>; spaces: AccountSpace[] }
 interface Options {
   directory: string; cipher: StoreCipher; changed(): void; context(): Context | undefined;
   key(spaceId: string, generation?: number): Promise<{ generation: number; key: Uint8Array }>;
@@ -110,7 +110,9 @@ function sharesFile(path: string, cipher: StoreCipher): Shares {
           || !validTitle(share.title) || typeof share.published !== 'boolean' || !(share.digest === null || typeof share.digest === 'string' && /^[0-9a-f]{64}$/.test(share.digest))
           || !accountRecord(share.blobs) || !integer(share.retryAt) || ![null, 'SPACE_SHARE_FAILED', 'SPACE_RATE_LIMITED'].includes(share.shareError as string | null)) throw new Error();
         if (share.manifest !== null) keyEnvelope(share.manifest);
-        for (const [filename, blob] of Object.entries(share.blobs)) if (!/^[0-9a-f-]{36}\.bin$/.test(filename) || !shape(blob, ['id', 'bytes']) || !uuid(blob.id) || !integer(blob.bytes) || blob.bytes < 1 || blob.bytes > SYNC_LIMITS.blob) throw new Error();
+        for (const [filename, blob] of Object.entries(share.blobs)) if (!/^[0-9a-f-]{36}\.bin$/.test(filename) || !accountRecord(blob)
+          || Object.keys(blob).some(key => !['id', 'bytes', 'updatedAt', 'sha256'].includes(key)) || !uuid(blob.id) || !integer(blob.bytes) || blob.bytes < 1 || blob.bytes > SYNC_LIMITS.blob
+          || !(blob.updatedAt === undefined || integer(blob.updatedAt)) || !(blob.sha256 === undefined || typeof blob.sha256 === 'string' && /^[a-f0-9]{64}$/.test(blob.sha256))) throw new Error();
       }
     }
     return value as unknown as Shares;
@@ -128,10 +130,13 @@ export function createSpaceSharing(options: Options) {
   try { state = sharesFile(path, options.cipher); } catch { storageFailed = true; }
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const observed = new Map<string, string>();
+  const blocked = new Map<string, string | undefined>(), retryDelays = new Map<string, number>();
   let closed = false, work = Promise.resolve();
   const save = () => { if (Buffer.byteLength(JSON.stringify(state)) > 1900000) throw new Error('SPACE_SHARE_FAILED'); writeVaultFile(path, state, options.cipher); };
   const context = () => { const value = options.context(); if (closed || storageFailed || !value || !accountId(value.accountId) || !uuid(value.computerId)) throw new Error('SPACE_SHARE_FAILED'); return value; };
-  const check = (current: Context) => { const next = context(); if (next.accountId !== current.accountId || next.computerId !== current.computerId || next.session !== current.session) throw new Error('SPACE_SHARE_FAILED'); return next; };
+  const accessRevision = (current: Context, space: string) => current.accessRevisions?.[space] ?? (current.accessRevisions ? 0 : current.accessRevision);
+  const check = (current: Context, space?: string) => { const next = context(); if (next.accountId !== current.accountId || next.computerId !== current.computerId || next.session !== current.session
+    || space !== undefined && accessRevision(next, space) !== accessRevision(current, space)) throw new Error('SPACE_SHARE_FAILED'); return next; };
   const account = (id: string): AccountShares => {
     let value = own(state.accounts, id);
     if (!value) { value = { projects: {}, puts: [] }; Object.defineProperty(state.accounts, id, { value, enumerable: true }); }
@@ -154,31 +159,42 @@ export function createSpaceSharing(options: Options) {
   async function publish(projectId: string): Promise<void> {
     const current = context(), records = account(current.accountId), share = own(records.projects, projectId);
     if (!share) return;
-    cancel(`${current.accountId}:${projectId}`);
+    const id = `${current.accountId}:${projectId}`;
+    cancel(id);
+    if (blocked.has(id) && blocked.get(id) === current.capabilityRevision) return;
     if (share.retryAt > Date.now()) { schedule(current.accountId, projectId, share.retryAt - Date.now()); return; }
     let key: Uint8Array | undefined;
     try {
       const space = current.spaces.find(entry => entry.id === share.spaceId && !entry.pending);
-      if (!space) throw new Error('SPACE_SHARE_FAILED');
+      if (!space || space.rotationRequired) throw new Error('SPACE_SHARE_FAILED');
+      const keyGeneration = space.currentGeneration;
       const project = checkedProject(options.project(projectId)), hash = digest(project);
-      const material = await options.key(share.spaceId); key = material.key; check(current);
-      if (!generation(material.generation)) throw new Error('SPACE_SHARE_FAILED');
-      if (share.title !== project.name || share.keyGeneration !== material.generation || share.writer !== current.computerId) {
-        if (share.generations >= SYNC_LIMITS.writers) throw new Error('SPACE_SHARE_FAILED');
-        share.writerGeneration = randomUUID(); share.writer = current.computerId; share.generations++;
-        share.title = project.name; share.keyGeneration = material.generation; share.blobs = {}; share.manifest = null; share.published = false;
+      const material = await options.key(share.spaceId); key = material.key; check(current, share.spaceId);
+      if (!generation(material.generation) || material.generation !== keyGeneration) throw new Error('SPACE_SHARE_FAILED');
+      if (share.keyGeneration !== material.generation || share.writer !== current.computerId) {
+        if (share.writer !== current.computerId && share.generations >= SYNC_LIMITS.writers) throw new Error('SPACE_SHARE_FAILED');
+        // A key generation already isolates immutable paths, so the current writer can be reused at the writer cap.
+        if (share.generations < SYNC_LIMITS.writers) { share.writerGeneration = randomUUID(); share.generations++; }
+        share.writer = current.computerId; share.keyGeneration = material.generation; share.blobs = {}; share.manifest = null; share.published = false;
         save();
       }
-      if (share.digest === hash && share.published) { share.shareError = null; share.retryAt = 0; save(); notify(); return; }
+      share.title = project.name;
+      if (share.digest === hash && share.published) { share.shareError = null; share.retryAt = 0; retryDelays.delete(id); save(); notify(); return; }
       const route = `/v1/spaces/${encodeURIComponent(share.spaceId)}/datasets/${share.datasetId}`;
       const send = async (target: string, body?: Buffer) => {
-        check(current);
-        const response = await options.request(target, 'PUT', body); check(current);
+        const latest = check(current, share.spaceId).spaces.find(entry => entry.id === share.spaceId && !entry.pending);
+        if (!latest || latest.rotationRequired || latest.currentGeneration !== keyGeneration) throw new Error('SPACE_SHARE_FAILED');
+        const response = await options.request(target, 'PUT', body); check(current, share.spaceId);
+        if (response.status === 403 && accountRecord(response.value) && accountRecord(response.value.error)
+          && ['sync_plan_required', 'acceptance_required'].includes(response.value.error.code as string)) throw new Error('SPACE_PUBLISH_BLOCKED');
         if (response.status === 429) {
           const seconds = typeof response.retryAfter === 'number' && Number.isFinite(response.retryAfter) ? Math.max(1, response.retryAfter) : 60;
           share.retryAt = Math.ceil(Math.min(8640000000000000, Date.now() + seconds * 1000)); throw new Error('SPACE_RATE_LIMITED');
         }
         if (!response.ok) throw new Error('SPACE_SHARE_FAILED');
+        if (!accountRecord(response.value) || (body === undefined
+          ? response.value.id !== share.datasetId || response.value.appId !== 'horizon' || !integer(response.value.createdAt)
+          : response.value.success !== true)) throw new Error('SPACE_SHARE_FAILED');
       };
       if (!share.created) {
         const now = Date.now(), counts = (times: number[]) => {
@@ -194,11 +210,11 @@ export function createSpaceSharing(options: Options) {
         await send(route); share.created = true; save();
       }
       if (!share.manifest) {
-        const bytes = await sealProjectManifest(key, share.spaceId, share.datasetId, share.keyGeneration, share.title, share.sharedAt); check(current);
+        const bytes = await sealProjectManifest(key, share.spaceId, share.datasetId, share.keyGeneration, share.title, share.sharedAt); check(current, share.spaceId);
         const descriptor = JSON.parse(bytes.toString('utf8')) as { manifest: KeyEnvelope }; share.manifest = descriptor.manifest; save();
       }
       share.sequence++; save();
-      const base = `${route}/objects/project/${share.writer}/${share.writerGeneration}`;
+      const base = `${route}/objects/kg${share.keyGeneration}/project/${share.writer}/${share.writerGeneration}`;
       const identity = (id: string, kind: 'blob' | 'checkpoint'): SpaceIdentity => ({ dataset: share.datasetId, spaceId: share.spaceId, device: share.writer,
         generation: share.writerGeneration, keyGeneration: share.keyGeneration, sequence: kind === 'blob' ? 0 : share.sequence, id, kind });
       let staged = 0;
@@ -206,13 +222,16 @@ export function createSpaceSharing(options: Options) {
       for (const item of project.items) {
         if (!item.image) { items.push(item as SharedItem); continue; }
         let blob = own(share.blobs, item.image.filename);
-        if (!blob || blob.bytes !== item.image.bytes) {
+        if (!blob || blob.bytes !== item.image.bytes || blob.updatedAt !== item.updatedAt) {
           const bytes = options.image(projectId, item.id);
           requireSync(bytes !== null && bytes.length === item.image.bytes, 'SYNC_BLOB_PENDING');
           staged += bytes.length; requireSync(staged <= 256 * 1024 * 1024, 'SYNC_LIMIT');
-          blob = { id: randomUUID(), bytes: bytes.length };
-          const sealed = sealSpacePackage(key, identity(blob.id, 'blob'), bytes);
-          await send(`${base}/blobs/${blob.id}.hzs`, sealed);
+          const sha256 = createHash('sha256').update(bytes).digest('hex');
+          if (!blob || blob.sha256 !== sha256) {
+            blob = { id: randomUUID(), bytes: bytes.length, updatedAt: item.updatedAt, sha256 };
+            const sealed = sealSpacePackage(key, identity(blob.id, 'blob'), bytes);
+            await send(`${base}/blobs/${blob.id}.hzs`, sealed);
+          } else blob.updatedAt = item.updatedAt;
           share.blobs[item.image.filename] = blob; save();
         }
         const image = { width: item.image.width, height: item.image.height, bytes: item.image.bytes, cut: item.image.cut };
@@ -225,7 +244,7 @@ export function createSpaceSharing(options: Options) {
         const descriptor = { magic: 'Horizon Space Project', version: 1, datasetId: share.datasetId, keyGeneration: share.keyGeneration, manifest: share.manifest };
         await send(`${base}/dataset.hzs`, Buffer.from(JSON.stringify(descriptor))); share.published = true;
       }
-      share.digest = hash; share.retryAt = 0; share.shareError = null;
+      share.digest = hash; share.retryAt = 0; share.shareError = null; retryDelays.delete(id);
       const filenames = new Set(project.items.flatMap(item => item.image ? [item.image.filename] : []));
       for (const filename of Object.keys(share.blobs)) if (!filenames.has(filename)) delete share.blobs[filename];
       save(); notify();
@@ -233,8 +252,13 @@ export function createSpaceSharing(options: Options) {
     } catch (error) {
       if (closed || options.context()?.accountId !== current.accountId) { observed.delete(`${current.accountId}:${projectId}`); return; }
       share.shareError = error instanceof Error && error.message === 'SPACE_RATE_LIMITED' ? 'SPACE_RATE_LIMITED' : 'SPACE_SHARE_FAILED';
-      share.retryAt = Math.max(share.retryAt, Date.now() + (share.shareError === 'SPACE_RATE_LIMITED' ? 1000 : 60000));
-      try { save(); } finally { notify(); schedule(current.accountId, projectId, share.retryAt - Date.now()); }
+      const refused = error instanceof Error && ['SPACE_PUBLISH_BLOCKED', 'ACCOUNT_CONSENT'].includes(error.message);
+      if (refused) { blocked.set(id, options.context()?.capabilityRevision); share.retryAt = 0; retryDelays.delete(id); }
+      else {
+        const delay = Math.min(60000, (retryDelays.get(id) ?? 2500) * 2); retryDelays.set(id, delay);
+        share.retryAt = Math.max(share.retryAt, Date.now() + delay);
+      }
+      try { save(); } finally { notify(); if (!refused) schedule(current.accountId, projectId, share.retryAt - Date.now()); }
       throw new Error(share.shareError);
     } finally { key?.fill(0); }
   }
@@ -245,9 +269,16 @@ export function createSpaceSharing(options: Options) {
     for (const [id, share] of Object.entries(records.projects)) {
       try {
         const hash = digest(checkedProject(options.project(id))), key = `${current.accountId}:${id}`;
-        if (observed.get(key) === hash) continue;
-        observed.set(key, hash);
-        if (hash !== share.digest || share.shareError || !share.published) schedule(current.accountId, id, Math.max(30000, share.retryAt - Date.now()));
+        if (blocked.has(key)) {
+          if (blocked.get(key) === current.capabilityRevision) { cancel(key); continue; }
+          blocked.delete(key); retryDelays.delete(key); share.retryAt = 0; observed.delete(key);
+        }
+        const space = current.spaces.find(entry => entry.id === share.spaceId && !entry.pending);
+        if (!space || space.rotationRequired) { cancel(key); observed.delete(key); continue; }
+        const signature = `${space.currentGeneration}:${accessRevision(current, share.spaceId) ?? 0}:${hash}`;
+        if (observed.get(key) === signature) continue;
+        observed.set(key, signature);
+        if (hash !== share.digest || space.currentGeneration !== share.keyGeneration || share.shareError || !share.published) schedule(current.accountId, id, Math.max(30000, share.retryAt - Date.now()));
       } catch { /* A removed project retains its sharing record until Stop sharing. */ }
     }
   };
@@ -257,15 +288,15 @@ export function createSpaceSharing(options: Options) {
       const requested = options.context();
       return serial(async () => {
         if (!requested) throw new Error('SPACE_SHARE_FAILED');
-        check(requested);
+        check(requested, spaceId);
         const current = context(), records = account(current.accountId);
         if (!uuid(projectId) || !current.spaces.some(space => space.id === spaceId && !space.pending)
           || Object.values(state.accounts).some(account => own(account.projects, projectId))) throw new Error('SPACE_SHARE_FAILED');
         const project = checkedProject(options.project(projectId));
         const material = await options.key(spaceId);
         try {
-          check(current);
-          if (!generation(material.generation) || material.key.length !== 32) throw new Error('SPACE_SHARE_FAILED');
+          check(current, spaceId);
+          if (!generation(material.generation) || material.generation !== current.spaces.find(space => space.id === spaceId)!.currentGeneration || material.key.length !== 32) throw new Error('SPACE_SHARE_FAILED');
           records.projects[projectId] = { spaceId, datasetId: randomUUID(), writerGeneration: randomUUID(), keyGeneration: material.generation, sequence: 0,
             sharedAt: new Date().toISOString(), writer: current.computerId, created: false, generations: 1, title: project.name, manifest: null, published: false,
             digest: null, blobs: {}, retryAt: 0, shareError: null };
@@ -275,7 +306,8 @@ export function createSpaceSharing(options: Options) {
             notify(); schedule(current.accountId, projectId, 60000); throw new Error('SPACE_SHARE_FAILED');
           }
           notify();
-          observed.set(`${current.accountId}:${projectId}`, digest(project));
+          const space = current.spaces.find(entry => entry.id === spaceId)!;
+          observed.set(`${current.accountId}:${projectId}`, `${space.currentGeneration}:${accessRevision(current, spaceId) ?? 0}:${digest(project)}`);
         } finally { material.key.fill(0); }
         await publish(projectId);
       });
@@ -290,11 +322,12 @@ export function createSpaceSharing(options: Options) {
         checkedProject(options.project(projectId));
         cancel(`${current.accountId}:${projectId}`);
         try {
-          const response = await options.request(`/v1/spaces/${encodeURIComponent(share.spaceId)}/datasets/${share.datasetId}`, 'DELETE'); check(current);
-          if (!response.ok && response.status !== 404) throw new Error(response.status === 429 ? 'SPACE_RATE_LIMITED' : 'SPACE_SHARE_FAILED');
+          const response = await options.request(`/v1/spaces/${encodeURIComponent(share.spaceId)}/datasets/${share.datasetId}`, 'DELETE'); check(current, share.spaceId);
+          const missing = response.status === 404 && accountRecord(response.value) && accountRecord(response.value.error) && response.value.error.code === 'not_found';
+          if (!missing && (!response.ok || !accountRecord(response.value) || response.value.success !== true)) throw new Error(response.status === 429 ? 'SPACE_RATE_LIMITED' : 'SPACE_SHARE_FAILED');
           delete records.projects[projectId];
           try { save(); } catch (error) { records.projects[projectId] = share; throw error; }
-          notify();
+          blocked.delete(`${current.accountId}:${projectId}`); retryDelays.delete(`${current.accountId}:${projectId}`); notify();
         } catch (error) {
           share.shareError = error instanceof Error && error.message === 'SPACE_RATE_LIMITED' ? 'SPACE_RATE_LIMITED' : 'SPACE_SHARE_FAILED'; save(); notify(); throw new Error(share.shareError);
         }
@@ -308,6 +341,6 @@ export function createSpaceSharing(options: Options) {
       return { sharedTo: { spaceId: share.spaceId, spaceName: space?.name ?? 'Space' }, shareError: share.shareError };
     },
     changed,
-    close() { closed = true; for (const timer of timers.values()) clearTimeout(timer); timers.clear(); return work; },
+    close() { closed = true; for (const timer of timers.values()) clearTimeout(timer); timers.clear(); blocked.clear(); retryDelays.clear(); return work; },
   };
 }

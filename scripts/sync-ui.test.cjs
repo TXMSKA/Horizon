@@ -9,6 +9,7 @@ const { assertPrivateCommand } = require('../dist/electron/private-commands.js')
 const { copy } = require('../dist/src/copy.js');
 const { syncRelativeTime, syncConflictTitle, syncErrorKey, syncFocusTarget } = require('../dist/src/shared/sync-display.js');
 const { openRemoteGroup } = require('../dist/src/shared/remote-tabs.js');
+require('./shared-project-ui.test.cjs');
 
 test('saving the sync code accepts only its exact command and is refused in private windows', () => {
   const command = { type: 'sync-save-key' };

@@ -13,7 +13,7 @@ import type { SyncCipher } from './sync-storage';
 import { decodeSync, folderSyncDataset, folderSyncTransport, objectName, validBatch, validCheckpoint, validTransportSelection, writerParts } from './sync-transport';
 import type { SyncTransport, SyncTransportSelection } from './sync-transport';
 import { enrollQuantumDataset, QuantumTransport } from './sync-quantum';
-import type { QuantumAccount } from './sync-quantum';
+import type { QuantumAccount, QuantumChangePage } from './sync-quantum';
 import { accountId } from './spaces';
 
 export interface SyncHost {
@@ -25,7 +25,9 @@ export interface SyncHost {
 }
 interface OutgoingFile { file: string; parts: string[]; cap: number }
 interface Outbox { files: OutgoingFile[]; operations: SyncOperation[]; snapshot: SyncRecord[]; sequence: number; checkpoint: number; accountId?: string; profileIds?: string[] }
-interface RecordEdit { record: SyncRecord; time: number; title: string }
+interface RecordEdit { record: SyncRecord; time: number; title: string; base?: string | null }
+const outboxEdit = (edit: RecordEdit | undefined, operation: SyncOperation): edit is RecordEdit => edit !== undefined && (edit.base === operation.id
+  || (edit.base === undefined || edit.base === operation.base) && edit.time === operation.time && canonical(edit.record.value) === canonical(operation.value));
 interface EngineState {
   version: 1; transport: SyncTransportSelection; dataset: DatasetParameters; key: string; binding: string; device: string; generation: string; sequence: number;
   mapping: Record<string, string>; switches: Record<SyncItem, boolean>; records: SyncOperation[]; snapshot: SyncRecord[]; conflicts: KeptConflict[];
@@ -43,6 +45,8 @@ const blobKey = (profile: string, item: DesktopItem) => canonical([profile, item
 const blobFileKey = (reference: BlobReference) => canonical(reference);
 const ownRecord = (record: SyncRecord, device: string) => !['tabs', 'computer'].includes(record.item) || record.key === device;
 function validateState(value: unknown): asserts value is EngineState {
+  // Aggregate feed cursors belong to the broker, independently of dataset state.
+  if (value !== null && typeof value === 'object' && 'quantumCursor' in value) delete (value as Record<string, unknown>).quantumCursor;
   if (value !== null && typeof value === 'object' && 'folder' in value && !('transport' in value)) {
     const legacy = value as Record<string, unknown>; legacy.transport = { kind: 'folder', folder: legacy.folder }; delete legacy.folder;
   }
@@ -56,7 +60,7 @@ function validateState(value: unknown): asserts value is EngineState {
   requireSync(Array.isArray(value.edits) && value.edits.length <= SYNC_LIMITS.records);
   const edits = new Set<string>();
   for (const edit of value.edits) {
-    requireSync(shape(edit, ['record', 'time', 'title']) && shape(edit.record, ['item', 'profile', 'key', 'value']) && integer(edit.time) && typeof edit.title === 'string' && edit.title.length > 0 && edit.title.length <= 200 && !/[\x00-\x1f\x7f-\x9f]/.test(edit.title));
+    requireSync(shape(edit, ['record', 'time', 'title', ...('base' in Object(edit) ? ['base'] : [])]) && (edit.base === undefined || edit.base === null || uuid(edit.base)) && shape(edit.record, ['item', 'profile', 'key', 'value']) && integer(edit.time) && typeof edit.title === 'string' && edit.title.length > 0 && edit.title.length <= 200 && !/[\x00-\x1f\x7f-\x9f]/.test(edit.title));
     const record = edit.record as unknown as SyncRecord; requireSync(validateOperation({ ...record, id: value.device, base: null, time: edit.time, device: value.device, generation: value.generation })); validateRecord(record);
     requireSync(!edits.has(recordId(record))); edits.add(recordId(record));
   }
@@ -107,6 +111,15 @@ export class SyncEngine {
   private verifyGeneration = true;
   private quantumAccount: QuantumAccount | undefined;
   private retryAt = 0;
+  private retryDelay = 0;
+  private retryBlocked = false;
+  private publishFailure: SyncFailure | null = null;
+  private accountRevision: string | QuantumAccount | undefined;
+  private changeSubscription: (() => void) | undefined;
+  private changeVersion = 0;
+  private receivingVersion: number | undefined;
+  private pendingReceive = false;
+  private pendingRebuild = false;
   constructor(readonly userData: string, readonly cipher: SyncCipher, readonly host: SyncHost, readonly options: { keys?: SyncKeySource; now?: () => number; pulseMs?: number; afterSeal?: () => void; name?: string; transport?: (selection: SyncTransportSelection, dataset: string) => SyncTransport; quantum?: (accountId: string) => QuantumAccount | undefined } = {}) {
     this.path = resolve(userData, 'sync', 'state.sealed'); this.outboxPath = resolve(userData, 'sync', 'outbox');
     this.journalPath = resolve(userData, 'sync', 'apply.sealed'); this.incomingPath = resolve(userData, 'sync', 'incoming');
@@ -134,12 +147,17 @@ export class SyncEngine {
     if (this.local?.transport.kind !== 'quantum') return;
     try {
       const account = this.account(this.local.transport.accountId);
+      const revision = account.revision ?? account;
+      if (revision !== this.accountRevision) {
+        this.unwatchChanges(); this.accountRevision = revision;
+        this.resetRetry();
+      }
       if (account.computerId !== this.local.device) void this.switchTransport(this.local.transport).catch(() => undefined);
       this.start();
     }
-    catch { this.stop(); this.failure = 'SYNC_NOT_ALLOWED'; this.host.changed(); }
+    catch (error) { this.unwatchChanges(); this.accountRevision = undefined; this.pulseFailed(error); }
   }
-  private assertAccount(state: EngineState) { if (state.transport.kind === 'quantum') this.account(state.transport.accountId); }
+  private assertAccount(state: EngineState) { requireSync(this.receivingVersion === undefined || this.receivingVersion === this.changeVersion, 'SYNC_CHANGED'); if (state.transport.kind === 'quantum') this.account(state.transport.accountId); }
   private mapping(state: EngineState) {
     if (state.transport.kind === 'folder') return state.mapping;
     const ids = new Set(this.account(state.transport.accountId).profileIds); return Object.fromEntries(Object.entries(state.mapping).filter(([id]) => ids.has(id)));
@@ -154,10 +172,12 @@ export class SyncEngine {
     // Restoring a signed-out dataset keeps its sealed state available for a later sign-in.
     const resolveAccount = () => this.account(selection.accountId);
     const account: QuantumAccount = { get accountId() { return selection.accountId; }, get computerId() { return resolveAccount().computerId; }, get profileIds() { return resolveAccount().profileIds; }, assertActive() { resolveAccount(); }, request(path, init, cap) { return resolveAccount().request(path, init, cap); }, deriveSyncKey(id) { return resolveAccount().deriveSyncKey(id); } };
-    const active = () => new QuantumTransport(account, dataset);
-    return { describe: () => ({ kind: 'quantum' as const, label: 'Cosmic' }), readDescriptor: () => active().readDescriptor(), listObjects: (prefix: string) => active().listObjects(prefix), readObject: (path: string, cap: number) => active().readObject(path, cap), writeObject: (path: string, bytes: Buffer, cap: number) => active().writeObject(path, bytes, cap), deleteOwnObject: (path: string, device: string) => active().deleteOwnObject(path, device) };
+    let instance: QuantumTransport | undefined;
+    const active = () => instance ??= new QuantumTransport(account, dataset);
+    return { describe: () => ({ kind: 'quantum' as const, label: 'Cosmic' }), readDescriptor: () => active().readDescriptor(), listObjects: (prefix: string) => active().listObjects(prefix), readObject: (path: string, cap: number) => active().readObject(path, cap), writeObject: (path: string, bytes: Buffer, cap: number) => active().writeObject(path, bytes, cap), deleteOwnObject: (path: string, device: string) => active().deleteOwnObject(path, device), refreshObjects: (force?: boolean) => active().refreshObjects(force), applyChanges: (changes: readonly { type: string; path: string | null }[]) => active().applyChanges(changes) };
   }
   private now() { return this.options.now?.() ?? Date.now(); }
+  private resetRetry() { this.retryAt = 0; this.retryDelay = 0; this.retryBlocked = false; this.publishFailure = null; }
   private keys() { return this.options.keys ?? randomSyncKeys; }
   private name() { return computerName(this.options.name ?? hostname()) || 'Computer'; }
   private remainingEdits(state: EngineState, published?: Map<string, RecordEdit>) {
@@ -179,9 +199,42 @@ export class SyncEngine {
     finally { clearTimeout(this.dirtyWrite); this.dirtyWrite = undefined; }
   }
   private enqueue<T>(work: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(work).catch(error => { this.failure = syncFailure(error); if (this.failure === 'SYNC_RATE_LIMITED' && error && typeof error === 'object' && 'retryAfterMs' in error && typeof error.retryAfterMs === 'number') this.retryAt = this.now() + error.retryAfterMs; this.host.changed(); throw new Error(this.failure); });
+    const result = this.queue.then(work).catch(error => { this.failure = syncFailure(error); this.host.changed(); throw new Error(this.failure); });
     // A rejected command must not poison later retries; its caller still receives the rejection.
     this.queue = result.then(() => undefined, () => undefined); return result;
+  }
+  private pulseFailed(error: unknown, receiveOnly = false) {
+    this.failure = syncFailure(error);
+    if (this.local?.transport.kind === 'quantum') {
+      this.pendingReceive = true;
+      if (!receiveOnly && ['SYNC_PLAN_REQUIRED', 'SYNC_CONSENT_REQUIRED'].includes(this.failure)) { this.retryBlocked = true; this.publishFailure = this.failure; }
+      this.retryDelay = Math.min(60000, this.retryDelay ? this.retryDelay * 2 : 5000);
+      const retryAfter = error && typeof error === 'object' && 'retryAfterMs' in error && typeof error.retryAfterMs === 'number' ? error.retryAfterMs : 0;
+      this.retryAt = this.now() + Math.max(this.retryDelay, retryAfter);
+    }
+    this.host.changed();
+  }
+  private async attemptPulse(force: boolean, receiveOnly: boolean) {
+    const version = this.changeVersion;
+    try {
+      const failure = await this.runPulse(force, receiveOnly);
+      if (version !== this.changeVersion) { this.pendingReceive = true; return; }
+      if (failure) this.pulseFailed(new Error(failure), receiveOnly);
+      else if (receiveOnly && this.retryBlocked) { this.failure = this.publishFailure; this.retryAt = 0; this.retryDelay = 0; }
+      else { this.failure = null; this.resetRetry(); }
+    } catch (error) {
+      if (version === this.changeVersion) {
+        this.pulseFailed(error, receiveOnly);
+        if (!receiveOnly && this.retryBlocked) {
+          // Publishing entitlements do not revoke read access or the local outbox.
+          try { await this.runPulse(false, true); this.retryAt = 0; this.retryDelay = 0; }
+          catch { this.pendingReceive = true; }
+        }
+      }
+      else this.pendingReceive = true;
+      throw error;
+    }
+    finally { this.host.changed(); }
   }
   state(): SyncState {
     const local = this.local; if (!local) return { ...emptySyncState(), failure: this.failure };
@@ -204,22 +257,63 @@ export class SyncEngine {
     if (this.dirtyWrite === undefined) { this.dirtyWrite = setTimeout(() => this.flushDirty(), 500); this.dirtyWrite.unref(); }
   }
   start() {
-    if (this.timer) return; this.stopped = false;
+    this.stopped = false;
+    try { this.watchChanges(); } catch (error) { this.pulseFailed(error); }
+    if (this.timer) return;
     const interval = this.options.pulseMs ?? 1000;
     this.timer = setInterval(() => {
       const publishAfter = this.options.pulseMs ?? 30000, readAfter = this.options.pulseMs ?? 60000;
       const lastChange = Math.max(0, ...[...this.dirty].filter(([item]) => this.local?.switches[item]).map(([, time]) => time));
-      if (this.local && (this.now() - this.lastRead >= readAfter || lastChange > 0 && this.now() - lastChange >= publishAfter)) void this.pulse(false).catch(() => undefined);
+      const pending = this.local?.outbox || this.local?.fresh.some(item => this.local!.switches[item]);
+      if (this.now() < this.retryAt) return;
+      if (this.retryBlocked) { if (this.pendingReceive) void this.pulse(false, true).catch(() => undefined); return; }
+      if (this.local && this.retryDelay > 0 && (pending || this.pendingReceive)) { void this.pulse(false, !pending && lastChange === 0).catch(() => undefined); return; }
+      if (this.local && ((this.local.transport.kind === 'folder' || pending) && this.now() - this.lastRead >= readAfter || lastChange > 0 && this.now() - lastChange >= publishAfter)) void this.pulse(false).catch(() => undefined);
+      else if (this.local && this.pendingReceive && this.now() >= this.retryAt && lastChange === 0 && !this.local.outbox) void this.pulse(false, true).catch(() => undefined);
     }, interval); this.timer.unref();
   }
-  stop() { this.stopped = true; clearInterval(this.timer); this.timer = undefined; this.flushDirty(); }
+  private unwatchChanges() { this.changeVersion++; this.changeSubscription?.(); this.changeSubscription = undefined; }
+  private watchChanges() {
+    if (this.local?.transport.kind !== 'quantum' || this.changeSubscription) return;
+    const account = this.account(this.local.transport.accountId), transport = this.active!, version = this.changeVersion;
+    this.accountRevision = account.revision ?? account;
+    const current = () => !this.stopped && version === this.changeVersion && this.active === transport;
+    const receive = (page: QuantumChangePage | null) => this.enqueue(async () => {
+      if (!current() || this.local?.transport.kind !== 'quantum') return;
+      try {
+        this.assertAccount(this.local);
+        const changes = page?.changes.filter(change => change.ownerType === 'account' && change.ownerId === this.local!.quantumAccountId && change.datasetId === this.local!.dataset.datasetId) ?? [];
+        if (page === null || changes.length > 0) this.pendingReceive = true;
+        if (page === null) this.pendingRebuild = true;
+        else transport.applyChanges?.(changes);
+        const deleted = changes.filter(change => change.type === 'dataset_deleted' || change.type === 'dataset_created').at(-1)?.type === 'dataset_deleted';
+        if (deleted) { this.pendingReceive = false; this.failure = 'SYNC_INVALID'; this.host.changed(); }
+        if (!deleted && (page === null || changes.length > 0) && this.now() >= this.retryAt) {
+          this.receivingVersion = version;
+          try { await this.attemptPulse(false, true); }
+          catch (error) {
+            // A later feed page can remove a path that disappeared during snapshot recovery.
+            if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+            this.failure = 'SYNC_GAP'; this.host.changed();
+          }
+          finally { this.receivingVersion = undefined; }
+        }
+      } catch (error) {
+        // Object recovery retries independently of the aggregate cursor and other consumers.
+        if (current() && this.now() >= this.retryAt) this.pulseFailed(error, true);
+      }
+    });
+    requireSync(account.subscribeChanges, 'SYNC_NOT_ALLOWED');
+    this.changeSubscription = account.subscribeChanges(receive);
+  }
+  stop() { this.stopped = true; this.unwatchChanges(); clearInterval(this.timer); this.timer = undefined; this.flushDirty(); }
   focus() { if (this.local && !this.stopped) void this.pulse(false, true).catch(() => undefined); }
   async create(folder: string, accepted: boolean): Promise<void> {
     return this.enqueue(async () => {
       requireSync(accepted === true && !this.local); syncStorageAvailable(this.cipher);
       const { key, check } = await this.keys().create(), transport = this.transport({ kind: 'folder', folder: resolve(folder) }, check.datasetId);
       await transport.writeObject('dataset.hzs', Buffer.from(canonical(check)), 4096);
-      const state = this.initial(folder, check, key); this.save(state); this.local = state; this.active = transport; this.failure = null; this.host.changed();
+      const state = this.initial(folder, check, key); this.save(state); this.local = state; this.active = transport; this.resetRetry(); this.failure = null; this.host.changed();
     });
   }
   async join(folder: string, input: string, accepted: boolean): Promise<void> {
@@ -228,7 +322,7 @@ export class SyncEngine {
       const parameters = await folderSyncDataset(folder);
       const transport = this.transport({ kind: 'folder', folder: resolve(folder) }, parameters.datasetId);
       const key = await this.keys().open(input, parameters), state = this.initial(folder, parameters, key); state.joining = true;
-      this.save(state); this.local = state; this.active = transport; this.failure = null; this.host.changed();
+      this.save(state); this.local = state; this.active = transport; this.resetRetry(); this.failure = null; this.host.changed();
     });
   }
   async enrollQuantum(profileAccount: QuantumAccount): Promise<void> {
@@ -240,7 +334,7 @@ export class SyncEngine {
       state.transport = { kind: 'quantum', accountId: profileAccount.accountId, datasetId: enrolled.datasetId };
       state.quantumAccountId = profileAccount.accountId;
       state.device = profileAccount.computerId; state.joining = true;
-      this.save(state); this.local = state; this.active = this.transport(state.transport, state.dataset.datasetId); this.failure = null; this.start(); this.host.changed();
+      this.save(state); this.local = state; this.active = this.transport(state.transport, state.dataset.datasetId); this.resetRetry(); this.failure = null; this.start(); this.host.changed();
     });
   }
   private initial(folder: string, dataset: DatasetParameters, key: Buffer): EngineState {
@@ -264,7 +358,7 @@ export class SyncEngine {
         if (selection.kind === 'quantum') requireSync(descriptor.keyType === 'account');
         const check = openSync(key, checkIdentity(descriptor.datasetId), Buffer.from(descriptor.check, 'base64'));
         requireSync(shape(check, ['check']) && check.check === 'Horizon Sync', 'SYNC_WRONG_KEY');
-        if (selection.kind === 'quantum' && canonical(selection) === canonical(this.local.transport) && this.local.device === this.account(selection.accountId).computerId && oldKey.equals(key)) { this.failure = null; this.host.changed(); return; }
+        if (selection.kind === 'quantum' && canonical(selection) === canonical(this.local.transport) && this.local.device === this.account(selection.accountId).computerId && oldKey.equals(key)) { this.resetRetry(); this.failure = null; this.host.changed(); return; }
         const state = structuredClone(this.local); state.transport = selection; state.dataset = descriptor;
         if (selection.kind === 'quantum') state.quantumAccountId = selection.accountId;
         if (this.local.transport.kind === 'quantum') state.quantumAccountId ??= this.local.transport.accountId;
@@ -307,7 +401,7 @@ export class SyncEngine {
         }
         // A destination may hold only its descriptor; the next pulse must publish a complete projection.
         state.fresh = SYNC_ITEMS.filter(item => state.switches[item]);
-        assertDestination(); this.assertAccount(state); this.save(state); this.local = state; this.active = transport; this.verifyGeneration = true; this.lastRead = 0; this.failure = null; this.start(); this.host.changed();
+        assertDestination(); this.assertAccount(state); this.unwatchChanges(); this.save(state); this.local = state; this.active = transport; this.verifyGeneration = true; this.lastRead = 0; this.resetRetry(); this.failure = null; this.start(); this.host.changed();
       } catch { throw new Error('SYNC_SWITCH_FAILED'); }
     });
   }
@@ -345,13 +439,13 @@ export class SyncEngine {
     await this.pulse(true);
   }
   pulse(force = true, receiveOnly = false): Promise<void> {
-    if (this.running) return this.running;
+    if (this.running) return force ? this.running.then(() => this.pulse(true, receiveOnly), () => this.pulse(true, receiveOnly)) : this.running;
     const work = this.enqueue(async () => {
       if (!this.local) return;
-      if (this.now() < this.retryAt) return;
-      this.assertAccount(this.local);
-      try { this.failure = await this.runPulse(force, receiveOnly) ?? null; }
-      finally { this.host.changed(); }
+      if (force && !receiveOnly) { this.retryBlocked = false; this.publishFailure = null; }
+      try { this.assertAccount(this.local); } catch (error) { this.pulseFailed(error); throw error; }
+      if (!force && (this.retryBlocked && !receiveOnly || this.now() < this.retryAt)) return;
+      await this.attemptPulse(force, receiveOnly);
     });
     this.running = work.finally(() => { this.running = undefined; this.host.changed(); }); this.host.changed(); return this.running;
   }
@@ -364,9 +458,9 @@ export class SyncEngine {
     for (const device of devices) for (const generation of (await transportNames(transport, ['writers', device])).filter(uuid)) {
       requireSync(++writers <= SYNC_LIMITS.writers, 'SYNC_LIMIT'); if (device === state.device && generation === state.generation) continue;
       const parts = writerParts(device, generation), writer = `${device}/${generation}`; let cursor = cursors[writer] ?? 0;
-      if (!cursor) {
+      if (!cursor || state.transport.kind === 'quantum') {
         const latest = (await transportNames(transport, [...parts, 'checkpoints'])).flatMap(name => { const checkpoint = validCheckpoint(name); return checkpoint ? [{ ...checkpoint, name }] : []; }).sort((a, b) => b.sequence - a.sequence || b.id.localeCompare(a.id))[0];
-        if (latest) {
+        if (latest && (!cursor || latest.sequence > cursor)) {
           const identity: SyncIdentity = { dataset: state.dataset.datasetId, device, generation, id: latest.id, sequence: latest.sequence, kind: 'checkpoint' };
           const payload = await decodeSync(key, identity, await transport.readObject([...parts, 'checkpoints', latest.name].join('/'), SYNC_LIMITS.package)) as SyncPayload;
           operations.push(...payload.operations); conflicts.push(...payload.conflicts); requireSync(operations.length <= SYNC_LIMITS.records && conflicts.length <= SYNC_LIMITS.records, 'SYNC_LIMIT'); cursor = latest.sequence;
@@ -400,14 +494,29 @@ export class SyncEngine {
   }
   private captureEdits(state: EngineState, records: SyncRecord[], markedOnly = false) {
     const baseline = new Map(state.snapshot.map(record => [recordId(record), record])), current = new Map(records.map(record => [recordId(record), record]));
+    const revisions = new Map(state.records.map(record => [recordId(record), record])), sealed = new Map(state.outbox?.operations.map(operation => [recordId(operation), operation]) ?? []);
+    for (const operation of sealed.values()) mergeOperation(revisions, operation, new Map());
+    // Later edits descend from the sealed result, including a return to its old value.
+    for (const [id, operation] of sealed) if (revisions.get(id)?.id === operation.id || outboxEdit(this.edits.get(id), operation)) baseline.set(id, { item: operation.item, profile: operation.profile, key: operation.key, value: operation.value });
     const selected = (record: SyncRecord) => this.selected(state, record) && ownRecord(record, state.device) && (!markedOnly || record.item !== 'computer' && this.dirty.has(record.item));
     for (const [id, edit] of this.edits) if (selected(edit.record) && !baseline.has(id) && !current.has(id)) this.edits.delete(id);
     for (const [id, record] of new Map([...baseline, ...current])) {
       if (!selected(record)) continue; const value = current.get(id)?.value ?? null, previous = this.edits.get(id);
-      if (canonical(baseline.get(id)?.value ?? null) === canonical(value)) { this.edits.delete(id); continue; }
+      if (canonical(baseline.get(id)?.value ?? null) === canonical(value)) {
+        const operation = sealed.get(id);
+        if (operation && (revisions.get(id)?.id === operation.id || outboxEdit(previous, operation))) this.edits.set(id, { record: { item: operation.item, profile: operation.profile, key: operation.key, value }, base: operation.base, time: operation.time, title: operation.title ?? recordTitle(operation) });
+        else this.edits.delete(id);
+        continue;
+      }
       // A no-op write, or an edit of another record, cannot renew this value's time.
-      if (previous && canonical(previous.record.value) === canonical(value)) continue;
-      this.edits.set(id, { record: { ...record, value }, time: record.item === 'computer' ? this.now() : this.dirty.get(record.item) ?? this.now(), title: value === null ? previous?.title ?? recordTitle(record) : recordTitle({ ...record, value }) });
+      if (previous && canonical(previous.record.value) === canonical(value)) {
+        if (previous.base === undefined) previous.base = sealed.has(id) ? sealed.get(id)!.base : revisions.get(id)?.id ?? null;
+        continue;
+      }
+      // A pending edit keeps the revision the user saw, even when receive advances records.
+      const operation = sealed.get(id), sealedEdit = operation && outboxEdit(previous, operation);
+      const base = sealedEdit ? operation.id : previous?.base === undefined ? revisions.get(id)?.id ?? null : previous.base;
+      this.edits.set(id, { record: { ...record, value }, base, time: record.item === 'computer' ? this.now() : this.dirty.get(record.item) ?? this.now(), title: value === null ? previous?.title ?? recordTitle(record) : recordTitle({ ...record, value }) });
     }
     requireSync(this.edits.size <= SYNC_LIMITS.records, 'SYNC_LIMIT');
     const dirty = new Map([...this.dirty].filter(([item]) => state.switches[item] && state.fresh.includes(item)));
@@ -491,21 +600,37 @@ export class SyncEngine {
   }
   private async runPulse(force: boolean, receiveOnly: boolean) {
     this.assertAccount(this.local!);
+    await this.active!.refreshObjects?.(this.pendingRebuild);
+    this.pendingRebuild = false;
     this.flushDirty();
     await this.recoverApplication();
     const state = structuredClone(this.local!);
     this.pruneOutbox(state);
-    // A sealed retry is published before a fresh generation captures more changes.
-    if (state.outbox) {
+    // Read before retrying a write, since plan revocation leaves reads available.
+    if (this.verifyGeneration && !state.outbox) { await this.checkGeneration(state); this.verifyGeneration = false; }
+    const incoming = await this.incoming(state); this.lastRead = this.now();
+    // Retain immutable retries while receiving; publish them before sealing new edits.
+    if (state.outbox && !receiveOnly) {
       await this.publishOutbox(state);
       const records = new Map(state.records.map(record => [recordId(record), record])), conflicts = new Map(state.conflicts.map(conflict => [conflict.id, conflict.operation]));
       for (const operation of state.outbox.operations) mergeOperation(records, operation, conflicts);
-      state.records = [...records.values()]; state.conflicts = [...conflicts].map(([id, operation]) => ({ id, operation })); state.snapshot = state.outbox.snapshot;
-      if (state.outbox.operations[0]?.generation === state.generation) { state.sequence = state.outbox.sequence; state.checkpointSequence = state.outbox.checkpoint; }
-      state.outbox = null; this.save(state); this.local = structuredClone(state);
+      state.records = [...records.values()]; state.conflicts = [...conflicts].map(([id, operation]) => ({ id, operation }));
+      if (!receiveOnly) {
+        // A receive may have advanced unrelated records since this batch was sealed.
+        // Acknowledge only its own operations, keeping the received baseline intact.
+        const baseline = new Map(state.snapshot.map(record => [recordId(record), record]));
+        for (const operation of state.outbox.operations) {
+          // A pending descendant still compares against the sealed value it changed.
+          const id = recordId(operation); if (records.get(id)?.id !== operation.id && !outboxEdit(this.edits.get(id), operation)) continue;
+          if (operation.value === null) baseline.delete(id);
+          else baseline.set(id, { item: operation.item, profile: operation.profile, key: operation.key, value: operation.value });
+        }
+        state.snapshot = [...baseline.values()];
+        if (state.outbox.operations[0]?.generation === state.generation) { state.sequence = state.outbox.sequence; state.checkpointSequence = state.outbox.checkpoint; }
+        state.outbox = null; this.save(state); this.local = structuredClone(state);
+        if (this.verifyGeneration) { await this.checkGeneration(state); this.verifyGeneration = false; }
+      }
     }
-    if (this.verifyGeneration) await this.checkGeneration(state);
-    const incoming = await this.incoming(state); this.verifyGeneration = false; this.lastRead = this.now();
     const current = this.host.read();
     if (state.joining) for (const profile of current.profiles.filter(profile => state.transport.kind === 'folder' || this.account(state.transport.accountId).profileIds.includes(profile.id))) {
       const remote = incoming.operations.find(record => record.item === 'profiles' && record.value !== null && (record.value as { name: string }).name.toLowerCase() === profile.name.toLowerCase());
@@ -513,26 +638,47 @@ export class SyncEngine {
     }
     for (const profile of current.profiles) state.mapping[profile.id] ??= randomUUID();
     const captured = this.capture(state, current), baseline = new Map(state.snapshot.map(record => [recordId(record), record])), records = new Map(state.records.map(record => [recordId(record), record])), conflicts = new Map(state.conflicts.map(conflict => [conflict.id, conflict.operation]));
+    const joiningRemote = new Set(state.joining ? incoming.operations.map(recordId) : []);
     this.captureEdits(state, captured.records); const edits = new Map(this.edits), dirty = new Map(this.dirty);
     const changes: SyncOperation[] = [], local = new Map(captured.records.map(record => [recordId(record), record]));
-    const allowed = force || !receiveOnly && this.now() - Math.max(0, ...[...dirty].filter(([item]) => state.switches[item]).map(([, time]) => time)) >= (this.options.pulseMs ?? 30000);
+    const allowed = !receiveOnly && (force || this.now() - Math.max(0, ...[...dirty].filter(([item]) => state.switches[item]).map(([, time]) => time)) >= (this.options.pulseMs ?? 30000));
     const time = (id: string) => edits.get(id)?.time ?? records.get(id)?.time ?? this.now();
-    const fresh = (item: SyncRecord['item']) => item !== 'computer' && state.fresh.includes(item);
-    if (!allowed && [...local, ...baseline].some(([id, record]) => syncEnabled(state.switches, record.item) && ownRecord(record, state.device) && canonical(baseline.get(id)?.value ?? null) !== canonical(local.get(id)?.value ?? null))) return incoming.waiting;
-    for (const [id, record] of local) if (syncEnabled(state.switches, record.item) && allowed && (fresh(record.item) || record.item === 'computer' && !records.has(id) || canonical(baseline.get(id)?.value ?? null) !== canonical(record.value))) {
+    const base = (id: string) => { const edit = edits.get(id); return edit?.base === undefined ? records.get(id)?.id ?? null : edit.base; };
+    const fresh = (record: SyncRecord, id: string) => record.item !== 'computer' && state.fresh.includes(record.item) && (!baseline.has(id) || records.get(id)?.device === state.device);
+    for (const [id, record] of local) if (syncEnabled(state.switches, record.item) && allowed && (fresh(record, id) || record.item === 'computer' && !records.has(id) || canonical(baseline.get(id)?.value ?? null) !== canonical(record.value))) {
       if (state.joining && incoming.operations.some(remote => recordId(remote) === id)) continue;
-      const operation: SyncOperation = { ...record, id: randomUUID(), base: records.get(id)?.id ?? null, time: time(id), device: state.device, generation: state.generation };
+      const operation: SyncOperation = { ...record, id: randomUUID(), base: base(id), time: time(id), device: state.device, generation: state.generation };
       validateRecord(operation); changes.push(operation); mergeOperation(records, operation, conflicts);
     }
     for (const [id, record] of baseline) if (this.selected(state, record) && !local.has(id) && syncEnabled(state.switches, record.item) && allowed && ownRecord(record, state.device)) {
-      const operation: SyncOperation = { ...record, value: null, title: edits.get(id)?.title ?? recordTitle(record), id: randomUUID(), base: records.get(id)?.id ?? null, time: time(id), device: state.device, generation: state.generation }; changes.push(operation); mergeOperation(records, operation, conflicts);
+      const operation: SyncOperation = { ...record, value: null, title: edits.get(id)?.title ?? recordTitle(record), id: randomUUID(), base: base(id), time: time(id), device: state.device, generation: state.generation }; changes.push(operation); mergeOperation(records, operation, conflicts);
     }
     const outgoingRecords = [...records.values()], outgoingConflicts = [...conflicts].map(([id, operation]) => ({ id, operation }));
     for (const operation of incoming.operations) mergeOperation(records, operation, conflicts);
     for (const conflict of incoming.conflicts) conflicts.set(conflict.id, conflict.operation);
     requireSync(records.size <= SYNC_LIMITS.records && conflicts.size <= SYNC_LIMITS.records, 'SYNC_LIMIT');
-    const live = [...records.values()]; let desired = this.project(state, current, live);
-    const images = await this.images(state, live.filter(record => this.selected(state, record) && desired.profiles.some(profile => state.mapping[profile.id] === record.profile)), captured.sources);
+    const supersededEdits = new Map<string, RecordEdit>();
+    const pendingRecords = new Map(records);
+    for (const operation of state.outbox?.operations ?? []) mergeOperation(pendingRecords, operation, new Map());
+    if (!allowed && state.outbox) for (const operation of state.outbox.operations) {
+      const id = recordId(operation), edit = edits.get(id);
+      // A superseded sealed edit is no longer pending; later user edits still are.
+      if (pendingRecords.get(id)?.id !== operation.id && edit?.base !== operation.id && outboxEdit(edit, operation)) {
+        edits.delete(id); supersededEdits.set(id, edit);
+      }
+    }
+    const live = [...records.values()], projection = new Map(records);
+    if (!allowed) for (const [id, edit] of edits) if (!joiningRemote.has(id) && syncEnabled(state.switches, edit.record.item) && this.selected(state, edit.record)) {
+      // Pending user edits stay visible without acknowledging or publishing them.
+      projection.set(id, { ...edit.record, id: randomUUID(), base: records.get(id)?.id ?? null, time: edit.time, device: state.device, generation: state.generation });
+    }
+    const projected = [...projection.values()]; let desired = this.project(state, current, projected);
+    const images = await this.images(state, projected.filter(record => this.selected(state, record) && desired.profiles.some(profile => state.mapping[profile.id] === record.profile)), captured.sources);
+    const receivedBaseline = (records: SyncRecord[]) => {
+      const next = new Map(this.baseline(state, records).map(record => [recordId(record), record]));
+      if (!allowed) for (const id of edits.keys()) if (!joiningRemote.has(id)) { const previous = baseline.get(id); if (previous) next.set(id, previous); else next.delete(id); }
+      return [...next.values()];
+    };
     const checkpoint = allowed && (state.fresh.some(item => state.switches[item]) || state.operationsSinceCheckpoint + changes.length >= 500);
     if (changes.length || checkpoint) {
       // The durable outbox includes immutable bytes before the first transport write.
@@ -540,19 +686,19 @@ export class SyncEngine {
       this.save(state); this.local = structuredClone(state); this.options.afterSeal?.();
       await this.publishOutbox(state);
     }
-    if (state.outbox) { state.sequence = state.outbox.sequence; state.checkpointSequence = state.outbox.checkpoint; }
-    await this.cleanup(state);
+    if (state.outbox && !receiveOnly) { state.sequence = state.outbox.sequence; state.checkpointSequence = state.outbox.checkpoint; }
+    if (!receiveOnly) await this.cleanup(state);
     this.assertAccount(state);
     const latestSnapshot = this.host.read(), latest = this.capture(state, latestSnapshot);
     const comparable = (records: SyncRecord[]) => canonical(records.filter(record => syncEnabled(state.switches, record.item)).sort((a, b) => recordId(a).localeCompare(recordId(b))));
     requireSync(comparable(captured.records) === comparable(latest.records), 'SYNC_CHANGED');
-    desired = this.project(state, latestSnapshot, live);
+    desired = this.project(state, latestSnapshot, projected);
     const commit = structuredClone(state);
     commit.records = live.filter(record => record.value !== null || this.now() - record.time < 90 * 86400000); commit.conflicts = [...conflicts].map(([id, operation]) => ({ id, operation })); commit.cursors = incoming.cursors;
     commit.operationsSinceCheckpoint = checkpoint ? 0 : state.operationsSinceCheckpoint + changes.length;
-    this.rememberImages(commit, desired, live); commit.snapshot = this.baseline(commit, this.capture(commit, desired).records); commit.edits = [...this.remainingEdits(commit, allowed ? edits : undefined).values()];
+    this.rememberImages(commit, desired, projected); commit.snapshot = receivedBaseline(this.capture(commit, desired).records); commit.edits = [...this.remainingEdits(commit, allowed ? edits : supersededEdits).values()];
     if (allowed) for (const [item, time] of dirty) if (commit.switches[item] && commit.dirty[item] === time) delete commit.dirty[item];
-    commit.joining = false; if (allowed) commit.fresh = commit.fresh.filter(item => !commit.switches[item]); commit.lastSynced = this.now(); commit.outbox = null; commit.application = randomUUID();
+    commit.joining = false; if (allowed) commit.fresh = commit.fresh.filter(item => !commit.switches[item]); commit.lastSynced = this.now(); if (!receiveOnly) commit.outbox = null; commit.application = randomUUID();
     const cached = [...images.keys()].map(id => {
       const reference = JSON.parse(id) as BlobReference, file = createHash('sha256').update(id).digest('hex'), path = resolve(this.incomingPath, file);
       if (!existsSync(path)) { const source = resolve(this.outboxPath, reference.id); requireSync(statSync(source).size <= SYNC_LIMITS.blob); atomicSyncFile(path, readFileSync(source)); }
@@ -564,13 +710,14 @@ export class SyncEngine {
     catch (error) { unlinkSync(this.journalPath); throw error; }
     try {
       state.records = live.filter(record => record.value !== null || this.now() - record.time < 90 * 86400000); state.conflicts = [...conflicts].map(([id, operation]) => ({ id, operation })); state.cursors = incoming.cursors;
-      if (state.outbox) { state.sequence = state.outbox.sequence; state.checkpointSequence = state.outbox.checkpoint; }
+      if (state.outbox && !receiveOnly) { state.sequence = state.outbox.sequence; state.checkpointSequence = state.outbox.checkpoint; }
       state.operationsSinceCheckpoint = checkpoint ? 0 : state.operationsSinceCheckpoint + changes.length;
-      const applied = this.host.read(); this.rememberImages(state, applied, live); state.snapshot = this.baseline(state, this.capture(state, applied).records);
-      state.joining = false; if (allowed) state.fresh = state.fresh.filter(item => !state.switches[item]); state.lastSynced = this.now(); state.outbox = null;
-      state.application = commit.application; this.save(state, allowed ? dirty : undefined, allowed ? edits : undefined); this.local = state;
+      const applied = this.host.read(); this.rememberImages(state, applied, projected); state.snapshot = receivedBaseline(this.capture(state, applied).records);
+      state.joining = false; if (allowed) state.fresh = state.fresh.filter(item => !state.switches[item]); state.lastSynced = this.now(); if (!receiveOnly) state.outbox = null;
+      state.application = commit.application; this.save(state, allowed ? dirty : undefined, allowed ? edits : supersededEdits); this.local = state;
     } catch (error) { undo(); if (existsSync(this.journalPath)) unlinkSync(this.journalPath); throw error; }
     this.host.committed?.();
+    this.pendingReceive = false;
     return incoming.waiting;
   }
   private async checkGeneration(state: EngineState) {
@@ -605,12 +752,21 @@ export class SyncEngine {
     }
     this.assertAccount(this.local); this.assertAccount(state);
     if (this.local.transport.kind === 'quantum') requireSync(state.transport.kind === 'quantum' && state.transport.accountId === this.local.transport.accountId, 'SYNC_NOT_ALLOWED');
-    const snapshot = state.transport.kind === 'quantum' ? this.project(state, this.host.read(), state.records) : journal.snapshot as SyncSnapshot, undo = this.host.apply(snapshot, images);
+    const projected = new Map(state.records.map(record => [recordId(record), record]));
+    const observed = new Map(this.capture(state, journal.snapshot as SyncSnapshot).records.map(record => [recordId(record), record]));
+    for (const edit of state.edits) {
+      const id = recordId(edit.record);
+      if (canonical(observed.get(id)?.value ?? null) === canonical(edit.record.value)) projected.set(id, {
+        ...edit.record, id: randomUUID(), base: edit.base ?? null, time: edit.time, device: state.device, generation: state.generation,
+      });
+    }
+    const snapshot = state.transport.kind === 'quantum' ? this.project(state, this.host.read(), [...projected.values()]) : journal.snapshot as SyncSnapshot, undo = this.host.apply(snapshot, images);
     // Recovery may run in a copied install or a new process incarnation.
     if (state.generation !== this.local.generation || state.binding !== this.binding) {
       state.device = this.local.device; state.generation = this.local.generation; state.binding = this.binding; state.sequence = 0; state.checkpointSequence = 0; state.ownBatches = {}; state.ownCheckpoints = {}; state.fresh = [...SYNC_ITEMS];
     }
-    try { const applied = this.host.read(); this.rememberImages(state, applied, state.records); state.snapshot = this.baseline(state, this.capture(state, applied).records); this.edits = new Map(state.edits.map(edit => [recordId(edit.record), edit])); this.save(state); this.local = state; }
+    // The journal baseline excludes pending overlays, so recovery must keep it intact.
+    try { const applied = this.host.read(); this.rememberImages(state, applied, [...projected.values()]); this.edits = new Map(state.edits.map(edit => [recordId(edit.record), edit])); this.save(state); this.local = state; }
     catch (error) { undo(); throw error; }
     this.host.committed?.();
   }
@@ -642,7 +798,7 @@ export class SyncEngine {
           for (const name of await transportNames(transport, parts)) if (kind === 'batches' ? validBatch(name) : kind === 'checkpoints' ? validCheckpoint(name) || objectName(name) : objectName(name)) await transport.deleteOwnObject([...parts, name].join('/'), state.device);
         }
       }
-      this.pruneOutbox({ ...state, blobs: {}, outbox: null }); if (existsSync(this.journalPath)) unlinkSync(this.journalPath); unlinkSync(this.path); this.local = undefined; this.active = undefined; this.failure = null; this.dirty.clear(); this.edits.clear(); clearTimeout(this.dirtyWrite); this.dirtyWrite = undefined; this.host.changed();
+      this.unwatchChanges(); this.pruneOutbox({ ...state, blobs: {}, outbox: null }); if (existsSync(this.journalPath)) unlinkSync(this.journalPath); unlinkSync(this.path); this.local = undefined; this.active = undefined; this.resetRetry(); this.failure = null; this.dirty.clear(); this.edits.clear(); this.pendingReceive = false; this.pendingRebuild = false; this.verifyGeneration = true; this.lastRead = 0; clearTimeout(this.dirtyWrite); this.dirtyWrite = undefined; this.host.changed();
     });
   }
 }

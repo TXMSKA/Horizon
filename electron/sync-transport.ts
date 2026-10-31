@@ -26,6 +26,8 @@ export interface SyncTransport {
   readObject(path: string, cap: number): Promise<Buffer>;
   writeObject(path: string, bytes: Buffer, cap: number): Promise<void>;
   deleteOwnObject(path: string, device: string): Promise<void>;
+  refreshObjects?(force?: boolean): Promise<void>;
+  applyChanges?(changes: readonly { type: string; path: string | null }[]): void;
 }
 export class FolderTransport implements SyncTransport {
   readonly root: string;

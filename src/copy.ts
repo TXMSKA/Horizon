@@ -27,7 +27,7 @@ export const copy = {
   sharedBy: { en: 'Shared by {name}', es: 'Compartido por {name}' },
   sharedByIn: { en: 'Shared by {name} in {space}', es: 'Compartido por {name} en {space}' },
   sharedReadOnly: { en: 'Read only. Changes made by {name} appear here.', es: 'Solo lectura. Los cambios que haga {name} aparecen aquí.' },
-  SPACE_SHARED_UNAVAILABLE: { en: 'This shared project could not be opened. Try again.', es: 'No se pudo abrir este proyecto compartido. Volver a intentarlo.' },
+  SPACE_SHARED_UNAVAILABLE: { en: 'This shared project is no longer available.', es: 'Este proyecto compartido ya no está disponible.' },
   shareProject: { en: 'Share a project', es: 'Compartir un proyecto' },
   shareChooserProject: { en: 'Project', es: 'Proyecto' },
   shareChooserSpace: { en: 'Space', es: 'Space' },

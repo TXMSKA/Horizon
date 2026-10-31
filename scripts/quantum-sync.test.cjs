@@ -11,12 +11,19 @@ const { browserSyncHost } = require('../dist/electron/sync-browser.js');
 const { canonical, checkIdentity, openSync, sealSync, SYNC_LIMITS } = require('../dist/electron/sync-format.js');
 const { FolderTransport } = require('../dist/electron/sync-transport.js');
 const { readSyncState } = require('../dist/electron/sync-storage.js');
+const { readVaultFile } = require('../dist/electron/vault-storage.js');
 const { createSettings } = require('../dist/electron/settings.js');
 const { makeProfile, profileStorePath, writeRegistry } = require('../dist/electron/profiles.js');
 const { readStore, writeStore } = require('../dist/electron/store.js');
 const { createDesktop } = require('../dist/electron/desktop.js');
 const { validateCommand } = require('../dist/electron/commands.js');
 const { assertPrivateCommand } = require('../dist/electron/private-commands.js');
+const { subscribeQuantumChanges } = require('../dist/electron/quantum-feed.js');
+require('./quantum-feed.test.cjs');
+require('./quantum-engine-review.test.cjs');
+require('./quantum-merge-review.test.cjs');
+require('./quantum-account.test.cjs');
+require('./quantum-production.test.cjs');
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const favorite = (title = 'Quantum favorite') => ({ kind: 'link', id: randomUUID(), title, url: 'https://quantum-sync.example/favorite', createdAt: 100 });
@@ -28,7 +35,13 @@ function cipher() {
   };
 }
 async function fakeQuantum(t) {
-  const datasets = new Map(), calls = [], refusals = [], keys = new Map(), credentials = new Map();
+  const datasets = new Map(), calls = [], refusals = [], keys = new Map(), credentials = new Map(), events = [], holds = new Set();
+  let history = randomUUID();
+  const cursor = (identity, seq) => Buffer.from(JSON.stringify([history, identity.accountId, identity.appId, seq])).toString('base64url');
+  const emit = (identity, type, datasetId, path = null, bytes = null) => {
+    events.push({ seq: events.length + 1, type, ownerType: 'account', ownerId: identity.accountId, appId: identity.appId, datasetId, path, size: bytes === null ? null : bytes.length, sha256: bytes === null ? null : sha256(bytes), memberId: null, generation: null, createdAt: Date.now() });
+    for (const wake of [...holds]) wake();
+  };
   let pageSize = 2, objectHeaders = null, pageReply = null;
   const scope = (account, app, id) => `${account}/${app}/${id}`;
   const server = createServer(async (request, response) => {
@@ -36,25 +49,52 @@ async function fakeQuantum(t) {
       const url = new URL(request.url, 'http://127.0.0.1'), token = request.headers.authorization?.replace(/^Bearer /, ''), identity = credentials.get(token);
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const bytes = Buffer.concat(chunks), call = { method: request.method, path: url.pathname, search: url.searchParams, identity, headers: request.headers, bytes }; calls.push(call);
-      const json = (status, value, headers = {}) => { response.writeHead(status, { 'Content-Type': 'application/json', ...headers }); response.end(JSON.stringify(value)); };
-      const error = (status, code, headers) => json(status, { error: { code } }, headers);
+      const json = (status, value, headers = {}) => { response.writeHead(status, { 'Content-Type': 'application/json', 'X-Request-Id': 'fake-request', ...headers }); response.end(JSON.stringify(value)); };
+      const error = (status, code, headers) => json(status, { error: { code, message: code, fields: code === 'cursor_expired' ? { bootstrap: true } : {}, requestId: 'fake-request' } }, headers);
       if (!identity) { error(401, 'unauthorized'); return; }
       const forced = refusals.findIndex(item => (!item.method || item.method === request.method) && (!item.path || item.path === url.pathname));
       if (forced !== -1) { const value = refusals.splice(forced, 1)[0]; error(value.status, value.code, value.headers); return; }
       const { accountId, appId, computerId } = identity;
+      if (url.pathname === '/v1/bootstrap' && request.method === 'GET') {
+        json(200, { accountId, app: appId, device: { id: computerId, name: 'Synthetic computer' }, capabilities: { managedSync: { horizon: true }, spaces: 0, seatsPerSpace: 0, privateBuilds: [], relayPlus: false, premiumAppFeatures: false, blueprintPublish: false, monthlyCredits: 0 }, plans: [], pool: { poolBytes: 10000000000, usedBytes: 0 }, legal: { missing: [] }, spaces: [], after: null, cursors: { spaces: null } }); return;
+      }
+      if (url.pathname === '/v1/changes' && request.method === 'GET') {
+        let after = 0;
+        if (url.searchParams.has('after')) {
+          try { const [version, owner, app, sequence] = JSON.parse(Buffer.from(url.searchParams.get('after'), 'base64url').toString()); if (version !== history || owner !== accountId || app !== appId || !Number.isSafeInteger(sequence) || sequence < 0) throw new Error(); after = sequence; }
+          catch { error(410, 'cursor_expired'); return; }
+        }
+        const limit = Number(url.searchParams.get('limit') || 100), historyAtStart = history;
+        if (!Number.isInteger(limit) || limit < 1 || limit > 1000) { error(400, 'invalid_request'); return; }
+        const answer = () => {
+          const changes = events.filter(event => event.seq > after && event.ownerId === accountId && event.appId === appId).slice(0, limit);
+          const next = changes.length === limit ? changes.at(-1).seq : events.length;
+          json(200, { changes, cursor: cursor(identity, next) });
+        };
+        const visible = () => events.some(event => event.seq > after && event.ownerId === accountId && event.appId === appId);
+        if (visible()) { answer(); return; }
+        let timer;
+        const cleanup = () => { holds.delete(wake); clearTimeout(timer); response.removeListener('close', cleanup); };
+        const wake = () => { if (historyAtStart !== history) { cleanup(); error(410, 'cursor_expired'); } else if (visible()) { cleanup(); answer(); } };
+        holds.add(wake); response.once('close', cleanup); timer = setTimeout(() => { cleanup(); answer(); }, 100); timer.unref(); return;
+      }
       if (url.pathname === '/v1/datasets' && request.method === 'GET') {
-        const rows = [...datasets.values()].filter(value => value.accountId === accountId && value.appId === appId).map(({ id, appId, createdAt }) => ({ id, appId, createdAt })).sort((a, b) => a.id.localeCompare(b.id));
+        const rows = [...datasets.values()].filter(value => value.accountId === accountId && value.appId === appId).map(({ id, appId, createdAt }) => ({ id, appId, createdAt })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
         const limit = Math.min(pageSize, Number(url.searchParams.get('limit') || 100)), after = url.searchParams.get('after') || '', page = rows.filter(value => value.id > after).slice(0, limit);
         json(200, { datasets: page, after: page.length === limit ? page.at(-1).id : null }); return;
       }
       const match = /^\/v1\/datasets\/([^/]+)(?:\/objects(?:\/(.+))?)?$/.exec(url.pathname);
       if (!match) { error(404, 'not_found'); return; }
-      const id = decodeURIComponent(match[1]), location = scope(accountId, appId, id), path = match[2] && match[2].split('/').map(decodeURIComponent).join('/');
+      const id = decodeURIComponent(match[1]);
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) { error(400, 'invalid_request'); return; }
+      const objectRoute = url.pathname.includes('/objects');
+      if ((!objectRoute && request.method !== 'PUT') || (objectRoute && !match[2] && request.method !== 'GET') || (match[2] && !['GET', 'HEAD', 'PUT', 'DELETE'].includes(request.method))) { error(405, 'method_not_allowed'); return; }
+      const location = scope(accountId, appId, id), path = match[2] && match[2].split('/').map(decodeURIComponent).join('/');
       let dataset = datasets.get(location);
       if (!url.pathname.includes('/objects') && request.method === 'PUT') {
         const existed = !!dataset;
-        if (!dataset) { dataset = { id, appId, accountId, createdAt: 1793000000000, objects: new Map() }; datasets.set(location, dataset); }
-        json(existed ? 200 : 201, { id, appId, createdAt: dataset.createdAt }); return;
+        if (!dataset) { dataset = { id, appId, accountId, createdAt: 1793000000000, objects: new Map() }; datasets.set(location, dataset); emit(identity, 'dataset_created', id); }
+        json(existed ? 200 : 201, { id, appId, createdAt: dataset.createdAt }, existed ? {} : { Location: url.pathname }); return;
       }
       if (!dataset) { error(404, 'not_found'); return; }
       if (!path && request.method === 'GET') {
@@ -71,12 +111,12 @@ async function fakeQuantum(t) {
         if (!request.headers['content-length']) { error(411, 'length_required'); return; }
         if (request.headers['x-content-sha256'] !== sha256(bytes)) { error(400, 'invalid_checksum'); return; }
         if (previous && !previous.equals(bytes)) { error(409, 'object_conflict'); return; }
-        dataset.objects.set(path, Buffer.from(bytes)); json(previous ? 200 : 201, { success: true }); return;
+        dataset.objects.set(path, Buffer.from(bytes)); if (!previous) emit(identity, 'object_added', id, path, bytes); json(previous ? 200 : 201, { success: true }, previous ? {} : { Location: url.pathname }); return;
       }
       if (!previous) { error(404, 'not_found'); return; }
-      if (request.method === 'DELETE') { if (path === 'dataset.hzs') { error(403, 'delete_forbidden'); return; } dataset.objects.delete(path); json(200, { success: true }); return; }
-      response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(previous.length), 'X-Content-SHA256': sha256(previous), ...(objectHeaders ?? {}) }); response.end(previous);
-    } catch { response.writeHead(500); response.end(); }
+      if (request.method === 'DELETE') { if (path === 'dataset.hzs') { error(403, 'delete_forbidden'); return; } dataset.objects.delete(path); emit(identity, 'object_deleted', id, path, previous); json(200, { success: true }); return; }
+      response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(previous.length), 'X-Content-SHA256': sha256(previous), 'Content-Disposition': 'attachment', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store', ...(objectHeaders ?? {}) }); response.end(previous);
+    } catch { response.writeHead(500, { 'Content-Type': 'application/json', 'X-Request-Id': 'fake-request' }); response.end(JSON.stringify({ error: { code: 'internal_error', message: 'Synthetic failure', fields: {}, requestId: 'fake-request' } })); }
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
@@ -84,6 +124,7 @@ async function fakeQuantum(t) {
   function account(accountId = 'account-a', computerId = randomUUID(), appId = 'horizon') {
     keys.set(accountId, keys.get(accountId) ?? randomBytes(32)); const token = randomUUID(); credentials.set(token, { accountId, computerId, appId });
     const value = { accountId, computerId, profileIds: [randomUUID()], active: true,
+      get revision() { return JSON.stringify([computerId, [...value.profileIds].sort(), value.active]); },
       assertActive() { if (!value.active) throw new Error('SYNC_NOT_ALLOWED'); },
       async request(path, init = {}) {
         value.assertActive(); const headers = new Headers(init.headers); assert.equal(headers.has('Content-Length'), false, 'Chromium must choose Content-Length'); headers.set('Authorization', `Bearer ${token}`);
@@ -92,7 +133,8 @@ async function fakeQuantum(t) {
       async deriveSyncKey(datasetId) { value.assertActive(); return Buffer.from(hkdfSync('sha256', keys.get(accountId), Buffer.alloc(0), `cosmic/account/horizon/sync/${datasetId}`, 32)); },
     }; return value;
   }
-  return { calls, refusals, datasets, account, keys,
+  return { calls, refusals, datasets, account, keys, events, holds,
+    expireCursors() { history = randomUUID(); for (const wake of [...holds]) wake(); },
     dataset(account, id) { return datasets.get(scope(account.accountId, 'horizon', id)); },
     set pageSize(value) { pageSize = value; }, set objectHeaders(value) { objectHeaders = value; }, set pageReply(value) { pageReply = value; },
   };
@@ -109,15 +151,22 @@ function seat(fixture, name, account, options = {}) {
   const status = { readError: false, memoryOnly: false }, store = readStore(profileStorePath(directory, profile.id), encryption, status), desktop = createDesktop(join(dirname(profileStorePath(directory, profile.id)), 'notebooks.json'), encryption, () => {});
   const data = { store, status, desktop, sessions: { version: 2, windows: [] }, sessionStatus: { readError: false, memoryOnly: false }, favoritesVersion: 0, importProgress: null }, profiles = new Map([[profile.id, data]]);
   let now = 1000000, currentAccount = account; account.profileIds = [profile.id];
+  account.subscribeChanges ??= listener => subscribeQuantumChanges({ account, directory, cipher: encryption, listener });
   const host = browserSyncHost(directory, encryption, settings, { registry: () => registry, profiles, registryChanged: value => { registry = value; }, flush() { for (const value of profiles.values()) value.desktop.flush(); }, changed() {} });
   const engine = new SyncEngine(directory, encryption, host, { now: () => now, quantum: id => currentAccount?.accountId === id && currentAccount.active ? currentAccount : undefined, ...options });
   fixture.cleanup.push(() => { engine.stop(); for (const value of profiles.values()) value.desktop.dispose(); });
   return { directory, engine, encryption, settings, profile, data, host, profiles,
-    advance(value = 1000) { now += value; }, account(value) { currentAccount = value; }, read: host.read,
+    advance(value = 1000) { now += value; }, account(value) { currentAccount = value; engine.accountChanged(); }, read: host.read,
     store(edit, item = 'favorites') { edit(data.store); writeStore(profileStorePath(directory, profile.id), data.store, encryption); engine.markDirty(item); },
   };
 }
-async function converge(a, b) { await a.engine.pulse(); await b.engine.pulse(); await a.engine.pulse(); }
+async function converge(a, b) { await a.engine.pulse(); await new Promise(resolve => setTimeout(resolve, 30)); await b.engine.pulse(); await new Promise(resolve => setTimeout(resolve, 30)); await a.engine.pulse(); }
+const cursor = peer => readVaultFile(join(peer.directory, 'quantum-changes.sealed'), peer.encryption)?.cursor;
+async function eventually(predicate) {
+  const until = Date.now() + 5000;
+  while (!predicate() && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(predicate(), 'aggregate feed did not converge before the test deadline');
+}
 async function descriptor(account, datasetId) {
   const key = await account.deriveSyncKey(datasetId);
   return { magic: 'Horizon Sync', version: 1, datasetId, keyType: 'account', check: sealSync(key, checkIdentity(datasetId), { check: 'Horizon Sync' }).toString('base64') };
@@ -171,10 +220,22 @@ test('Quantum transport bounds request and stalled-body deadlines', async () => 
   await assert.rejects(transport.readDescriptor(), /SYNC_TIMEOUT/);
 });
 
-for (const [status, code, failure] of [[403, 'sync_plan_required', 'SYNC_PLAN_REQUIRED'], [403, 'forbidden', 'SYNC_NOT_ALLOWED'], [403, 'pool_exceeded', 'SYNC_FULL'], [409, 'object_limit', 'SYNC_LIMIT'], [409, 'writer_limit_exceeded', 'SYNC_LIMIT'], [413, 'object_too_large', 'SYNC_LIMIT'], [429, 'rate_limited', 'SYNC_RATE_LIMITED'], [408, 'upload_timeout', 'SYNC_TIMEOUT']]) test(`Quantum maps ${status} ${code} without losing retry metadata`, async t => {
+for (const [status, code, failure] of [
+  ...['invalid_request','invalid_path','invalid_checksum','invalid_object'].map(code => [400, code, 'SYNC_INVALID']),
+  [401, 'unauthorized', 'SYNC_NOT_ALLOWED'],
+  ...['forbidden','app_forbidden','writer_forbidden','delete_forbidden','origin_forbidden','csrf_forbidden','second_factor_required','reauthentication_required','key_pending','account_deletion_pending'].map(code => [403, code, 'SYNC_NOT_ALLOWED']),
+  [403, 'acceptance_required', 'SYNC_CONSENT_REQUIRED'], [403, 'sync_plan_required', 'SYNC_PLAN_REQUIRED'],
+  [404, 'not_found', 'SYNC_INVALID'], [405, 'method_not_allowed', 'SYNC_INVALID'], [408, 'upload_timeout', 'SYNC_TIMEOUT'],
+  [409, 'object_conflict', 'SYNC_CONFLICT'], [409, 'pool_exceeded', 'SYNC_FULL'],
+  ...['dataset_limit','object_limit','writer_limit_exceeded'].map(code => [409, code, 'SYNC_LIMIT']),
+  [411, 'length_required', 'SYNC_INVALID'], [413, 'object_too_large', 'SYNC_LIMIT'], [413, 'request_too_large', 'SYNC_LIMIT'],
+  [415, 'unsupported_media_type', 'SYNC_INVALID'], [429, 'rate_limited', 'SYNC_RATE_LIMITED'],
+  [500, 'internal_error', 'SYNC_STORAGE'], [503, 'identity_unavailable', 'SYNC_STORAGE'], [503, 'storage_unavailable', 'SYNC_STORAGE'],
+  [503, 'busy', 'SYNC_RATE_LIMITED'], [503, 'standby_read_only', 'SYNC_RATE_LIMITED'],
+]) test(`Quantum maps ${status} ${code} without losing retry metadata`, async t => {
   const server = await fakeQuantum(t), account = server.account(), { transport } = await createDataset(account), path = `writers/${account.computerId}/${randomUUID()}/batches/1-${randomUUID()}.hzs`;
   server.refusals.push({ status, code, method: 'PUT', headers: { 'Retry-After': '7' } });
-  await assert.rejects(transport.writeObject(path, Buffer.from('Sealed batch'), 100), error => error.message === failure && (status !== 429 || error.retryAfterMs === 7000));
+  await assert.rejects(transport.writeObject(path, Buffer.from('Sealed batch'), 100), error => error.message === failure && (failure !== 'SYNC_RATE_LIMITED' || error.retryAfterMs === 7000));
 });
 
 test('Quantum cannot access another account or app and refuses another computer writer', async t => {
@@ -244,13 +305,15 @@ test('Quantum sign-out and account changes retain the old outbox without publish
   original.active = true; a.account(original); delete a.engine.options.afterSeal; await a.engine.pulse(); assert.equal(a.engine.local.outbox, null); assert.equal(server.calls.some(call => call.identity?.accountId === replacement.accountId), false);
 });
 
-test('Quantum descriptor rate limiting retains its delay and blocks every engine request until Retry-After', async t => {
+test('Quantum cached descriptor does not poll and direct rate limiting retains Retry-After', async t => {
   const server = await fakeQuantum(t), local = fixture(t), account = server.account(), a = seat(local, 'a', account); await a.engine.enrollQuantum(account); await a.engine.pulse();
+  await eventually(() => !!cursor(a) && server.holds.size === 1);
   const datasetId = a.engine.local.dataset.datasetId, path = `/v1/datasets/${datasetId}/objects/dataset.hzs`, refusal = { method: 'GET', path, status: 429, code: 'rate_limited', headers: { 'Retry-After': '7' } };
   server.refusals.push(refusal); await assert.rejects(new QuantumTransport(account, datasetId).readDescriptor(), error => error.message === 'SYNC_RATE_LIMITED' && error.retryAfterMs === 7000);
-  server.refusals.push(refusal); await assert.rejects(a.engine.pulse(), /SYNC_RATE_LIMITED/); const calls = server.calls.length;
-  await a.engine.pulse(); a.advance(6999); await a.engine.pulse(); assert.equal(server.calls.length, calls); assert.equal(a.engine.state().failure, 'SYNC_RATE_LIMITED');
-  a.advance(2); await a.engine.pulse(); assert.ok(server.calls.length > calls); assert.equal(a.engine.state().failure, null);
+  const calls = server.calls.filter(call => call.path === path).length;
+  await a.engine.pulse(); a.advance(60000); await a.engine.pulse();
+  assert.equal(server.calls.filter(call => call.path === path).length, calls);
+
 });
 
 test('a folder leg cannot publish an account-tagged Quantum outbox under another account', async t => {
@@ -279,7 +342,9 @@ test('a copied Quantum install can wait signed out and resume with its newly reg
   const directory = join(local.root, 'copied'); mkdirSync(directory); cpSync(join(a.directory, 'sync'), join(directory, 'sync'), { recursive: true }); let current;
   const restored = new SyncEngine(directory, a.encryption, a.host, { now: () => 1000000, quantum: id => current?.accountId === id ? current : undefined }); local.cleanup.push(() => restored.stop());
   assert.equal(restored.state().configured, true); const calls = server.calls.length; await assert.rejects(restored.pulse(), /SYNC_NOT_ALLOWED/); assert.equal(server.calls.length, calls);
-  current = server.account(); current.profileIds = [a.profile.id]; restored.accountChanged(); await restored.pulse();
+  current = server.account(); current.profileIds = [a.profile.id];
+  current.subscribeChanges = listener => subscribeQuantumChanges({ account: current, directory, cipher: a.encryption, listener });
+  restored.accountChanged(); await restored.pulse();
   assert.equal(restored.local.device, current.computerId); assert.equal(restored.local.outbox, null); assert.equal(a.data.store.favorites.bar[0].title, 'Copied-install pending edit');
   for (const call of server.calls.slice(calls).filter(call => call.method === 'PUT' && call.path.includes('/objects/writers/'))) assert.equal(call.path.split('/objects/writers/')[1].split('/')[0], current.computerId);
 });
@@ -288,7 +353,7 @@ test('Quantum rate limiting preserves sealed retries and waits for Retry-After b
   const server = await fakeQuantum(t), local = fixture(t), account = server.account(), a = seat(local, 'a', account); await a.engine.enrollQuantum(account); await a.engine.pulse();
   a.advance(); a.store(store => store.favorites.bar.push(favorite('Rate limited edit'))); server.refusals.push({ method: 'PUT', status: 429, code: 'rate_limited', headers: { 'Retry-After': '7' } });
   await assert.rejects(a.engine.pulse(), /SYNC_RATE_LIMITED/); const pending = structuredClone(a.engine.local.outbox), writes = server.calls.filter(call => call.method === 'PUT').length;
-  await a.engine.pulse().catch(() => {}); assert.equal(server.calls.filter(call => call.method === 'PUT').length, writes); assert.deepEqual(a.engine.local.outbox, pending);
+  await a.engine.pulse(false).catch(() => {}); assert.equal(server.calls.filter(call => call.method === 'PUT').length, writes); assert.deepEqual(a.engine.local.outbox, pending);
   a.advance(7001); await a.engine.pulse(); assert.equal(a.engine.local.outbox, null);
 });
 
@@ -360,13 +425,13 @@ test('Quantum assignment removal between objects blocks the remaining sealed upl
   account.request = async (route, init = {}) => {
     if (init.method === 'PUT' && removed) laterUploads++;
     const response = await original(route, init);
-    if (init.method === 'PUT' && !removed) { account.profileIds = [extra.id]; removed = true; }
+    if (init.method === 'PUT' && !removed) { account.profileIds = [extra.id]; removed = true; a.engine.accountChanged(); }
     return response;
   };
   await assert.rejects(a.engine.pulse(), /SYNC_NOT_ALLOWED/);
   assert.equal(removed, true); assert.equal(laterUploads, 0); assert.ok(a.engine.local.outbox.files.length >= 2);
   assert.equal(a.data.store.favorites.bar[0].title, 'Departing profile edit');
-  account.profileIds = [a.profile.id, extra.id]; account.request = original; await a.engine.pulse(); assert.equal(a.engine.local.outbox, null);
+  account.profileIds = [a.profile.id, extra.id]; account.request = original; a.engine.accountChanged(); await a.engine.pulse(); assert.equal(a.engine.local.outbox, null);
 });
 
 test('Quantum signed-out restart retains configuration and sealed retries for the original account', async t => {
@@ -378,4 +443,37 @@ test('Quantum signed-out restart retains configuration and sealed retries for th
   assert.equal(restored.state().configured, true); assert.deepEqual(restored.local.outbox, pending);
   await assert.rejects(restored.pulse(), /SYNC_NOT_ALLOWED/); assert.equal(server.calls.length, calls);
   current = account; restored.accountChanged(); await restored.pulse(); assert.equal(restored.local.outbox, null); assert.equal(a.data.store.favorites.bar[0].title, 'Restart pending edit');
+});
+
+test('two Quantum engines receive additions and deletions through one account aggregate hold without idle dataset polling', async t => {
+  const server = await fakeQuantum(t), local = fixture(t), accountA = server.account(), accountB = server.account(), a = seat(local, 'feed-a', accountA), b = seat(local, 'feed-b', accountB);
+  await a.engine.enrollQuantum(accountA); await a.engine.pulse(); await b.engine.enrollQuantum(accountB); await b.engine.pulse();
+  await eventually(() => !!cursor(a) && !!cursor(b) && server.holds.size === 1);
+  const added = favorite('Aggregate addition'); a.advance(); a.store(store => store.favorites.bar.push(added)); await a.engine.pulse();
+  await eventually(() => b.data.store.favorites.bar.some(entry => entry.id === added.id));
+  a.advance(); a.store(store => { store.favorites.bar = []; }); await a.engine.pulse();
+  await eventually(() => b.data.store.favorites.bar.length === 0);
+  const datasetId = a.engine.local.dataset.datasetId, transport = new QuantumTransport(accountA, datasetId), generation = randomUUID(), path = `writers/${accountA.computerId}/${generation}/blobs/${randomUUID()}.hzs`;
+  await transport.writeObject(path, Buffer.from('Opaque retired object'), 100);
+  await eventually(() => b.engine.active && cursor(b) === cursor(a) && server.holds.size === 1);
+  await transport.deleteOwnObject(path, accountA.computerId);
+  await eventually(() => server.events.some(event => event.type === 'object_deleted' && event.path === path) && server.holds.size === 1);
+  assert.deepEqual(await Array.fromAsync(b.engine.active.listObjects(`writers/${accountA.computerId}/${generation}/blobs`)), []);
+  const before = server.calls.length; a.advance(120000); b.advance(120000);
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.ok(server.calls.slice(before).every(call => call.path === '/v1/changes'));
+  assert.equal(server.calls.some(call => /^\/v1\/datasets\/[^/]+\/changes$/.test(call.path)), false);
+  assert.ok(server.calls.some(call => call.path === '/v1/changes' && call.search.has('after')));
+});
+
+test('an expired aggregate cursor rebuilds from bootstrap and listings without losing concurrent edits', async t => {
+  const server = await fakeQuantum(t), local = fixture(t), account = server.account(), a = seat(local, 'expired', account);
+  await a.engine.enrollQuantum(account); await a.engine.pulse();
+  await eventually(() => !!cursor(a) && server.holds.size === 1);
+  const before = cursor(a); server.expireCursors();
+  await eventually(() => !!cursor(a) && cursor(a) !== before && server.holds.size === 1);
+  assert.ok(server.calls.some(call => call.path === '/v1/bootstrap'));
+  a.advance(); a.store(store => store.favorites.bar.push(favorite('After cursor recovery'))); await a.engine.pulse();
+  assert.equal(a.engine.state().failure, null);
+  assert.equal(a.data.store.favorites.bar[0].title, 'After cursor recovery');
 });
