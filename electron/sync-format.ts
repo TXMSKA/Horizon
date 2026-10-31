@@ -11,7 +11,8 @@ export function requireSync(condition: unknown, code: SyncFailure = 'SYNC_INVALI
 export function syncFailure(error: unknown): SyncFailure {
   const code = error instanceof Error ? error.message : '';
   if (code === 'ACCOUNT_DENIED') return 'SYNC_NOT_ALLOWED';
-  if (['SYNC_INVALID', 'SYNC_NEWER_FORMAT', 'SYNC_WRONG_KEY', 'SYNC_STORAGE', 'SYNC_FOLDER', 'SYNC_FULL', 'SYNC_LIMIT', 'SYNC_TIMEOUT', 'SYNC_LOCKED', 'SYNC_GAP', 'SYNC_BLOB_PENDING', 'SYNC_CHANGED', 'SYNC_SWITCH_FAILED', 'SYNC_CONFLICT', 'SYNC_NOT_ALLOWED', 'SYNC_RATE_LIMITED'].includes(code)) return code as SyncFailure;
+  if (code === 'ACCOUNT_CONSENT') return 'SYNC_CONSENT_REQUIRED';
+  if (['SYNC_INVALID', 'SYNC_NEWER_FORMAT', 'SYNC_WRONG_KEY', 'SYNC_STORAGE', 'SYNC_FOLDER', 'SYNC_FULL', 'SYNC_LIMIT', 'SYNC_TIMEOUT', 'SYNC_LOCKED', 'SYNC_GAP', 'SYNC_BLOB_PENDING', 'SYNC_CHANGED', 'SYNC_SWITCH_FAILED', 'SYNC_CONFLICT', 'SYNC_NOT_ALLOWED', 'SYNC_RATE_LIMITED', 'SYNC_PLAN_REQUIRED', 'SYNC_CONSENT_REQUIRED'].includes(code)) return code as SyncFailure;
   if (error && typeof error === 'object' && 'code' in error && ['ENOSPC', 'EDQUOT'].includes(String(error.code))) return 'SYNC_FULL';
   if (error && typeof error === 'object' && 'code' in error && ['ENOENT', 'ENOTDIR', 'EACCES', 'EIO', 'ENETUNREACH'].includes(String(error.code))) return 'SYNC_FOLDER';
   return 'SYNC_STORAGE';

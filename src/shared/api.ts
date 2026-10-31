@@ -7,7 +7,7 @@ export interface AccountSpaceMember { accountId: string; displayName: string | n
 export interface AccountSpace { id: string; name: string; code: string | null; colour: string | null; icon: string | null; role: 'owner' | 'member'; pending: boolean; members: AccountSpaceMember[] }
 export interface AccountSharedDataset { spaceId: string; datasetId: string; sharedBy: { accountId: string; displayName: string | null }; updatedAt: string; size: number; title: string | null }
 export type AccountState = { status: 'signedOut' } | { status: 'signingIn' }
-  | { status: 'signedIn'; email: string; displayName: string | null; plan: string | null; phrase: 'ready' | 'needed' | 'wrong'; keyStore: 'shared' | 'session' | 'error'; spaces: AccountSpace[]; shared: AccountSharedDataset[]; spacesError: string | null } | { status: 'error'; code: string };
+  | { status: 'signedIn'; email: string; displayName: string | null; plan: string | null; phrase: 'ready' | 'needed' | 'wrong'; keyStore: 'shared' | 'session' | 'error'; consent: 'accepted' | 'required'; managedSync: boolean; spaces: AccountSpace[]; shared: AccountSharedDataset[]; spacesError: string | null } | { status: 'error'; code: string };
 export type AccountCommand = { type: 'account-sign-in' | 'account-reopen' | 'account-cancel' | 'account-sign-out' | 'account-manage' | 'account-retry' | 'account-refresh' }
   | { type: 'account-phrase'; phrase: string };
 export type SpaceCommand = { type: 'space-share-project'; project: string; space: string }
@@ -30,7 +30,7 @@ export type LanguageSetting = 'system' | Language;
 export type OnStart = 'restore' | 'new-page';
 export const SYNC_ITEMS = ['profiles', 'favorites', 'history', 'tabs', 'desktop', 'siteSettings', 'settings'] as const;
 export type SyncItem = typeof SYNC_ITEMS[number];
-export type SyncFailure = 'SYNC_INVALID' | 'SYNC_NEWER_FORMAT' | 'SYNC_WRONG_KEY' | 'SYNC_STORAGE' | 'SYNC_FOLDER' | 'SYNC_FULL' | 'SYNC_LIMIT' | 'SYNC_TIMEOUT' | 'SYNC_LOCKED' | 'SYNC_GAP' | 'SYNC_BLOB_PENDING' | 'SYNC_CHANGED' | 'SYNC_SWITCH_FAILED' | 'SYNC_CONFLICT' | 'SYNC_NOT_ALLOWED' | 'SYNC_RATE_LIMITED';
+export type SyncFailure = 'SYNC_INVALID' | 'SYNC_NEWER_FORMAT' | 'SYNC_WRONG_KEY' | 'SYNC_STORAGE' | 'SYNC_FOLDER' | 'SYNC_FULL' | 'SYNC_LIMIT' | 'SYNC_TIMEOUT' | 'SYNC_LOCKED' | 'SYNC_GAP' | 'SYNC_BLOB_PENDING' | 'SYNC_CHANGED' | 'SYNC_SWITCH_FAILED' | 'SYNC_CONFLICT' | 'SYNC_NOT_ALLOWED' | 'SYNC_RATE_LIMITED' | 'SYNC_PLAN_REQUIRED' | 'SYNC_CONSENT_REQUIRED';
 export interface SyncComputerIdentity { id: string; name: string }
 export interface SyncConflict { id: string; item: SyncItem; title: string; computer: SyncComputerIdentity; time: number; deleted: boolean }
 export interface SyncRemoteWindow { profile: string; id: string; tabs: { title: string; url: string; group: string | null }[]; groups: { id: string; title: string }[] }

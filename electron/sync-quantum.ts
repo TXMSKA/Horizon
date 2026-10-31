@@ -20,6 +20,7 @@ const validPath = (path: string) => path.length > 0 && path.length <= 255 && /^[
 const absent = () => Object.assign(new Error('SYNC_INVALID'), { code: 'ENOENT' });
 function accountFailure(error: unknown): never {
   if (error instanceof Error && error.message === 'ACCOUNT_DENIED') throw new Error('SYNC_NOT_ALLOWED');
+  if (error instanceof Error && error.message === 'ACCOUNT_CONSENT') throw new Error('SYNC_CONSENT_REQUIRED');
   if (error instanceof Error && error.message === 'ACCOUNT_TIMEOUT') throw new Error('SYNC_TIMEOUT');
   if (error instanceof Error && error.message === 'ACCOUNT_INVALID_RESPONSE') throw new Error('SYNC_INVALID');
   throw error;
@@ -65,6 +66,7 @@ async function request(account: QuantumAccount, path: string, init: RequestInit,
   if (response.status === 404) throw absent();
   if (response.status === 401) throw new Error('SYNC_NOT_ALLOWED');
   if (code === 'pool_exceeded' || code === 'quota_exceeded' || code === 'storage_full') throw new Error('SYNC_FULL');
+  if (response.status === 403 && code === 'sync_plan_required') throw new Error('SYNC_PLAN_REQUIRED');
   if (response.status === 403) throw new Error('SYNC_NOT_ALLOWED');
   if (response.status === 409 && code === 'object_conflict') throw new Error('SYNC_CONFLICT');
   if (response.status === 413 || ['dataset_limit', 'object_limit', 'writer_limit_exceeded', 'object_too_large', 'size_limit'].includes(code)) throw new Error('SYNC_LIMIT');

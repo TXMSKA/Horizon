@@ -88,6 +88,8 @@ interface SessionOwner {
   completed?: NonNullable<Parameters<Session['webRequest']['onCompleted']>[0]>;
   failed?: NonNullable<Parameters<Session['webRequest']['onErrorOccurred']>[0]>;
 }
+// Consent is checked before the plan so a Dawn account awaiting new terms is not told its plan lacks sync.
+const consentRequired = (manager: ReturnType<typeof createAccount>) => { const state = manager.state(); return state.status === 'signedIn' && state.consent === 'required'; };
 const sessionOwners = new WeakMap<Session, Set<SessionOwner>>();
 function attachSession(target: Session, owner: SessionOwner) {
   let owners = sessionOwners.get(target);
@@ -355,6 +357,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           restoreQuantumAccounts();
           const manager = shared.profiles.get(command.profile)?.account, id = manager?.accountId();
           if (!manager || !id) throw new Error('SYNC_NOT_ALLOWED');
+          if (consentRequired(manager)) throw new Error('SYNC_CONSENT_REQUIRED');
+          if (!manager.managedSync()) throw new Error('SYNC_PLAN_REQUIRED');
           const account = manager.quantumSync(shared.registry.profiles.filter(profile => shared.profiles.get(profile.id)?.account?.accountId() === id).map(profile => profile.id));
           if (!account) throw new Error('SYNC_NOT_ALLOWED');
           try { await sync.enrollQuantum(account); await sync.pulse(true); }
@@ -364,6 +368,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (command.transport.kind === 'quantum') {
             const manager = shared.profiles.get(selectedProfile)?.account;
             if (!manager || manager.accountId() !== command.transport.accountId || !manager.quantumSync([selectedProfile])) throw new Error('SYNC_NOT_ALLOWED');
+            if (consentRequired(manager)) throw new Error('SYNC_CONSENT_REQUIRED');
+            if (!manager.managedSync()) throw new Error('SYNC_PLAN_REQUIRED');
             await sync.switchTransport(command.transport);
           } else {
             let choice: Electron.OpenDialogReturnValue;

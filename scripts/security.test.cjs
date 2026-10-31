@@ -7565,7 +7565,7 @@ test('account seals only the refresh token and restores me in a new profile cont
   const fixture = await accountFixture(t); await fixture.signIn();
   const path = join(fixture.host.directory, 'account.sealed'), bytes = readFileSync(path), saved = await require('../dist/electron/vault-storage.js').vaultTokenStore(path, fixture.protection).get();
   assert.ok(saved === fixture.token().refreshToken); assert.ok(!bytes.includes(Buffer.from(saved))); assert.ok(!bytes.includes(Buffer.from(fixture.token().accessToken)));
-  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
+  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', consent: 'accepted', managedSync: false, spaces: [], shared: [], spacesError: null });
   fixture.account.close(); const rotated = fixture.rotate();
   const next = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {} }); t.after(() => next.close());
   await next.retry(); assert.equal(next.state().status, 'signedIn');
@@ -7583,7 +7583,7 @@ test('account refreshes a rejected access token exactly once and persists the ro
     if (call.path === '/v1/me' && call.headers.authorization === `Bearer ${previous.accessToken}`) { rejected = true; return { status: 401, body: { error: 'unauthorized' } }; }
   });
   const before = fixture.requests.length; await Promise.all([fixture.account.me(), fixture.account.me(), fixture.account.me()]); assert.equal(rejected, true); assert.equal(fixture.account.state().status, 'signedIn');
-  assert.deepEqual(fixture.requests.slice(before).map(call => [call.method, call.path]), [['GET', '/v1/me'], ['POST', '/v1/oauth/token'], ['GET', '/v1/me']]);
+  assert.deepEqual(fixture.requests.slice(before).map(call => [call.method, call.path]), [['GET', '/v1/me'], ['POST', '/v1/oauth/token'], ['GET', '/v1/me'], ['GET', '/v1/entitlements']]);
   const refresh = fixture.requests.slice(before)[1]; assert.ok(refresh.body.refreshToken === previous.refreshToken);
   assert.ok(fixture.requests.at(-1).headers.authorization === `Bearer ${rotated.accessToken}`);
   assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
@@ -7637,6 +7637,62 @@ test('Quantum account sign-out rejects a late download and invalidates its bound
   assert.deepEqual(account.state(), { status: 'signedOut' });
 });
 
+function managedSyncCapabilities(horizon) {
+  return { managedSync: { nebula: true, horizon, nova: true, blueprint: true, vault: true, hivem1nd: false }, spaces: 2, seatsPerSpace: 5, privateBuilds: [], relayPlus: false, premiumAppFeatures: true, blueprintPublish: true, monthlyCredits: 500 };
+}
+
+test('account managed sync follows effective capabilities on every refresh and never the plan label', async t => {
+  const fixture = await quantumAccountFixture(t), computerId = readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8');
+  let answer = { status: 200, body: { entitlements: [], capabilities: managedSyncCapabilities(true) } }, plans = [{ key: 'nebula:dawn', product: 'nebula', tier: 'dawn', label: 'Dawn' }];
+  fixture.handle(call => call.path === '/v1/entitlements' ? answer
+    : call.path === '/v1/me' ? { status: 200, body: { email: 'person@example.test', plans, devices: [{ id: fixture.token().deviceId, userId: 'account-fixture', appId: 'horizon', computerId }] } } : undefined);
+  await fixture.account.me(); assert.equal(fixture.account.state().managedSync, true); assert.equal(fixture.account.managedSync(), true); assert.equal(fixture.account.state().plan, 'Dawn');
+  // The same label with capabilities that leave Horizon out denies sync; a plan change applies on the next refresh.
+  answer = { status: 200, body: { entitlements: [], capabilities: managedSyncCapabilities(false) } };
+  await fixture.account.me(); assert.equal(fixture.account.state().managedSync, false); assert.equal(fixture.account.managedSync(), false); assert.equal(fixture.account.state().plan, 'Dawn');
+  plans = [{ key: 'nebula:insider', product: 'nebula', tier: 'insider', label: 'Insider' }]; answer = { status: 200, body: { entitlements: [], capabilities: managedSyncCapabilities(true) } };
+  await fixture.account.me(); assert.equal(fixture.account.managedSync(), true); assert.equal(fixture.account.state().plan, 'Insider');
+  // A failed or malformed capability read keeps the last answer; Quantum still checks every write.
+  for (const failure of [{ status: 500, body: { error: { code: 'internal' } } }, { status: 200, body: { capabilities: { managedSync: { horizon: 'yes' } } } }, { status: 200, body: {} }]) {
+    answer = failure; await fixture.account.me(); assert.equal(fixture.account.state().status, 'signedIn'); assert.equal(fixture.account.managedSync(), true);
+  }
+  plans = []; answer = { status: 200, body: { entitlements: [], capabilities: managedSyncCapabilities(false) } };
+  await fixture.account.me(); assert.equal(fixture.account.managedSync(), false); assert.equal(fixture.account.state().plan, null);
+  await fixture.account.signOut(); assert.equal(fixture.account.managedSync(), false);
+});
+
+test('account consent required on me shows the consent state, sends no protected request and opens the Cosmic site', async t => {
+  const fixture = await accountFixture(t); fixture.me({ email: 'person@example.test', consentRequired: true });
+  await fixture.signIn();
+  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', consent: 'required', managedSync: false, spaces: [], shared: [], spacesError: null });
+  assert.deepEqual(fixture.requests.map(call => call.path), ['/v1/oauth/token', '/v1/me']);
+  assert.equal(fixture.account.managedSync(), false); assert.equal(fixture.account.quantumSync([randomUUID()]), undefined);
+  await fixture.account.manage(); assert.equal(fixture.opened.at(-1), fixture.origin + '/');
+  fixture.me({ email: 'person@example.test', consentRequired: false }); fixture.handle(call => call.path === '/v1/entitlements' ? { status: 200, body: { entitlements: [], capabilities: managedSyncCapabilities(true) } } : undefined);
+  await fixture.account.retry(); assert.equal(fixture.account.state().consent, 'accepted'); assert.equal(fixture.account.state().managedSync, true);
+});
+
+test('a protected route answering acceptance_required moves the account to consent and stops managed sync', async t => {
+  const fixture = await quantumAccountFixture(t), computerId = readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8'), dataset = randomUUID();
+  let accepted = true;
+  const refusal = { status: 403, body: { error: { code: 'acceptance_required', fields: { policies: [{ id: 'terms', version: '2026-10-27', path: '/terms' }] } } } };
+  fixture.handle(call => call.path === '/v1/me' ? { status: 200, body: { email: 'person@example.test', consentRequired: !accepted, devices: [{ id: fixture.token().deviceId, userId: 'account-fixture', appId: 'horizon', computerId }] } }
+    : !accepted && call.path !== '/v1/oauth/token' ? refusal : call.path === '/v1/entitlements' ? { status: 200, body: { entitlements: [], capabilities: managedSyncCapabilities(true) } } : undefined);
+  await fixture.account.me(); assert.equal(fixture.account.managedSync(), true);
+  const bound = fixture.account.quantumSync([randomUUID()]); assert.ok(bound);
+  // A new policy version is enforced on the next protected request, before me reports it.
+  accepted = false; fixture.handle(call => call.path === '/v1/me' ? { status: 200, body: { email: 'person@example.test', consentRequired: false, devices: [{ id: fixture.token().deviceId, userId: 'account-fixture', appId: 'horizon', computerId }] } }
+    : call.path !== '/v1/oauth/token' ? refusal : undefined);
+  const transport = new (require('../dist/electron/sync-quantum.js').QuantumTransport)(bound, dataset);
+  await assert.rejects(transport.readDescriptor(), /SYNC_CONSENT_REQUIRED/);
+  assert.equal(fixture.account.state().consent, 'required'); assert.equal(fixture.account.managedSync(), false);
+  // Later pulses stop in the main process: nothing reaches Quantum until consent is accepted again.
+  const sent = fixture.requests.length;
+  await assert.rejects(transport.readDescriptor(), /SYNC_CONSENT_REQUIRED/); assert.throws(() => bound.assertActive(), /ACCOUNT_CONSENT/);
+  assert.equal(fixture.requests.length, sent);
+  await fixture.account.me(); assert.equal(fixture.account.state().consent, 'required'); assert.equal(fixture.account.state().managedSync, false);
+});
+
 test('account invalid_grant signs out locally and sign-out removes the sealed file even when revocation fails', async t => {
   const fixture = await accountFixture(t); await fixture.signIn(); const path = join(fixture.host.directory, 'account.sealed');
   fixture.handle(call => call.path === '/v1/me' ? { status: 401, body: { error: { code: 'unauthorized' } } } : call.path === '/v1/oauth/token' ? { status: 400, body: { error: { code: 'invalid_grant' } } } : undefined);
@@ -7671,17 +7727,17 @@ test('account retry preserves a stored token on a malformed me response and refu
 test('account me accepts valid future names and plans and ignores invalid optional account fields', async t => {
   const fixture = await accountFixture(t); await fixture.signIn();
   fixture.me({ email: 'person@example.test', displayName: 'Account Name', plans: [{ key: 'nebula-dawn', product: 'nebula', tier: 'dawn', label: 'Nebula+ Alba' }], devices: [{ id: 'private-device' }] });
-  await fixture.account.me(); assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: 'Account Name', plan: 'Nebula+ Alba', phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
+  await fixture.account.me(); assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: 'Account Name', plan: 'Nebula+ Alba', phrase: 'needed', keyStore: 'session', consent: 'accepted', managedSync: false, spaces: [], shared: [], spacesError: null });
   for (const extra of [{ displayName: 42, plans: null }, { displayName: ' bad name ', plans: [{ key: 'key', product: 'nebula', tier: 'tier', label: 42 }] }, { displayName: 'bad\nname', plans: [{ product: 'nebula', label: 'Missing plan fields' }] }]) {
     fixture.me({ email: 'person@example.test', ...extra }); await fixture.account.me();
-    assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
+    assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', consent: 'accepted', managedSync: false, spaces: [], shared: [], spacesError: null });
   }
 });
 
 test('account refreshes an expired access token before me and keeps refresh material after a network failure', async t => {
   const fixture = await accountFixture(t); fixture.rotate({ ...accountTokens(), expiresIn: 0.001 }); await fixture.signIn();
   await new Promise(done => setTimeout(done, 5)); const previous = fixture.token(), rotated = fixture.rotate(), before = fixture.requests.length;
-  await fixture.account.me(); assert.deepEqual(fixture.requests.slice(before).map(call => call.path), ['/v1/oauth/token', '/v1/me']);
+  await fixture.account.me(); assert.deepEqual(fixture.requests.slice(before).map(call => call.path), ['/v1/oauth/token', '/v1/me', '/v1/entitlements']);
   assert.ok(fixture.requests[before].body.refreshToken === previous.refreshToken);
   assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
   fixture.account.close(); const next = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {}, fetch: async () => { throw new Error('Synthetic network refusal'); } }); t.after(() => next.close());

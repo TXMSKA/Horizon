@@ -171,7 +171,7 @@ test('Quantum transport bounds request and stalled-body deadlines', async () => 
   await assert.rejects(transport.readDescriptor(), /SYNC_TIMEOUT/);
 });
 
-for (const [status, code, failure] of [[403, 'sync_plan_required', 'SYNC_NOT_ALLOWED'], [403, 'pool_exceeded', 'SYNC_FULL'], [409, 'object_limit', 'SYNC_LIMIT'], [409, 'writer_limit_exceeded', 'SYNC_LIMIT'], [413, 'object_too_large', 'SYNC_LIMIT'], [429, 'rate_limited', 'SYNC_RATE_LIMITED'], [408, 'upload_timeout', 'SYNC_TIMEOUT']]) test(`Quantum maps ${status} ${code} without losing retry metadata`, async t => {
+for (const [status, code, failure] of [[403, 'sync_plan_required', 'SYNC_PLAN_REQUIRED'], [403, 'forbidden', 'SYNC_NOT_ALLOWED'], [403, 'pool_exceeded', 'SYNC_FULL'], [409, 'object_limit', 'SYNC_LIMIT'], [409, 'writer_limit_exceeded', 'SYNC_LIMIT'], [413, 'object_too_large', 'SYNC_LIMIT'], [429, 'rate_limited', 'SYNC_RATE_LIMITED'], [408, 'upload_timeout', 'SYNC_TIMEOUT']]) test(`Quantum maps ${status} ${code} without losing retry metadata`, async t => {
   const server = await fakeQuantum(t), account = server.account(), { transport } = await createDataset(account), path = `writers/${account.computerId}/${randomUUID()}/batches/1-${randomUUID()}.hzs`;
   server.refusals.push({ status, code, method: 'PUT', headers: { 'Retry-After': '7' } });
   await assert.rejects(transport.writeObject(path, Buffer.from('Sealed batch'), 100), error => error.message === failure && (status !== 429 || error.retryAfterMs === 7000));

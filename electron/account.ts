@@ -26,7 +26,7 @@ interface Options {
 }
 interface Tokens { accessToken: string; refreshToken: string; tokenType: 'Bearer'; expiresIn: number; deviceId: string }
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
-const errorCodes = new Set(['ACCOUNT_NETWORK', 'ACCOUNT_TIMEOUT', 'ACCOUNT_DENIED', 'ACCOUNT_INVALID_RESPONSE', 'ACCOUNT_STORAGE', 'ACCOUNT_PHRASE_WRONG', 'ACCOUNT_KEYSTORE']);
+const errorCodes = new Set(['ACCOUNT_NETWORK', 'ACCOUNT_TIMEOUT', 'ACCOUNT_DENIED', 'ACCOUNT_INVALID_RESPONSE', 'ACCOUNT_STORAGE', 'ACCOUNT_PHRASE_WRONG', 'ACCOUNT_KEYSTORE', 'ACCOUNT_CONSENT']);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const errorCode = (error: unknown) => error instanceof Error && errorCodes.has(error.message) ? error.message : 'ACCOUNT_NETWORK';
 export function createPKCE() {
@@ -59,7 +59,7 @@ function accountCard(value: unknown): Extract<AccountState, { status: 'signedIn'
     && value.displayName.length <= 80 && !/[\x00-\x1f\x7f-\x9f]/.test(value.displayName) ? value.displayName : null;
   const plans = Array.isArray(value.plans) ? value.plans.filter((plan: unknown): plan is Record<'key' | 'product' | 'tier' | 'label', string> => record(plan)
     && ['key', 'product', 'tier', 'label'].every(key => typeof plan[key] === 'string' && (plan[key] as string).trim().length > 0 && !/[\x00-\x1f\x7f-\x9f]/.test(plan[key] as string))) : [];
-  return { status: 'signedIn', email: value.email, displayName, plan: plans[0]?.label ?? null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null };
+  return { status: 'signedIn', email: value.email, displayName, plan: plans[0]?.label ?? null, phrase: 'needed', keyStore: 'session', consent: value.consentRequired === true ? 'required' : 'accepted', managedSync: false, spaces: [], shared: [], spacesError: null };
 }
 function installationId(userData: string): string {
   const path = resolve(userData, 'account-computer-id');
@@ -177,7 +177,19 @@ export function createAccount(options: Options) {
       if (!bearer) throw new Error('ACCOUNT_DENIED');
       response = await request(route, method, ticket, body, bearer, sync, cap);
     }
+    // Quantum answers every protected route this way until the current Terms and Privacy are accepted on the Cosmic site.
+    if (response.status === 403 && record(response.value) && record(response.value.error) && response.value.error.code === 'acceptance_required') {
+      check(ticket);
+      if (state.status === 'signedIn' && state.consent !== 'required') publish({ ...structuredClone(state), consent: 'required', managedSync: false });
+      throw new Error('ACCOUNT_CONSENT');
+    }
     return response;
+  };
+  // Effective capabilities come from Quantum on every refresh; plan labels are shown, never compared.
+  const capabilities = async (ticket: number) => {
+    const value = accountSuccess(await authorized('/v1/entitlements', 'GET', ticket));
+    if (!record(value) || !record(value.capabilities) || !record(value.capabilities.managedSync) || typeof value.capabilities.managedSync.horizon !== 'boolean') throw new Error('ACCOUNT_INVALID_RESPONSE');
+    return value.capabilities.managedSync.horizon;
   };
   const spaceKey = async (spaceId: string, requestedGeneration?: number) => {
     const ticket = generation, account = identity, accountPair = pair;
@@ -272,6 +284,14 @@ export function createAccount(options: Options) {
     card.keyStore = keyStoreError ? 'error' : keyStore.kind;
     card.phrase = key ? 'ready' : state.status === 'signedIn' && state.phrase === 'wrong' ? 'wrong' : 'needed';
     if (keyStoreError) card.spacesError = 'ACCOUNT_KEYSTORE';
+    if (card.consent === 'accepted') try { card.managedSync = await capabilities(ticket); }
+    catch (error) {
+      check(ticket);
+      if (errorCode(error) === 'ACCOUNT_CONSENT') card.consent = 'required';
+      // Quantum checks every write again, so a failed read keeps what the last answer allowed.
+      else card.managedSync = state.status === 'signedIn' && state.managedSync;
+    }
+    if (card.consent === 'required') { lastRefresh = Date.now(); publish(card); return; }
     await loadSpaces(ticket, card); check(ticket); lastRefresh = Date.now(); publish(card);
   };
   const me = (): Promise<void> => {
@@ -287,6 +307,7 @@ export function createAccount(options: Options) {
   return {
     state: (): AccountState => structuredClone(state), me, retry: me, cancel,
     accountId: () => !closed && state.status === 'signedIn' ? identity ?? null : null,
+    managedSync: () => !closed && state.status === 'signedIn' && state.consent === 'accepted' && state.managedSync,
     quantumSync(profileIds: readonly string[]): QuantumAccount | undefined {
       if (closed || state.status !== 'signedIn' || state.phrase !== 'ready' || !identity || !key || !registeredComputerId
         || profileIds.length === 0 || !profileIds.every(uuid) || new Set(profileIds).size !== profileIds.length) return;
@@ -294,6 +315,8 @@ export function createAccount(options: Options) {
       const assertActive = () => {
         check(ticket);
         if (state.status !== 'signedIn' || state.phrase !== 'ready' || identity !== account || !key || registeredComputerId !== device) throw new Error('ACCOUNT_DENIED');
+        // Sync stays local until the current terms are accepted, so no protected request leaves meanwhile.
+        if (state.consent !== 'accepted') throw new Error('ACCOUNT_CONSENT');
       };
       return { accountId: account, computerId: device, profileIds: [...profileIds], assertActive,
         async request(route, init = {}, cap) {
