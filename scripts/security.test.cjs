@@ -7474,7 +7474,7 @@ async function accountFixture(t, options = {}) {
   const origin = `http://127.0.0.1:${server.address().port}`, originalFetch = globalThis.fetch;
   const host = {
     directory: join(directory, 'profile'), userData: directory, cipher: protection, isPackaged: false, language: () => options.language ?? 'en', desktop: options.desktop,
-    keyStore: options.keyStore ?? require('../dist/electron/cosmic-keys.js').createCosmicKeyStore({ root: directory, origin, platform: 'linux' }),
+    keyStore: options.keyStore ?? require('../dist/electron/cosmic-keys.js').createCosmicKeyStore({ root: directory, origin, platform: 'darwin' }),
     changed: () => states.push(account.state()), openExternal: async url => { opened.push(url); }, env: { HORIZON_QUANTUM_API: origin, HORIZON_QUANTUM_SITE: origin },
     fetch: async (url, init) => {
       assert.equal(new URL(url).origin, origin); assert.equal(init.redirect, 'manual'); assert.ok(init.signal);
@@ -7857,6 +7857,28 @@ test('Cosmic key store creates sealed entries and preserves every other account 
   assert.deepEqual(readdirSync(fixture.directory), ['account.json']);
 });
 
+test('Cosmic key store opens legacy and explicit DPAPI entries without replacing the key', async t => {
+  const fixture = cosmicStoreFixture(t), key = new Uint8Array(32).fill(17);
+  await fixture.store.set('account-a', key);
+  const saved = JSON.parse(readFileSync(fixture.path, 'utf8'));
+  assert.equal(Object.hasOwn(saved.accounts['account-a'], 'store'), false);
+  assert.ok(Buffer.from(await fixture.store.get('account-a')).equals(Buffer.from(key)));
+  saved.accounts['account-a'].store = 'dpapi'; writeFileSync(fixture.path, JSON.stringify(saved));
+  assert.ok(Buffer.from(await fixture.store.get('account-a')).equals(Buffer.from(key)));
+  assert.deepEqual(fixture.calls, ['protect', 'unprotect', 'unprotect']);
+});
+
+test('Cosmic key store preserves unknown stores on rewrite and treats them as absent', async t => {
+  const fixture = cosmicStoreFixture(t), unknown = { store: 'future-store', future: { format: 2 } };
+  writeFileSync(fixture.path, JSON.stringify({ version: 1, accounts: { other: unknown } }));
+  assert.equal(await fixture.store.get('other'), undefined);
+  await fixture.store.set('account-a', new Uint8Array(32).fill(18));
+  assert.deepEqual(JSON.parse(readFileSync(fixture.path, 'utf8')).accounts.other, unknown);
+  const original = readFileSync(fixture.path);
+  await assert.rejects(fixture.store.set('other', new Uint8Array(32)), error => error.message === 'ACCOUNT_KEYSTORE'); assert.ok(readFileSync(fixture.path).equals(original));
+  await fixture.store.clear('other'); assert.deepEqual(JSON.parse(readFileSync(fixture.path, 'utf8')).accounts.other, unknown);
+});
+
 test('Cosmic key store refuses unknown, malformed and foreign-origin data without overwriting it', async t => {
   const fixture = cosmicStoreFixture(t), key = new Uint8Array(32).fill(13);
   for (const content of ['{"version":2,"accounts":{}}', '{broken', '{"version":1,"accounts":{"other":{"unknown":true}}}']) {
@@ -7880,12 +7902,149 @@ test('Cosmic key store recovers one stale lock, refuses an active lock and atomi
 
 test('Cosmic key store keeps Linux and macOS keys only for their running session', async t => {
   for (const platform of ['linux', 'darwin']) {
-    const root = temporaryDirectory(t, 'cosmic-session'), options = { root, origin: 'https://quantum.txmska.com', platform, protect() { assert.fail('Session keys must not use DPAPI'); } };
+    const root = temporaryDirectory(t, 'cosmic-session'), options = { root, origin: 'https://quantum.txmska.com', platform,
+      command: async () => { throw Object.assign(new Error('Synthetic missing command'), { code: 'ENOENT' }); }, protect() { assert.fail('Session keys must not use DPAPI'); } };
     const store = require('../dist/electron/cosmic-keys.js').createCosmicKeyStore(options), key = new Uint8Array(32).fill(21);
     assert.equal(store.kind, 'session'); await store.set('account-a', key); key.fill(0);
     const opened = await store.get('account-a'); assert.equal(opened.every(value => value === 21), true); opened.fill(0); assert.equal((await store.get('account-a')).every(value => value === 21), true);
     assert.equal(await store.get('account-b'), undefined); assert.equal(await require('../dist/electron/cosmic-keys.js').createCosmicKeyStore(options).get('account-a'), undefined); assert.deepEqual(readdirSync(root), []);
   }
+});
+
+function linuxCosmicFixture(t, overrides = {}) {
+  const root = temporaryDirectory(t, 'cosmic-linux'), path = join(root, 'shared', 'keys', 'account.json'), calls = [], secrets = new Map();
+  const options = { root, origin: 'https://quantum.txmska.com', platform: 'linux', async command(file, args, settings) {
+    calls.push({ file, args, settings });
+    assert.equal(file, 'secret-tool'); assert.equal(settings.shell, false); assert.equal(settings.windowsHide, true);
+    assert.ok(settings.timeout > 0 && settings.timeout <= 15000); assert.ok(settings.maxBuffer <= 16384); assert.equal(Object.hasOwn(settings, 'env'), false);
+    if (args.includes('keystore-probe')) {
+      assert.deepEqual(args, ['lookup', 'application', 'cosmic', 'kind', 'keystore-probe', 'probe', 'horizon-v1']);
+      return { code: 1, stdout: '', stderr: '' };
+    }
+    const account = args.at(-1), op = args[0];
+    assert.deepEqual(args, [op, ...(op === 'store' ? [`--label=Cosmic account key (${account})`] : []), 'application', 'cosmic', 'kind', 'account-key', 'account', account]);
+    if (op === 'store') { assert.equal(typeof settings.input, 'string'); secrets.set(account, settings.input); }
+    else assert.equal(Object.hasOwn(settings, 'input'), false);
+    if (op === 'clear') secrets.delete(account);
+    return { code: 0, stdout: op === 'lookup' ? `${secrets.get(account)}\n` : '', stderr: '' };
+  }, ...overrides };
+  const create = extra => require('../dist/electron/cosmic-keys.js').createCosmicKeyStore({ ...options, ...extra });
+  return { root, path, calls, secrets, options, create, store: create() };
+}
+
+test('Cosmic Linux keys survive a new store instance with only metadata on disk and the secret only on stdin', async t => {
+  const fixture = linuxCosmicFixture(t), key = new Uint8Array(32).fill(29);
+  await fixture.store.set('account-a', key); assert.equal(fixture.store.kind, 'shared');
+  const bytes = readFileSync(fixture.path), saved = JSON.parse(bytes), entry = saved.accounts['account-a'];
+  assert.deepEqual(Object.keys(entry).sort(), ['createdAt', 'origin', 'store', 'updatedAt', 'writer']); assert.equal(entry.store, 'libsecret');
+  assert.equal(entry.origin, fixture.options.origin); assert.equal(entry.writer, 'horizon'); assert.equal(entry.createdAt, entry.updatedAt);
+  assert.equal(bytes.includes(Buffer.from(key)), false); assert.equal(bytes.includes(Buffer.from(key).toString('base64')), false);
+  const restarted = fixture.create(); assert.ok(Buffer.from(await restarted.get('account-a')).equals(Buffer.from(key))); assert.equal(restarted.kind, 'shared');
+  const stores = fixture.calls.filter(call => call.args[0] === 'store'); assert.equal(stores.length, 1);
+  assert.ok(stores[0].settings.input === Buffer.from(key).toString('base64'));
+  assert.ok(fixture.calls.every(call => !call.args.join(' ').includes(Buffer.from(key).toString('base64'))));
+  assert.equal(fixture.calls.filter(call => call.args.includes('keystore-probe')).length, 2);
+  if (process.platform !== 'win32') {
+    const { statSync } = require('node:fs'); assert.equal(statSync(fixture.path).mode & 0o777, 0o600);
+    for (const directory of [fixture.root, join(fixture.root, 'shared'), join(fixture.root, 'shared', 'keys')]) assert.equal(statSync(directory).mode & 0o777, 0o700);
+  }
+});
+
+test('Cosmic Linux replacement and removal clear the secret before changing the entry', async t => {
+  const fixture = linuxCosmicFixture(t), key = new Uint8Array(32).fill(30);
+  await fixture.store.set('account-a', key); const original = readFileSync(fixture.path), previous = JSON.parse(original).accounts['account-a'];
+  const command = fixture.options.command;
+  fixture.options.command = async (file, args, settings) => {
+    if (args[0] === 'clear') assert.ok(readFileSync(fixture.path).equals(original));
+    return command(file, args, settings);
+  };
+  const replacement = fixture.create(); await replacement.set('account-a', new Uint8Array(32).fill(31));
+  assert.deepEqual(fixture.calls.filter(call => !call.args.includes('keystore-probe')).map(call => call.args[0]), ['store', 'clear', 'store']);
+  assert.equal(JSON.parse(readFileSync(fixture.path)).accounts['account-a'].createdAt, previous.createdAt);
+  fixture.options.command = command;
+  await fixture.create().clear('account-a'); assert.equal(fixture.secrets.has('account-a'), false);
+  assert.deepEqual(JSON.parse(readFileSync(fixture.path)).accounts, {}); assert.equal(await fixture.create().get('account-a'), undefined);
+});
+
+test('Cosmic Linux failed stores and clears enter session mode without changing account entries', async t => {
+  for (const op of ['store', 'clear']) {
+    const fixture = linuxCosmicFixture(t), key = new Uint8Array(32).fill(32);
+    if (op === 'clear') await fixture.store.set('account-a', key);
+    const original = existsSync(fixture.path) ? readFileSync(fixture.path) : undefined, command = fixture.options.command;
+    const store = fixture.create({ command: async (file, args, settings) => args[0] === op ? { code: 1, stdout: '', stderr: 'Synthetic service refusal' } : command(file, args, settings) });
+    await store.set('account-a', key); assert.equal(store.kind, 'session'); assert.ok(Buffer.from(await store.get('account-a')).equals(Buffer.from(key)));
+    if (original) assert.ok(readFileSync(fixture.path).equals(original)); else assert.equal(existsSync(fixture.path), false);
+    assert.equal(existsSync(fixture.path + '.lock'), false);
+  }
+});
+
+test('Cosmic Linux rejects extra bytes, noncanonical base64 and wrong key lengths with sanitized errors', async t => {
+  const fixture = linuxCosmicFixture(t); await fixture.store.set('account-a', new Uint8Array(32).fill(33));
+  for (const output of ['not base64', Buffer.alloc(32).toString('base64') + '\n\n', Buffer.alloc(32).toString('base64') + '\r\n',
+    Buffer.alloc(32).toString('base64').replace(/=$/, ''), Buffer.alloc(31).toString('base64'), Buffer.alloc(33).toString('base64'), Buffer.alloc(32).toString('base64') + 'x']) {
+    const command = fixture.options.command, store = fixture.create({ command: (file, args, settings) => args.includes('keystore-probe')
+      ? command(file, args, settings) : Promise.resolve({ code: 0, stdout: output, stderr: '' }) });
+    await assert.rejects(store.get('account-a'), error => error.message === 'ACCOUNT_KEYSTORE'); assert.equal(store.kind, 'shared');
+  }
+});
+
+test('Cosmic Linux probes once and keeps unavailable service keys in memory without creating files', async t => {
+  for (const failure of ['missing', 'service', 'timeout', 'locked', 'unexpected']) {
+    let calls = 0;
+    const fixture = linuxCosmicFixture(t, { async command() {
+      calls++;
+      if (failure === 'missing' || failure === 'timeout') throw new Error('Synthetic command failure');
+      return { code: failure === 'unexpected' ? 0 : 1, stdout: '', stderr: failure === 'unexpected' ? '' : 'Synthetic session refusal' };
+    } }), key = new Uint8Array(32).fill(34);
+    await Promise.all([fixture.store.get('account-a'), fixture.store.get('account-b')]);
+    await fixture.store.set('account-a', key); assert.equal(fixture.store.kind, 'session'); assert.equal(calls, 1);
+    const opened = await fixture.store.get('account-a'); assert.ok(Buffer.from(opened).equals(Buffer.from(key))); opened.fill(0);
+    assert.ok(Buffer.from(await fixture.store.get('account-a')).equals(Buffer.from(key))); assert.deepEqual(readdirSync(fixture.root), []);
+    assert.equal(await fixture.create().get('account-a'), undefined);
+    await fixture.store.clear('account-a'); assert.equal(await fixture.store.get('account-a'), undefined);
+  }
+});
+
+test('Cosmic Linux lookup service failures become an explicit session state', async t => {
+  const fixture = linuxCosmicFixture(t); await fixture.store.set('account-a', new Uint8Array(32).fill(35)); const original = readFileSync(fixture.path);
+  const command = fixture.options.command, store = fixture.create({ command: (file, args, settings) => args.includes('keystore-probe')
+    ? command(file, args, settings) : Promise.resolve({ code: 1, stdout: '', stderr: 'Synthetic locked collection' }) });
+  assert.equal(await store.get('account-a'), undefined); assert.equal(store.kind, 'session'); assert.ok(readFileSync(fixture.path).equals(original));
+});
+
+test('Cosmic Linux enforces origin binding and exact known entry fields without touching secrets', async t => {
+  const fixture = linuxCosmicFixture(t); await fixture.store.set('account-a', new Uint8Array(32).fill(36)); const original = readFileSync(fixture.path), count = fixture.calls.length;
+  const foreign = fixture.create({ origin: 'https://other.example.test' });
+  await assert.rejects(foreign.get('account-a'), /ACCOUNT_KEYSTORE/); await assert.rejects(foreign.set('account-a', new Uint8Array(32)), /ACCOUNT_KEYSTORE/);
+  await assert.rejects(foreign.clear('account-a'), /ACCOUNT_KEYSTORE/); assert.ok(readFileSync(fixture.path).equals(original)); assert.equal(fixture.calls.length, count + 1);
+  const windows = require('../dist/electron/cosmic-keys.js').createCosmicKeyStore({ root: fixture.root, origin: fixture.options.origin, platform: 'win32' });
+  assert.equal(await windows.get('account-a'), undefined);
+  for (const change of [{ sealedK: 'YQ==' }, { createdAt: -1 }, { updatedAt: 0 }, { writer: '' }, { origin: 'x'.repeat(2049) }]) {
+    const saved = JSON.parse(original); Object.assign(saved.accounts['account-a'], change); writeFileSync(fixture.path, JSON.stringify(saved));
+    await assert.rejects(fixture.store.get('account-a'), error => error.message === 'ACCOUNT_KEYSTORE');
+  }
+});
+
+test('Cosmic concurrent Linux writers wait on the shared lock and preserve every account', async t => {
+  const fixture = linuxCosmicFixture(t), command = fixture.options.command;
+  fixture.options.command = async (file, args, settings) => { if (args[0] === 'store') await new Promise(done => setTimeout(done, 30)); return command(file, args, settings); };
+  await Promise.all(Array.from({ length: 6 }, (_, index) => fixture.create().set(`account-${index}`, new Uint8Array(32).fill(index + 40))));
+  const saved = JSON.parse(readFileSync(fixture.path)); assert.equal(Object.keys(saved.accounts).length, 6);
+  for (let index = 0; index < 6; index++) assert.ok(Buffer.from(await fixture.create().get(`account-${index}`)).equals(Buffer.alloc(32, index + 40)));
+  assert.deepEqual(readdirSync(join(fixture.root, 'shared', 'keys')), ['account.json']);
+});
+
+test('Cosmic queued Linux writers stay in memory after another writer loses Secret Service', async t => {
+  const fixture = linuxCosmicFixture(t), command = fixture.options.command;
+  let writes = 0;
+  const store = fixture.create({ async command(file, args, settings) {
+    if (args[0] !== 'store') return command(file, args, settings);
+    writes++; await new Promise(done => setTimeout(done, 40)); return { code: 1, stdout: '', stderr: 'Synthetic service loss' };
+  } });
+  await Promise.all([store.set('account-a', new Uint8Array(32).fill(51)), store.set('account-b', new Uint8Array(32).fill(52))]);
+  assert.equal(store.kind, 'session'); assert.equal(writes, 1); assert.equal(existsSync(fixture.path), false);
+  assert.ok(Buffer.from(await store.get('account-a')).equals(Buffer.alloc(32, 51))); assert.ok(Buffer.from(await store.get('account-b')).equals(Buffer.alloc(32, 52)));
+  assert.equal(existsSync(fixture.path + '.lock'), false);
 });
 
 test('Cosmic DPAPI helper compiles with the Windows Framework compiler when available', t => {

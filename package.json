@@ -27,6 +27,7 @@
     "fuses": "node scripts/fuses.mjs",
     "setup:gitleaks": "node scripts/setup-gitleaks.mjs",
     "test:security": "node --test scripts/security.test.cjs scripts/engine.test.cjs",
+    "test:linux-keys": "node --test scripts/linux-keys.test.cjs",
     "verify:window": "electron scripts/verify-foundation.cjs",
     "verify:themes": "electron scripts/verify-themes.cjs",
     "verify:engine": "electron scripts/verify-engine.cjs"

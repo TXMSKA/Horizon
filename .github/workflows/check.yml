@@ -24,3 +24,16 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run test:security
+      - name: Install Linux secure storage
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gnome-keyring libsecret-tools dbus-x11
+      - name: Check Linux account keys
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -euo pipefail -c '
+            export XDG_DATA_HOME="$(mktemp -d)"
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            npm run test:linux-keys
+          '
