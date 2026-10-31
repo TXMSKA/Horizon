@@ -189,12 +189,14 @@ function SharedBody({ page, props, onClose }: { page: Extract<DesktopPanelPage, 
   const [loadedVersion, setLoadedVersion] = useState('');
   const root = useRef<HTMLElement>(null);
   const unavailable = useRef(false);
+  const retryFailures = useRef(0);
   const attach = (element: HTMLElement | null) => { root.current = element; };
   const restore = useRef<{ panel: HTMLElement; top: number; left: number; anchor: Node | null; anchorOffset: number; focus: Node | null; focusOffset: number } | null>(null);
   const dataset = state.account.status === 'signedIn' ? state.account.shared.find(entry => entry.spaceId === page.space && entry.datasetId === page.dataset) : undefined;
-  const version = JSON.stringify([dataset?.updatedAt, dataset?.size, dataset?.title, dataset?.contentRevision]);
+  const version = JSON.stringify([dataset?.updatedAt, dataset?.size, dataset?.title, dataset?.contentRevision, dataset?.stale === true]);
+  const listingError = dataset?.stale ? state.account.status === 'signedIn' && state.account.spacesError || 'ACCOUNT_NETWORK' : '';
   const accountError = state.account.status === 'error' ? state.account.code : '';
-  const retry = () => { if (state.account.status === 'error') void run({ type: 'account-retry' }); else setAttempt(value => value + 1); };
+  const retry = () => { if (state.account.status === 'error' || dataset?.stale) void run({ type: 'account-retry' }); else setAttempt(value => value + 1); };
   useEffect(() => {
     const closeUnavailable = () => {
       setContent(null); setError(t('SPACE_SHARED_UNAVAILABLE'));
@@ -203,21 +205,28 @@ function SharedBody({ page, props, onClose }: { page: Extract<DesktopPanelPage, 
     };
     if (state.account.status === 'signedOut' || state.account.status === 'signedIn' && !dataset) { closeUnavailable(); return; }
     if (state.account.status !== 'signedIn') { if (accountError) setError(desktopError(new Error(accountError), language)); return; }
-    let current = true; setError('');
+    let current = true, retryTimer: ReturnType<typeof setTimeout> | undefined;
+    setError(listingError ? desktopError(new Error(listingError), language) : '');
+    if (listingError) return;
     void window.horizon.command({ type: 'space-open-shared', space: page.space, dataset: page.dataset }).then(next => {
       if (!current) return;
       const panel = root.current?.closest<HTMLElement>('.desktop-panel-body'), selection = document.getSelection();
       if (panel) restore.current = { panel, top: panel.scrollTop, left: panel.scrollLeft,
         anchor: selection?.anchorNode && panel.contains(selection.anchorNode) ? selection.anchorNode : null, anchorOffset: selection?.anchorOffset ?? 0,
         focus: selection?.focusNode && panel.contains(selection.focusNode) ? selection.focusNode : null, focusOffset: selection?.focusOffset ?? 0 };
-      setContent(next); setLoadedVersion(version);
+      retryFailures.current = 0; setContent(next); setLoadedVersion(version);
     }, reason => {
       if (!current) return;
       if (/\bSPACE_SHARED_UNAVAILABLE\b/.test(reason instanceof Error ? reason.message : String(reason))) closeUnavailable();
-      else setError(desktopError(reason, language));
+      else {
+        setError(desktopError(reason, language)); retryFailures.current++;
+        const retryAfter = /\bretryAfterMs=(\d{1,8})\b/.exec(reason instanceof Error ? reason.message : String(reason));
+        retryTimer = setTimeout(() => { if (current) setAttempt(value => value + 1); },
+          Math.max(Math.min(86400000, Number(retryAfter?.[1] ?? 0)), Math.min(60000, 5000 * 2 ** Math.min(retryFailures.current - 1, 4))));
+      }
     });
-    return () => { current = false; };
-  }, [page.space, page.dataset, attempt, language, version, state.account.status, accountError]);
+    return () => { current = false; clearTimeout(retryTimer); };
+  }, [page.space, page.dataset, attempt, language, version, state.account.status, accountError, listingError]);
   useLayoutEffect(() => {
     const previous = restore.current; restore.current = null;
     if (!previous) return;

@@ -74,7 +74,7 @@ async function fixture(t, options = {}) {
       if (url.pathname.endsWith('/datasets')) {
         const snapshotUpdatedAt = updatedAt;
         if (datasetGate) { const gate = datasetGate; datasetGate = undefined; gate.enter(); await gate.wait; }
-        if (fail || failDatasets === true || failDatasets === url.pathname.split('/')[3]) return new Response('{}', { status: 503 });
+        if (fail || failDatasets === true || failDatasets === url.pathname.split('/')[3]) return failure(503);
         return json({ datasets: ['dataset-a', 'dataset-b'].map(id => ({ id, appId: 'horizon', createdAt: 100, updatedAt: snapshotUpdatedAt, size: 10, sharedBy: { accountId: 'peer', displayName: null } })), after: null });
       }
       if (url.pathname.endsWith('/objects')) return json({ objects: [], after: null });
@@ -103,6 +103,56 @@ async function fixture(t, options = {}) {
   };
 }
 const event = (overrides = {}) => ({ type: 'object_added', ownerType: 'space', ownerId: 'space-a', datasetId: 'dataset-a', path: `kg1/project/${randomUUID()}/${randomUUID()}/checkpoints/1-${randomUUID()}.hzs`, ...overrides });
+
+test('failed Space dataset reads retry automatically under the throttle with capped backoff and recover', async t => {
+  const f = await fixture(t), reads = () => f.calls.filter(call => call.path === '/v1/spaces/space-a/datasets').length;
+  await f.advance(300000); assert.equal(f.calls.length, 0, 'healthy idle accounts send no extra reads');
+  f.failDatasets('space-a'); await f.emit([event()]); await f.advance(0); assert.equal(reads(), 1);
+  for (const delay of [30000, 30000, 30000, 40000, 60000, 60000]) {
+    const before = reads(); await f.advance(delay - 1); assert.equal(reads(), before);
+    await f.advance(1); assert.equal(reads(), before + 1);
+    assert.equal(f.account.state().shared.find(row => row.spaceId === 'space-a').stale, true);
+    assert.equal(f.calls.some(call => call.path.includes('/space-b/')), false);
+  }
+  f.failDatasets(false); f.changeTime(200); await f.advance(60000);
+  assert.equal(f.account.state().spacesError, null);
+  assert.equal(f.account.state().shared.find(row => row.spaceId === 'space-a').updatedAt, new Date(200).toISOString());
+  assert.ok(f.account.state().shared.every(row => !row.stale));
+  const before = f.calls.length; await f.advance(300000); assert.equal(f.calls.length, before);
+  f.failDatasets('space-a'); await f.emit([event()]); await f.advance(0);
+  const failed = reads(); await f.advance(30000); assert.equal(reads(), failed + 1, 'recovery resets backoff');
+});
+
+for (const scope of ['dataset', 'metadata', 'all']) for (const retryAfter of [75, new Date(1075000).toUTCString()]) test(`Space ${scope} retry respects Retry-After ${retryAfter} and stops on access loss`, async t => {
+  const f = await fixture(t, { retryAfter }); f.failDatasets('space-a');
+  await f.emit(scope === 'all' ? null : [event(scope === 'metadata' ? { type: 'member_added', datasetId: null, path: null, memberId: 'peer' } : {})]); await f.advance(30000);
+  const before = f.calls.length;
+  await f.advance(74999 - (typeof retryAfter === 'string' ? 30000 : 0)); assert.equal(f.calls.length, before);
+  await f.advance(1); assert.ok(f.calls.length > before);
+  await f.emit([event({ type: 'member_removed', datasetId: null, path: null, memberId: 'account-a' })]);
+  const lost = f.calls.length; await f.advance(300000); assert.equal(f.calls.length, lost);
+});
+
+test('Space retries stop on sign-out and do not requeue access lost during a failed read', async t => {
+  for (const loss of ['sign-out', 'member']) {
+    const f = await fixture(t), gate = f.pauseDatasets(); t.after(gate.release);
+    f.failDatasets('space-a'); await f.emit([event()]);
+    const refresh = f.advance(30000); await gate.entered;
+    if (loss === 'sign-out') await f.account.signOut();
+    else await f.emit([event({ type: 'member_removed', datasetId: null, path: null, memberId: 'account-a' })]);
+    gate.release(); await refresh;
+    const before = f.calls.length; await f.advance(300000); assert.equal(f.calls.length, before, loss);
+  }
+});
+
+for (const failure of ['listing', 'key', 'spaces']) test(`failed full Space ${failure} reads recover without another event or manual refresh`, async t => {
+  const f = await fixture(t);
+  if (failure === 'listing') f.failDatasets(); else if (failure === 'key') f.failKey(); else f.fail();
+  await f.emit(null); await f.advance(30000); assert.equal(f.account.state().spacesError, 'ACCOUNT_NETWORK');
+  f.failDatasets(false); f.failKey(false); f.fail(false); await f.advance(30000);
+  assert.equal(f.account.state().spacesError, null); assert.ok(f.account.state().shared.every(row => !row.stale));
+  const before = f.calls.length; await f.advance(300000); assert.equal(f.calls.length, before);
+});
 
 for (const route of ['me', 'token']) for (const failure of ['network', 'timeout', 503, 429]) test(`stored sign-in recovers automatically from launch ${route} ${failure} with backoff`, async t => {
   const f = await fixture(t, route === 'me' ? { initialFailure: failure } : { tokenFailure: failure });

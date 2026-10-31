@@ -31,7 +31,8 @@ export function keyEnvelope(value: unknown): KeyEnvelope {
 }
 export interface AccountResponse { status: number; ok: boolean; value: unknown; retryAfter?: number }
 export function accountSuccess(response: AccountResponse): unknown {
-  if (!response.ok) throw new Error([400, 401, 403].includes(response.status) ? 'ACCOUNT_DENIED' : 'ACCOUNT_NETWORK');
+  if (!response.ok) throw Object.assign(new Error([400, 401, 403].includes(response.status) ? 'ACCOUNT_DENIED' : 'ACCOUNT_NETWORK'),
+    response.retryAfter === undefined ? {} : { retryAfterMs: response.retryAfter * 1000 });
   return response.value;
 }
 type Get = (route: string) => Promise<AccountResponse>;

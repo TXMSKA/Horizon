@@ -93,6 +93,7 @@ export function createAccount(options: Options) {
   let capabilityRefused = false, capabilityRefreshFailures = 0, capabilityRefreshChecks = 0, lastCapabilityGrant: boolean | undefined;
   let accountRefreshTimer: ReturnType<typeof setTimeout> | undefined, accountRefreshFailures = 0;
   let spaceRefreshTimer: ReturnType<typeof setTimeout> | undefined, refreshingSpaces = false, refreshAllSpaces = false;
+  let spaceRefreshFailures = 0, spaceRetryAt = 0;
   const pendingSpaces = new Map<string, Set<string> | null>(), ownDatasets = new Set<string>(), ownObjects = new Set<string>();
   let attempt: { server: Server; url: string; timer: ReturnType<typeof setTimeout>; used: boolean } | undefined;
   const requests = new Set<AbortController>();
@@ -145,7 +146,7 @@ export function createAccount(options: Options) {
   };
   const check = (ticket: number) => { if (closed || ticket !== generation) throw new Error('ACCOUNT_DENIED'); };
   const stopAttempt = () => { if (attempt) { clearTimeout(attempt.timer); attempt.server.close(); attempt.server.closeAllConnections(); attempt = undefined; } };
-  const clearKeys = () => { readerAccessRevisions.clear(); capabilityRefreshChecks = 0; stopChanges?.(); stopChanges = undefined; clearTimeout(spaceRefreshTimer); spaceRefreshTimer = undefined; clearTimeout(capabilityRefreshTimer); capabilityRefreshTimer = undefined; clearTimeout(accountRefreshTimer); accountRefreshTimer = undefined; accountRefreshFailures = 0; capabilityRefused = false; lastCapabilityGrant = undefined; capabilityRefreshFailures = 0; pendingSpaces.clear(); ownDatasets.clear(); ownObjects.clear(); refreshAllSpaces = false; lastSpaceAccess.clear(); spaceAccessRevisions.clear(); spaceListingRevisions.clear(); datasetRevisions.clear(); spaceAccessRevision++; sharedProjects?.clear(); key?.fill(0); key = undefined; pair = undefined; identity = undefined; registeredComputerId = undefined; keyStoreError = false; spaceGenerations.clear(); titleCache.clear(); };
+  const clearKeys = () => { readerAccessRevisions.clear(); capabilityRefreshChecks = 0; stopChanges?.(); stopChanges = undefined; clearTimeout(spaceRefreshTimer); spaceRefreshTimer = undefined; spaceRefreshFailures = 0; spaceRetryAt = 0; clearTimeout(capabilityRefreshTimer); capabilityRefreshTimer = undefined; clearTimeout(accountRefreshTimer); accountRefreshTimer = undefined; accountRefreshFailures = 0; capabilityRefused = false; lastCapabilityGrant = undefined; capabilityRefreshFailures = 0; pendingSpaces.clear(); ownDatasets.clear(); ownObjects.clear(); refreshAllSpaces = false; lastSpaceAccess.clear(); spaceAccessRevisions.clear(); spaceListingRevisions.clear(); datasetRevisions.clear(); spaceAccessRevision++; sharedProjects?.clear(); key?.fill(0); key = undefined; pair = undefined; identity = undefined; registeredComputerId = undefined; keyStoreError = false; spaceGenerations.clear(); titleCache.clear(); };
   const invalidate = () => { generation++; checking = undefined; refreshing = undefined; phraseWork = undefined; lastRefresh = 0; clearKeys(); stopAttempt(); for (const controller of requests) controller.abort(); requests.clear(); };
   const fail = (error: unknown, ticket: number) => { if (!closed && ticket === generation) { clearTimeout(accountRefreshTimer); accountRefreshTimer = undefined; accountRefreshFailures = 0; stopAttempt(); publish({ status: 'error', code: errorCode(error) }); } };
   const readToken = async () => {
@@ -329,7 +330,14 @@ export function createAccount(options: Options) {
     return found;
   };
   const loadSpaces = async (ticket: number, card: Extract<AccountState, { status: 'signedIn' }>, keys?: { phrase?: KeyEnvelope; public?: KeyEnvelope }, selected?: ReadonlySet<string>) => {
-    if (!identity || !key) return;
+    const failed = new Map<string, Set<string> | null>();
+    let retryAfterMs = 0;
+    if (!identity || !key) return { failed, retryAfterMs };
+    const get = async (route: string) => {
+      const response = await authorized(route, 'GET', ticket);
+      if (!response.ok) retryAfterMs = Math.max(retryAfterMs, (response.retryAfter ?? 0) * 1000);
+      return response;
+    };
     try {
       if (!pair) {
         keys ??= await envelopes(ticket); check(ticket);
@@ -347,7 +355,7 @@ export function createAccount(options: Options) {
         }
         check(ticket); pair = openedPair;
       }
-      const loaded = await readSpaces({ get: route => authorized(route, 'GET', ticket), account: identity, pair, directory: options.directory, cipher: options.cipher, titleCache, selected,
+      const loaded = await readSpaces({ get, account: identity, pair, directory: options.directory, cipher: options.cipher, titleCache, selected,
         rememberGeneration: (space, keyGeneration) => { check(ticket); spaceGenerations.set(space, keyGeneration); }, key: spaceKey,
         check: () => check(ticket), fallbackName: options.language() === 'es' ? 'Space compartido' : 'Shared Space' });
       if (state.status === 'signedIn') loaded.shared.push(...state.shared.filter(dataset => loaded.staleSpaces.includes(dataset.spaceId)).map(dataset => ({ ...dataset, stale: true as const })));
@@ -356,12 +364,16 @@ export function createAccount(options: Options) {
         card.shared = [...card.shared.filter(dataset => !selected.has(dataset.spaceId)), ...loaded.shared]; card.spacesError = loaded.spacesError;
       } else { card.spaces = loaded.spaces; card.shared = loaded.shared; card.spacesError = loaded.spacesError; }
       if (keyStoreError && !card.spacesError) card.spacesError = 'ACCOUNT_KEYSTORE';
+      for (const space of loaded.staleSpaces) failed.set(space, null);
+      return { failed, retryAfterMs };
     } catch (error) {
       check(ticket); card.spacesError = errorCode(error);
       if (state.status === 'signedIn') {
-        card.spaces = state.spaces.map(space => ({ ...space, stale: true }));
-        card.shared = state.shared.map(dataset => ({ ...dataset, stale: true }));
+        card.spaces = state.spaces.map(space => !selected || selected.has(space.id) ? { ...space, stale: true } : space);
+        card.shared = state.shared.map(dataset => !selected || selected.has(dataset.spaceId) ? { ...dataset, stale: true } : dataset);
       }
+      for (const space of selected ?? card.spaces.map(space => space.id)) failed.set(space, null);
+      return { failed, retryAfterMs, retryAll: !selected };
     }
   };
   const loadMe = async (ticket: number) => {
@@ -406,7 +418,8 @@ export function createAccount(options: Options) {
       else card.managedSync = state.status === 'signedIn' && state.managedSync;
     }
     if (card.consent === 'required') { lastRefresh = Date.now(); publish(card); return; }
-    await loadSpaces(ticket, card); check(ticket); lastRefresh = Date.now(); publish({ ...card, ...mergeSpaces(card, before) }); startChanges();
+    const result = await loadSpaces(ticket, card); check(ticket); lastRefresh = Date.now(); publish({ ...card, ...mergeSpaces(card, before) });
+    retrySpaceReads(result); scheduleSpaces(); startChanges();
   };
   const me = (): Promise<void> => {
     if (closed || attempt) return Promise.resolve();
@@ -480,6 +493,18 @@ export function createAccount(options: Options) {
       },
     };
   };
+  const queueSpace = (space: string, datasets: Set<string> | null) => {
+    if (datasets === null || pendingSpaces.get(space) === null) pendingSpaces.set(space, null);
+    else pendingSpaces.set(space, new Set([...(pendingSpaces.get(space) ?? []), ...datasets]));
+  };
+  const retrySpaceReads = (result: { failed: Map<string, Set<string> | null>; retryAfterMs: number; retryAll?: boolean }) => {
+    if (!result.failed.size && !result.retryAll) { spaceRefreshFailures = 0; spaceRetryAt = 0; return; }
+    for (const [space, datasets] of result.failed) queueSpace(space, datasets);
+    refreshAllSpaces ||= result.retryAll === true;
+    spaceRefreshFailures++;
+    spaceRetryAt = Date.now() + Math.max(result.retryAfterMs, Math.min(60000, 5000 * 2 ** Math.min(spaceRefreshFailures - 1, 4)));
+    clearTimeout(spaceRefreshTimer); spaceRefreshTimer = undefined;
+  };
   const scheduleSpaces = () => {
     if (spaceRefreshTimer || refreshingSpaces || !refreshAllSpaces && !pendingSpaces.size || closed) return;
     const ticket = generation;
@@ -487,16 +512,27 @@ export function createAccount(options: Options) {
       spaceRefreshTimer = undefined;
       if (checking) await checking.catch(() => {});
       if (closed || ticket !== generation || state.status !== 'signedIn' || state.phrase !== 'ready' || state.consent !== 'accepted' || !identity) return;
-      if (Date.now() - lastRefresh < 30000) { scheduleSpaces(); return; }
+      if (Date.now() - lastRefresh < 30000 || Date.now() < spaceRetryAt) { scheduleSpaces(); return; }
       const all = refreshAllSpaces, selected = new Map(pendingSpaces), before = spaceReadRevision();
+      const readerRevisions = new Map(readerAccessRevisions);
       refreshAllSpaces = false; pendingSpaces.clear(); refreshingSpaces = true; lastRefresh = Date.now();
       const card = structuredClone(state);
       card.spacesError = keyStoreError ? 'ACCOUNT_KEYSTORE' : null;
+      const failed = new Map<string, Set<string> | null>();
+      let retryAfterMs = 0, retryAll = false;
       try {
-        if (all) await loadSpaces(ticket, card);
+        if (all) {
+          const result = await loadSpaces(ticket, card);
+          for (const [space, datasets] of result.failed) failed.set(space, datasets);
+          retryAfterMs = result.retryAfterMs; retryAll = result.retryAll === true;
+        }
         else {
           const metadata = new Set([...selected].filter(([space, datasets]) => datasets === null || !card.spaces.some(entry => entry.id === space && !entry.pending)).map(([space]) => space));
-          if (metadata.size) await loadSpaces(ticket, card, undefined, metadata);
+          if (metadata.size) {
+            const result = await loadSpaces(ticket, card, undefined, metadata);
+            for (const [space, datasets] of result.failed) failed.set(space, datasets);
+            retryAfterMs = result.retryAfterMs;
+          }
           for (const [space, datasets] of selected) if (datasets && !metadata.has(space)) {
             const shared = await readSpaceDatasets({ get: route => authorized(route, 'GET', ticket), account: identity, check: () => check(ticket), key: spaceKey, titleCache }, space, datasets);
             card.shared = [...card.shared.filter(dataset => dataset.spaceId !== space || !datasets.has(dataset.datasetId)), ...shared];
@@ -508,10 +544,21 @@ export function createAccount(options: Options) {
           publish({ ...state, ...mergeSpaces(card, before, all ? undefined : selected), spacesError: card.spacesError });
         }
       } catch (error) {
-        if (!closed && ticket === generation && state.status === 'signedIn') publish({ ...state, spacesError: errorCode(error),
-          shared: state.shared.map(dataset => all || selected.has(dataset.spaceId) ? { ...dataset, stale: true } : dataset) });
-      } finally { refreshingSpaces = false; scheduleSpaces(); }
-    }, Math.max(0, 30000 - (Date.now() - lastRefresh)));
+        if (!closed && ticket === generation && state.status === 'signedIn') {
+          for (const [space, datasets] of selected) failed.set(space, datasets);
+          retryAll = all;
+          retryAfterMs = Math.max(retryAfterMs, record(error) && typeof error.retryAfterMs === 'number' ? error.retryAfterMs : 0);
+          publish({ ...state, spacesError: errorCode(error),
+            shared: state.shared.map(dataset => all || selected.get(dataset.spaceId) === null || selected.get(dataset.spaceId)?.has(dataset.datasetId) ? { ...dataset, stale: true } : dataset) });
+        }
+      } finally {
+        if (!closed && ticket === generation && state.status === 'signedIn') {
+          for (const space of failed.keys()) if ((readerRevisions.get(space) ?? 0) !== (readerAccessRevisions.get(space) ?? 0)) failed.delete(space);
+          retrySpaceReads({ failed, retryAfterMs, retryAll });
+        }
+        refreshingSpaces = false; scheduleSpaces();
+      }
+    }, Math.max(0, 30000 - (Date.now() - lastRefresh), spaceRetryAt - Date.now()));
     spaceRefreshTimer.unref?.();
   };
   const startChanges = () => {
@@ -537,12 +584,9 @@ export function createAccount(options: Options) {
             publish({ ...state, spaces: state.spaces.filter(space => space.id !== change.ownerId), shared: state.shared.filter(dataset => dataset.spaceId !== change.ownerId) });
             pendingSpaces.delete(change.ownerId); continue;
           }
-          if (['member_added', 'member_removed', 'key_generation_committed'].includes(change.type) || !change.datasetId) pendingSpaces.set(change.ownerId, null);
-          else if (pendingSpaces.get(change.ownerId) !== null) {
-            const datasets = pendingSpaces.get(change.ownerId) ?? new Set<string>(); datasets.add(change.datasetId); pendingSpaces.set(change.ownerId, datasets);
-          }
+          queueSpace(change.ownerId, ['member_added', 'member_removed', 'key_generation_committed'].includes(change.type) || !change.datasetId ? null : new Set([change.datasetId]));
         }
-        // Consumers acknowledge the feed independently; a Space refresh failure remains visible and can be retried on demand.
+        // Consumers acknowledge the feed independently of throttled Space reads and their retries.
         scheduleSpaces();
       },
     });
@@ -589,7 +633,8 @@ export function createAccount(options: Options) {
           if (!keyStoreError) try { await keyStore!.set(id, opened); } catch { check(ticket); keyStoreError = true; }
           check(ticket); key = opened; opened = undefined;
           card.phrase = 'ready'; card.keyStore = keyStoreError ? 'error' : keyStore!.kind; card.spacesError = keyStoreError ? 'ACCOUNT_KEYSTORE' : null;
-          await loadSpaces(ticket, card, keys); check(ticket); lastRefresh = Date.now(); publish(card); startChanges();
+          const result = await loadSpaces(ticket, card, keys); check(ticket); lastRefresh = Date.now(); publish(card);
+          retrySpaceReads(result); scheduleSpaces(); startChanges();
         } catch (error) {
           check(ticket); const code = errorCode(error);
           card.phrase = code === 'ACCOUNT_PHRASE_WRONG' ? 'wrong' : 'needed'; card.spacesError = code; publish(card); throw new Error(code);

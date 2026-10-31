@@ -143,7 +143,13 @@ export function createSharedProjects(options: Options) {
           if (openings.get(id) === ticket) remove(id);
           throw error;
         }
-        if (error instanceof Error && ['ACCOUNT_NETWORK', 'ACCOUNT_TIMEOUT', 'ACCOUNT_DENIED', 'ACCOUNT_INVALID_RESPONSE'].includes(error.message)) throw error;
+        if (error instanceof Error && ['ACCOUNT_NETWORK', 'ACCOUNT_TIMEOUT', 'ACCOUNT_DENIED', 'ACCOUNT_INVALID_RESPONSE'].includes(error.message)) {
+          // Electron preserves only the error message across invoke, so carry bounded retry metadata with the code.
+          if ('retryAfterMs' in error && typeof error.retryAfterMs === 'number' && Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0) {
+            error.message += `; retryAfterMs=${Math.min(86400000, Math.ceil(error.retryAfterMs))}`;
+          }
+          throw error;
+        }
         throw invalid();
       }
       finally { if (openings.get(id) === ticket) openings.delete(id); }

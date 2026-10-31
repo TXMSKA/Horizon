@@ -8,7 +8,8 @@ const { createHash, randomUUID } = require('node:crypto');
 const ts = require('typescript');
 
 function harness() {
-  let cursor = 0;
+  let cursor = 0, now = 0;
+  const timers = new Map();
   const slots = [], effects = [], layouts = [], calls = [], requests = [], revoked = [];
   const hook = (queue, effect, dependencies) => {
     const index = cursor++, previous = slots[index];
@@ -25,7 +26,9 @@ function harness() {
   };
   const exports = {}, jsx = (type, props) => ({ type, props });
   const selection = { anchorNode: null, anchorOffset: 0, focusNode: null, focusOffset: 0, setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset) { Object.assign(this, { anchorNode, anchorOffset, focusNode, focusOffset }); } };
-  const globals = { exports, Error, Blob, Uint8Array, URL: { createObjectURL: () => `blob:${requests.length}`, revokeObjectURL: url => revoked.push(url) },
+  const globals = { exports, Error, Blob, Uint8Array,
+    setTimeout(callback, delay) { const timer = { callback, at: now + delay }; timers.set(timer, timer); return timer; }, clearTimeout: timer => timers.delete(timer),
+    URL: { createObjectURL: () => `blob:${requests.length}`, revokeObjectURL: url => revoked.push(url) },
     document: { getSelection: () => selection }, window: { horizon: {
       command(command) { calls.push(command); return new Promise((resolve, reject) => requests.push({ resolve, reject })); },
       getCaptureImage(project, id) { calls.push({ project, id }); return new Promise((resolve, reject) => requests.push({ resolve, reject })); },
@@ -42,6 +45,7 @@ function harness() {
   return { exports, globals, slots, calls, requests, revoked, selection,
     render(name, props) { cursor = 0; const tree = exports[name]({ onClose() {}, ...props }); flush(layouts); flush(effects); return tree; },
     flushLayouts: () => flush(layouts),
+    async advance(ms) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.callback(); } await this.settle(); },
     unmount() { for (const slot of slots) slot.cleanup?.(); },
     async settle() { for (let index = 0; index < 3; index++) await new Promise(done => setImmediate(done)); },
   };
@@ -57,13 +61,14 @@ function readerHarness() {
   const exports = {}, localRequire = createRequire(resolve('dist/electron/space-reader.js'));
   runInNewContext(ts.transpileModule(readFileSync('electron/space-reader.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, {
     exports, Buffer, URLSearchParams, structuredClone, Error, require(name) {
-      if (name === './space-sharing') return { openProjectManifest: async () => {}, validateSpaceCheckpoint() {}, openSpacePackage: () => ({ project: { name: 'Project', folders: [], items: [{ id, text: 'Last good note', image: null }] } }) };
+      if (name === './space-sharing') return { openProjectManifest: async () => {}, validateSpaceCheckpoint() {}, openSpacePackage: () => ({ project: { name: 'Project', folders: [], items: [{ id, kind: 'note', title: 'Note', text: 'Last good note', image: null }] } }) };
       return localRequire(name);
     },
   });
   const h = { context, failure: null, corrupt: false, reader: null, beforeFailure: null, open: () => h.reader.openSharedProject(space, dataset) };
   h.reader = exports.createSharedProjects({ context: () => h.context, key: async () => ({ key: new Uint8Array(32) }), async request(route) {
     h.beforeFailure?.();
+    if (h.failRead === 'listing' && route.includes('?') || h.failRead === 'checkpoint' && route.includes('/checkpoints/')) return { ok: false, status: 503, retryAfter: h.retryAfter };
     if (h.failure instanceof Error) throw h.failure;
     if (h.failure) return h.failure;
     if (route.includes('?')) return { ok: true, value: { objects: [...files].sort(([a], [b]) => a.localeCompare(b)).map(([path, bytes]) => ({ path, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), createdAt: 1 })), after: null } };
@@ -80,6 +85,30 @@ test('shared reader preserves transport errors and cached items through failed a
     assert.equal(h.reader.item(null, previous.items[0].id).text, 'Last good note');
     h.failure = null; assert.equal((await h.open()).title, 'Project');
   }
+});
+
+for (const failure of ['listing', 'checkpoint']) for (const retryAfter of [0, 75]) test(`the production shared reader and open panel recover automatically from ${failure} 503 with Retry-After ${retryAfter}`, async () => {
+  const h = harness(), reader = readerHarness(), row = reader.context.shared[0];
+  const page = { kind: 'shared', space: row.spaceId, dataset: row.datasetId };
+  const props = { state: { account: { status: 'signedIn', shared: [row] } }, language: 'en' };
+  h.globals.window.horizon.command = async command => {
+    h.calls.push(command);
+    try { return await reader.open(); }
+    catch (error) { throw new Error(`Error invoking remote method 'horizon:command': Error: ${error.message}`); }
+  };
+  const render = () => h.render('SharedBody', { page, props });
+  render(); await h.settle(); assert.match(JSON.stringify(render()), /Last good note/);
+  row.updatedAt = '2'; reader.failRead = failure; reader.retryAfter = retryAfter; render(); await h.settle();
+  let tree = render(); assert.match(JSON.stringify(tree), /Last good note/);
+  assert.match(flatten(tree).find(node => node.props?.onRetry).props.error, /ACCOUNT_NETWORK/);
+  await h.advance(Math.max(5000, retryAfter * 1000) - 1); render(); assert.equal(h.calls.length, 2);
+  await h.advance(1); render(); await h.settle(); render(); assert.equal(h.calls.length, 3);
+  reader.failRead = null;
+  await h.advance(Math.max(10000, retryAfter * 1000) - 1); render(); assert.equal(h.calls.length, 3);
+  await h.advance(1); render(); await h.settle(); tree = render();
+  assert.equal(h.calls.length, 4); assert.match(JSON.stringify(tree), /Last good note/);
+  assert.equal(flatten(tree).some(node => node.props?.onRetry), false);
+  await h.advance(60000); render(); assert.equal(h.calls.length, 4);
 });
 
 test('a checkpoint integrity failure is retryable and retains the previous shared snapshot', async () => {
@@ -196,18 +225,72 @@ test('shared content refreshes a changed checkpoint hash with identical listing 
   assert.match(JSON.stringify(render()), /Fresh note/);
 });
 
-test('a stale Space listing keeps the open project mounted without refetching', async () => {
-  const h = harness(), page = { kind: 'shared', space: 'space-y', dataset: 'dataset-y' };
+test('a stale Space listing shows Try again and recovery reopens unchanged listing metadata', async () => {
+  const h = harness(), page = { kind: 'shared', space: 'space-y', dataset: 'dataset-y' }, commands = [];
   const dataset = { spaceId: page.space, datasetId: page.dataset, updatedAt: '1', contentRevision: 'same-checkpoint' };
-  const props = { state: { account: { status: 'signedIn', shared: [dataset] } }, language: 'en' };
+  const props = { state: { account: { status: 'signedIn', shared: [dataset] } }, language: 'en', run: async command => { commands.push(command); } };
   const render = () => h.render('SharedBody', { page, props });
   render(); h.requests[0].resolve(content()); await h.settle(); render();
   dataset.stale = true; props.state.account.spacesError = 'ACCOUNT_NETWORK';
-  assert.match(JSON.stringify(render()), /First note/); assert.equal(h.calls.length, 1);
+  render(); let tree = render(); assert.match(JSON.stringify(tree), /First note/);
+  assert.equal(flatten(tree).find(node => node.props?.onRetry)?.props.error, 'ACCOUNT_NETWORK');
+  assert.equal(h.calls.length, 1);
+  flatten(tree).find(node => node.props?.onRetry).props.onRetry();
+  assert.equal(commands.length, 1); assert.equal(commands[0].type, 'account-retry');
   delete dataset.stale; props.state.account.spacesError = null;
-  assert.match(JSON.stringify(render()), /First note/); assert.equal(h.calls.length, 1);
+  render(); assert.equal(h.calls.length, 2);
+  h.requests[1].resolve(content('Recovered listing', 'Fresh note')); await h.settle(); tree = render();
+  assert.match(JSON.stringify(tree), /Fresh note/); assert.equal(flatten(tree).some(node => node.props?.onRetry), false);
   props.state.account.shared = []; render();
   assert.doesNotMatch(JSON.stringify(render()), /First note/);
+});
+
+test('shared reopen failures back off from five to sixty seconds and reset after recovery', async () => {
+  const h = harness(), page = { kind: 'shared', space: 'space-y', dataset: 'dataset-y' };
+  const dataset = { spaceId: page.space, datasetId: page.dataset, updatedAt: '1' };
+  const props = { state: { account: { status: 'signedIn', shared: [dataset] } }, language: 'en' };
+  const render = () => h.render('SharedBody', { page, props });
+  render(); h.requests[0].resolve(content()); await h.settle(); render();
+  await h.advance(300000); render(); assert.equal(h.calls.length, 1, 'healthy panels do not poll');
+  dataset.updatedAt = '2'; render();
+  for (const delay of [5000, 10000, 20000, 40000, 60000, 60000]) {
+    h.requests.at(-1).reject(new Error('ACCOUNT_NETWORK')); await h.settle();
+    assert.match(JSON.stringify(render()), /First note/);
+    const before = h.calls.length;
+    await h.advance(delay - 1); render(); assert.equal(h.calls.length, before);
+    await h.advance(1); render(); assert.equal(h.calls.length, before + 1);
+  }
+  h.requests.at(-1).resolve(content('Recovered')); await h.settle(); render();
+  const before = h.calls.length; await h.advance(300000); render(); assert.equal(h.calls.length, before);
+  dataset.updatedAt = '3'; render(); h.requests.at(-1).reject(new Error('ACCOUNT_TIMEOUT')); await h.settle(); render();
+  await h.advance(5000); render(); assert.equal(h.calls.length, before + 2, 'success resets backoff');
+});
+
+test('Try again reopens immediately and cancels the scheduled shared retry', async () => {
+  const h = harness(), page = { kind: 'shared', space: 'space-y', dataset: 'dataset-y' };
+  const props = { state: { account: { status: 'signedIn', shared: [{ spaceId: page.space, datasetId: page.dataset }] } }, language: 'en' };
+  const render = () => h.render('SharedBody', { page, props });
+  render(); h.requests[0].reject(new Error('ACCOUNT_NETWORK; retryAfterMs=75000')); await h.settle();
+  render().props.onRetry(); render(); assert.equal(h.calls.length, 2);
+  await h.advance(75000); render(); assert.equal(h.calls.length, 2, 'no overlapping timer reopen');
+  h.requests[1].resolve(content()); await h.settle(); render();
+  await h.advance(60000); render(); assert.equal(h.calls.length, 2);
+});
+
+test('shared retry timers stop on close, sign-out, dataset removal and confirmed read access loss', async () => {
+  for (const loss of ['close', 'sign-out', 'dataset', 'read']) {
+    const h = harness(), page = { kind: 'shared', space: 'space-y', dataset: 'dataset-y' };
+    const props = { state: { account: { status: 'signedIn', shared: [{ spaceId: page.space, datasetId: page.dataset }] } }, language: 'en' };
+    const render = () => h.render('SharedBody', { page, props });
+    render(); h.requests[0].reject(new Error('ACCOUNT_NETWORK')); await h.settle(); render();
+    if (loss === 'close') h.unmount();
+    else if (loss === 'read') {
+      await h.advance(5000); render(); assert.equal(h.calls.length, 2);
+      h.requests[1].reject(new Error('SPACE_SHARED_UNAVAILABLE')); await h.settle(); render();
+    } else { props.state.account = loss === 'sign-out' ? { status: 'signedOut' } : { status: 'signedIn', shared: [] }; render(); }
+    const before = h.calls.length; await h.advance(300000); if (loss !== 'close') render();
+    assert.equal(h.calls.length, before, loss);
+  }
 });
 
 test('deleted or revoked shared datasets clear displayed content and cancel pending refreshes', async () => {
