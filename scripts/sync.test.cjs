@@ -544,3 +544,31 @@ test('sync removes only its older checkpoints after thirty days and retains the 
   a.advance(2 * 86400000); a.engine.local.operationsSinceCheckpoint = 499; a.store(store => { store.favorites.bar[0].title = 'Latest retained'; }); await a.engine.pulse(); assert.equal(existsSync(first), false);
   assert.equal(files(folder).filter(path => path.includes(a.engine.local.device) && path.includes('checkpoints')).length, 2); for (const path of other) assert.equal(existsSync(path), true);
 });
+
+const syncModel = require('../dist/electron/sync-model.js');
+const lyraOrigin = 'https://synthetic-lyra.example', olderKeys = ['origin', 'camera', 'microphone', 'location', 'notifications', 'lyra'];
+const lyraEntry = (lyra, external) => ({ origin: lyraOrigin, camera: 'ask', microphone: 'ask', location: 'ask', notifications: 'ask', lyra, ...external ? { lyraExternal: true } : {} });
+function lyraSnapshot(entry) {
+  const store = syncModel.emptySyncStore(); if (entry) store.siteSettings.permissions.push(entry);
+  return { settings: {}, profiles: [{ id: 'local-profile', name: 'Personal', color: 'amber', createdAt: 100, store, desktop: syncModel.emptySyncDesktop(), windows: [] }] };
+}
+const lyraMapping = { 'local-profile': randomUUID() }, lyraSwitches = { profiles: false, favorites: false, history: false, tabs: false, desktop: false, siteSettings: true, settings: false };
+const receivedLyra = (local, value) => syncModel.projectSnapshot(lyraSnapshot(local), lyraMapping, [{ item: 'siteSettings', profile: lyraMapping['local-profile'], key: `permissions:${lyraOrigin}`, value }], lyraSwitches).profiles[0].store.siteSettings.permissions[0];
+
+test('sync publishes site permissions without lyraExternal in the exact keys older builds accept', () => {
+  const records = syncModel.snapshotRecords(lyraSnapshot(lyraEntry('allow', true)), lyraMapping, randomUUID(), () => { throw new Error('No images'); }, 'Synthetic computer');
+  const published = records.find(record => record.key === `permissions:${lyraOrigin}`);
+  assert.equal('lyraExternal' in published.value, false); assert.deepEqual(Object.keys(published.value).sort(), [...olderKeys].sort()); assert.equal(published.value.lyra, 'allow');
+});
+
+test('sync applies an older-format Lyra allow from another computer as local-only', () => {
+  const applied = receivedLyra(null, lyraEntry('allow', false));
+  assert.equal(applied.lyra, 'allow'); assert.equal('lyraExternal' in applied, false);
+  assert.equal('lyraExternal' in receivedLyra(null, lyraEntry('allow', true)), false);
+  assert.equal('lyraExternal' in receivedLyra(lyraEntry('ask', false), lyraEntry('allow', true)), false);
+});
+
+test('sync keeps the local Lyra external notice only while the received decision is still allow', () => {
+  for (const decision of ['block', 'ask']) { const applied = receivedLyra(lyraEntry('allow', true), lyraEntry(decision, false)); assert.equal(applied.lyra, decision); assert.equal('lyraExternal' in applied, false); }
+  assert.equal(receivedLyra(lyraEntry('allow', true), lyraEntry('allow', false)).lyraExternal, true);
+});

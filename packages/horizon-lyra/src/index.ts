@@ -22,22 +22,33 @@ export interface ConnectOptions {
   startTimeoutMs?: number;
 }
 
-export interface ChatMessage { role: 'user' | 'assistant'; content: string }
+/** The protocol this adapter speaks. A service that does not name one in /v1/health speaks protocol 1, the 0.2.0 contract. */
+export const PROTOCOL = 2;
+export const protocolHeader = 'Lyra-Protocol';
+export interface Capabilities { protocol: number; serviceVersion: string; features: string[] }
+export type SourceKind = 'local' | 'key' | 'cli';
+export type SourceState = 'ready' | 'not_installed' | 'login_required' | 'unsupported_version' | 'quota' | 'unavailable' | 'failed' | 'disabled';
+export interface SourceView { id: string; kind: SourceKind; external: boolean; state: SourceState; model: string | null; text: boolean; connected?: boolean }
+export interface SourcesView { order: string[]; sources: SourceView[] }
+/** The source that actually answered a protocol 2 turn. */
+export interface AnswerSource { id: string; kind: SourceKind; external: boolean; model: string }
+
+export interface ChatMessage { role: 'user' | 'assistant'; content: string; local?: true }
 export interface ChatRequest {
   messages: ChatMessage[];
   mode: string;
   priority?: string;
   context?: string;
   language?: 'en' | 'es';
+  /** Protocol 2: admits the external sources the person approved in Lyra. Only an explicit request from the person sets it. */
+  cloud?: true;
+  /** Protocol 2: the context never reaches an external source. */
+  contextLocal?: true;
 }
 export type ChatEvent =
-  | { type: 'start'; mode: string; model: string; fellBack: boolean }
+  | { type: 'start'; mode: string; model: string; fellBack: boolean; provider?: string; source?: AnswerSource }
   | { type: 'thinking' }
   | { type: 'text'; text: string }
-  | { type: 'done' }
-  | { type: 'error'; code: string };
-export type InstallEvent =
-  | { type: 'step'; name: string; status: string; completed: number; total: number }
   | { type: 'done' }
   | { type: 'error'; code: string };
 export interface ModeStatus { ready: boolean }
@@ -47,11 +58,13 @@ export interface ModelsStatus {
   modes: { fast: ModeStatus } & Record<string, ModeStatus>;
 }
 export interface Client {
+  /** What the running service speaks, read once per service process. */
+  capabilities(): Promise<Capabilities>;
+  sources: { list(): Promise<SourcesView> };
+  /** Opens Lyra's own app on a section, where the person manages models, keys and connected CLIs. */
+  app: { open(section: 'models'): Promise<void> };
   chat(request: ChatRequest, options?: { signal?: AbortSignal }): AsyncIterable<ChatEvent>;
-  models: {
-    status(): Promise<ModelsStatus>;
-    install(plan: string): AsyncIterable<InstallEvent>;
-  };
+  models: { status(): Promise<ModelsStatus> };
   ollama: { start(): Promise<{ running: true; version: string }> };
 }
 
@@ -74,8 +87,11 @@ const codeShape = /^[A-Za-z0-9_.-]{1,64}$/;
 const tokenShape = /^[A-Za-z0-9_-]{43}$/;
 const inheritedVariables = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'HOME', 'XDG_DATA_HOME'];
 
+const sourceKinds: readonly string[] = ['local', 'key', 'cli'];
+const sourceStates: readonly string[] = ['ready', 'not_installed', 'login_required', 'unsupported_version', 'quota', 'unavailable', 'failed', 'disabled'];
+
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
-const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const isName = (value: unknown, limit = 200): value is string => typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\x00-\x1f]/.test(value);
 const invalid = (what: string) => new LyraError('invalid_response', `Unexpected ${what} from the Lyra service`);
 
 function transport(error: unknown, signal?: AbortSignal): LyraError {
@@ -161,7 +177,8 @@ async function* ndjson(response: Response, signal?: AbortSignal): AsyncGenerator
   try {
     for (;;) {
       let chunk: ReadableStreamReadResult<Uint8Array>;
-      try { chunk = await reader.read(); } catch (error) { throw transport(error, signal); }
+      // A stream that breaks after the service answered means the service went away mid-turn, not that it never started.
+      try { chunk = await reader.read(); } catch (error) { throw error instanceof LyraError ? error : new LyraError(signal?.aborted ? 'cancelled' : 'service_lost'); }
       if (chunk.done) break;
       total += chunk.value.length;
       if (total > STREAM_LIMIT) throw new LyraError('stream_too_large');
@@ -189,13 +206,26 @@ async function* events<T extends { type: string }>(response: Response, parse: (v
     yield event;
     if (event.type === 'done' || event.type === 'error') return;
   }
+  // The stream closed without its last event: the answer is incomplete because the service stopped.
+  throw new LyraError(signal?.aborted ? 'cancelled' : 'service_lost');
+}
+
+function answerSource(value: unknown): AnswerSource | undefined {
+  if (!isRecord(value) || !isName(value.id, 64) || !codeShape.test(value.id) || typeof value.kind !== 'string' || !sourceKinds.includes(value.kind)
+    || typeof value.external !== 'boolean' || !isName(value.model)) return undefined;
+  return { id: value.id, kind: value.kind as SourceKind, external: value.external, model: value.model };
 }
 
 function chatEvent(value: unknown): ChatEvent | undefined {
   if (!isRecord(value)) return undefined;
   switch (value.type) {
-    case 'start': return typeof value.mode === 'string' && typeof value.model === 'string' && typeof value.fellBack === 'boolean'
-      ? { type: 'start', mode: value.mode, model: value.model, fellBack: value.fellBack } : undefined;
+    case 'start': {
+      if (typeof value.mode !== 'string' || typeof value.model !== 'string' || typeof value.fellBack !== 'boolean') return undefined;
+      const event: ChatEvent = { type: 'start', mode: value.mode, model: value.model, fellBack: value.fellBack };
+      if (value.provider !== undefined) { if (!isName(value.provider, 64)) return undefined; event.provider = value.provider; }
+      if (value.source !== undefined) { const source = answerSource(value.source); if (!source) return undefined; event.source = source; }
+      return event;
+    }
     case 'thinking': return { type: 'thinking' };
     case 'text': return typeof value.text === 'string' ? { type: 'text', text: value.text } : undefined;
     case 'done': return { type: 'done' };
@@ -204,15 +234,23 @@ function chatEvent(value: unknown): ChatEvent | undefined {
   }
 }
 
-function installEvent(value: unknown): InstallEvent | undefined {
-  if (!isRecord(value)) return undefined;
-  switch (value.type) {
-    case 'step': return typeof value.name === 'string' && typeof value.status === 'string' && isCount(value.completed) && isCount(value.total)
-      ? { type: 'step', name: value.name, status: value.status, completed: value.completed, total: value.total } : undefined;
-    case 'done': return { type: 'done' };
-    case 'error': return typeof value.code === 'string' && codeShape.test(value.code) ? { type: 'error', code: value.code } : undefined;
-    default: return undefined;
-  }
+function sourcesView(value: unknown): SourcesView {
+  if (!isRecord(value) || !Array.isArray(value.order) || !Array.isArray(value.sources) || value.order.length > 32 || value.sources.length > 32) throw invalid('sources');
+  if (value.order.some(id => !isName(id, 64) || !codeShape.test(id))) throw invalid('sources');
+  const sources = value.sources.map((source: unknown): SourceView => {
+    if (!isRecord(source) || !isName(source.id, 64) || !codeShape.test(source.id) || typeof source.kind !== 'string' || !sourceKinds.includes(source.kind)
+      || typeof source.external !== 'boolean' || typeof source.state !== 'string' || !sourceStates.includes(source.state)
+      || !(source.model === null || isName(source.model)) || !isRecord(source.capabilities) || typeof source.capabilities.text !== 'boolean'
+      || !(source.connected === undefined || typeof source.connected === 'boolean')) throw invalid('sources');
+    return { id: source.id, kind: source.kind as SourceKind, external: source.external, state: source.state as SourceState, model: source.model, text: source.capabilities.text, ...(source.connected === undefined ? {} : { connected: source.connected }) };
+  });
+  return { order: value.order as string[], sources };
+}
+
+function capabilitiesOf(body: Record<string, unknown>, serviceVersion: string): Capabilities {
+  const protocol = typeof body.protocol === 'number' && Number.isSafeInteger(body.protocol) && body.protocol >= 1 ? body.protocol : 1;
+  const listed = Array.isArray(body.features) ? body.features.filter((feature): feature is string => isName(feature, 64) && codeShape.test(feature)).slice(0, 64) : [];
+  return { protocol, serviceVersion, features: [...new Set(listed)] };
 }
 
 function modelsStatus(value: unknown): ModelsStatus {
@@ -232,7 +270,7 @@ function modelsStatus(value: unknown): ModelsStatus {
 
 // ---------------------------------------------------------------- finding and starting the service
 
-interface Service { port: number; serviceVersion: string }
+interface Service { port: number; serviceVersion: string; process: string }
 
 async function readService(home: string): Promise<Service | undefined> {
   let file: unknown;
@@ -243,15 +281,23 @@ async function readService(home: string): Promise<Service | undefined> {
   if (!Number.isInteger(port) || (port as number) < 1024 || (port as number) > 65535) return undefined;
   if (typeof serviceVersion !== 'string' || !serviceVersion || serviceVersion.length > 64) return undefined;
   if (typeof startedAt !== 'string' && typeof startedAt !== 'number') return undefined;
-  return { port: port as number, serviceVersion };
+  return { port: port as number, serviceVersion, process: `${home}\0${pid as number}\0${startedAt}` };
 }
+
+// The features of one service process. A restart may bring another build, so the answer is kept per process and read once for it.
+const known = new Map<string, Capabilities>();
 
 async function healthy(service: Service): Promise<boolean> {
   try {
-    const response = await fetch(`http://127.0.0.1:${service.port}/v1/health`, { redirect: 'error', headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(2000) });
+    const response = await fetch(`http://127.0.0.1:${service.port}/v1/health`, { redirect: 'error', headers: { Accept: 'application/json', [protocolHeader]: String(PROTOCOL) }, signal: AbortSignal.timeout(2000) });
     if (!response.ok) { await response.body?.cancel().catch(() => {}); return false; }
     const body = await readJson(response);
-    return isRecord(body) && body.ok === true && body.serviceVersion === service.serviceVersion;
+    if (!isRecord(body) || body.ok !== true || body.serviceVersion !== service.serviceVersion) return false;
+    if (!known.has(service.process)) {
+      if (known.size >= 16) known.clear();
+      known.set(service.process, capabilitiesOf(body, service.serviceVersion));
+    }
+    return true;
   } catch { return false; }
 }
 
@@ -336,7 +382,7 @@ export async function connect(options: ConnectOptions): Promise<Client> {
     try {
       return await fetch(base + path, {
         method: call.method ?? 'GET', redirect: 'error', signal: signals.length ? AbortSignal.any(signals) : null,
-        headers: { Accept: call.stream ? 'application/x-ndjson' : 'application/json', 'Accept-Language': call.language ?? options.language ?? 'en', ...(call.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...call.headers },
+        headers: { Accept: call.stream ? 'application/x-ndjson' : 'application/json', 'Accept-Language': call.language ?? options.language ?? 'en', [protocolHeader]: String(PROTOCOL), ...(call.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...call.headers },
         body: call.body === undefined ? null : JSON.stringify(call.body),
       });
     } catch (error) { throw transport(error, call.signal); }
@@ -366,21 +412,47 @@ export async function connect(options: ConnectOptions): Promise<Client> {
     return response;
   };
 
+  const capabilities = async (): Promise<Capabilities> => {
+    const cached = known.get(service.process);
+    if (cached) return cached;
+    if (!await healthy(service)) throw new LyraError('unavailable');
+    return known.get(service.process)!;
+  };
+  // Nothing is sent to a service that could not honour it: the check runs before the request leaves Horizon.
+  const need = async (protocol: number, features: string[]) => {
+    const available = await capabilities();
+    if (available.protocol < protocol || features.some(feature => !available.features.includes(feature))) throw new LyraError('unsupported');
+  };
+
   return {
+    capabilities,
+    sources: {
+      async list() {
+        await need(2, ['sources']);
+        return sourcesView(await readJson(await authed('/v1/sources', { timeout: 10000 })));
+      },
+    },
+    app: {
+      async open(section) {
+        if (section !== 'models') throw new LyraError('invalid_request');
+        const response = await authed('/v1/app/open', { method: 'POST', body: { section }, timeout: 10000 });
+        await response.body?.cancel().catch(() => {});
+      },
+    },
     async *chat(request, { signal } = {}) {
       if (!Array.isArray(request.messages) || !request.messages.length || typeof request.mode !== 'string') throw new LyraError('invalid_request');
-      const { messages, mode, priority, context, language } = request;
-      const response = await authed('/v1/chat', { method: 'POST', body: { messages, mode, priority, context, language }, signal, language, stream: true });
+      const { mode, priority, context, language, cloud, contextLocal } = request;
+      const local = contextLocal === true || request.messages.some(message => message.local === true);
+      if (cloud !== undefined && cloud !== true || contextLocal !== undefined && contextLocal !== true || request.messages.some(message => message.local !== undefined && message.local !== true)) throw new LyraError('invalid_request');
+      // cloud: true means every approved external source only under protocol 2; a protocol 1 service keeps answering on this computer.
+      if (cloud || local) await need(2, local ? ['local-messages'] : []);
+      const messages = request.messages.map(({ role, content, local }) => ({ role, content, ...(local ? { local } : {}) }));
+      const response = await authed('/v1/chat', { method: 'POST', body: { messages, mode, priority, context, language, cloud, contextLocal }, signal, language, stream: true });
       yield* events(response, chatEvent, signal);
     },
     models: {
       async status() {
         return modelsStatus(await readJson(await authed('/v1/models', { timeout: 10000 })));
-      },
-      async *install(plan) {
-        if (typeof plan !== 'string' || !plan || plan.length > 64) throw new LyraError('invalid_request');
-        const response = await authed('/v1/models/install', { method: 'POST', body: { plan, confirm: true }, stream: true });
-        yield* events(response, installEvent);
       },
     },
     ollama: {

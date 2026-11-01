@@ -4,7 +4,8 @@ const { createServer } = require('node:http');
 const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } = require('node:fs');
 const { resolve, join } = require('node:path');
 
-const library = () => import('horizon-lyra');
+// The package itself, by path: a worktree's node_modules can link to another checkout's copy.
+const library = () => import(require('node:url').pathToFileURL(resolve(__dirname, '../packages/horizon-lyra/dist/index.js')).href);
 const app = { id: 'horizon', name: 'Horizon', kind: 'cosmic' };
 const serviceVersion = '1.2.3';
 const stale = 'S'.repeat(43), fresh = 'F'.repeat(43), bootstrap = 'B'.repeat(43);
@@ -141,28 +142,27 @@ test('Lyra client registers once, keeps the token and retries a single 401', asy
   await assert.rejects(connect({ app, tokens: memoryTokens(), home: closed.home }).then(client => client.models.status()), { code: 'forbidden' });
 });
 
-test('Lyra client sends chat, install and Ollama requests as the routes expect', async t => {
+test('Lyra client sends chat and Ollama requests as the routes expect and has no model download', async t => {
   const { connect } = await library();
   const requests = [];
   const service = await fakeService(t, (request, response, payload) => {
-    requests.push({ url: request.url, auth: request.headers.authorization, language: request.headers['accept-language'], payload });
+    requests.push({ url: request.url, auth: request.headers.authorization, language: request.headers['accept-language'], protocol: request.headers['lyra-protocol'], payload });
     if (request.url === '/v1/chat') return streamOf([{ type: 'start', mode: 'fast', model: 'tiny', fellBack: false }, { type: 'thinking' }, { type: 'text', text: 'Hi' }, { type: 'done' }, { type: 'text', text: 'after done' }])(request, response);
-    if (request.url === '/v1/models/install') return streamOf([{ type: 'step', name: 'pull', status: 'running', completed: 1, total: 4 }, { type: 'error', code: 'disk_full' }])(request, response);
     if (request.url === '/v1/ollama/start') return json(response, 200, { running: true, version: '0.9.0' });
     json(response, 404, { error: { code: 'not_found', message: 'No' } });
   });
   const client = await connect({ app, tokens: memoryTokens(fresh), home: service.home });
   assert.deepEqual(await drain(client.chat({ ...chatRequest, priority: 'interactive', context: 'ctx', language: 'es' })), [
     { type: 'start', mode: 'fast', model: 'tiny', fellBack: false }, { type: 'thinking' }, { type: 'text', text: 'Hi' }, { type: 'done' }]);
-  assert.deepEqual(await drain(client.models.install('light')), [{ type: 'step', name: 'pull', status: 'running', completed: 1, total: 4 }, { type: 'error', code: 'disk_full' }]);
   assert.deepEqual(await client.ollama.start(), { running: true, version: '0.9.0' });
   assert.deepEqual(requests.map(entry => [entry.url, entry.auth, entry.payload]), [
     ['/v1/chat', `Bearer ${fresh}`, { ...chatRequest, priority: 'interactive', context: 'ctx', language: 'es' }],
-    ['/v1/models/install', `Bearer ${fresh}`, { plan: 'light', confirm: true }],
     ['/v1/ollama/start', `Bearer ${fresh}`, {}],
   ]);
   assert.equal(requests[0].language, 'es');
   assert.equal(requests[1].language, 'en');
+  assert.deepEqual(requests.map(entry => entry.protocol), ['2', '2'], 'Every request names protocol 2');
+  assert.equal('install' in client.models, false, 'Horizon owns no model plan or download');
   await assert.rejects(drain(client.chat({ mode: 'fast', messages: [] })), { code: 'invalid_request' });
 });
 
@@ -207,10 +207,12 @@ test('Lyra client rejects unknown event shapes and oversized or malformed JSON a
   const bad = [
     [{ type: 'mystery' }], [{ type: 'text', text: 5 }], [{ type: 'text' }], [{ type: 'start', mode: 'fast', model: 'x' }], [{ type: 'error', code: 'has space' }], [{ type: 'error' }],
     ['not json'], ['[1,2]'], ['null'], [{ nope: true }],
+    [{ type: 'start', mode: 'fast', model: 'x', fellBack: false, source: { id: 'local', kind: 'remote', external: false, model: 'x' } }],
+    [{ type: 'start', mode: 'fast', model: 'x', fellBack: false, source: { id: 'has space', kind: 'local', external: false, model: 'x' } }],
+    [{ type: 'start', mode: 'fast', model: 'x', fellBack: false, source: { id: 'local', kind: 'local', external: 'no', model: 'x' } }],
   ];
   const service = await fakeService(t, (request, response, payload) => {
     if (request.url === '/v1/chat') return streamOf(bad[Number(payload.context)])(request, response);
-    if (request.url === '/v1/models/install') return streamOf([{ type: 'step', name: 'pull', status: 'running', completed: -1, total: 4 }])(request, response);
     response.writeHead(200, { 'Content-Type': 'application/json' });
     if (request.url === '/v1/models') return response.end(JSON.stringify({ ready: true, padding: 'x'.repeat(1024 * 1024 + 1), ollama: { installed: true, running: true }, modes: { fast: { ready: true } } }));
     response.end('{"running":true,');
@@ -219,7 +221,6 @@ test('Lyra client rejects unknown event shapes and oversized or malformed JSON a
   for (const [index, events] of bad.entries()) {
     await assert.rejects(drain(client.chat({ ...chatRequest, context: String(index) })), { code: 'invalid_response' }, JSON.stringify(events));
   }
-  await assert.rejects(drain(client.models.install('light')), { code: 'invalid_response' });
   await assert.rejects(client.models.status(), { code: 'response_too_large' });
   await assert.rejects(client.ollama.start(), { code: 'invalid_response' });
   const shapes = await fakeService(t, (request, response) => json(response, 200, { ready: true, ollama: { installed: true, running: true }, modes: { slow: { ready: true } } }));

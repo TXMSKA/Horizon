@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { EventEmitter } from 'node:events';
 import { pagePreferences } from './page-preferences';
 import { assertPrivateCommand } from './private-commands';
-import { createLyra } from './lyra';
+import { createLyra, desktopNotice } from './lyra';
 import { createServices } from './services-install';
 import { serviceReason } from '../src/shared/services';
 import type { ServicesCommand } from '../src/shared/services';
@@ -40,7 +40,7 @@ import { PageMenuSession } from './context-menu';
 import { cleanupPartitions, isProfileId, makeProfile, migrateStore, PROFILE_LIMIT, profileName, profileStorePath, readRegistry, removeProfileDirectory, writeRegistry } from './profiles';
 import type { ProfileRegistry } from './profiles';
 import { blockingPolicy, createBlockingEngine } from './blocking';
-import { listSites, translationChoice, setTranslationChoice, PermissionQueue, requestedPermissions, resetSite, secureOrigin, setBlocking, setPermission, setSiteDark, siteHost, siteSettings, stripCookieHeaders } from './site-settings';
+import { listSites, lyraExternal, translationChoice, setTranslationChoice, PermissionQueue, requestedPermissions, resetSite, secureOrigin, setBlocking, setPermission, setSiteDark, siteHost, siteSettings, stripCookieHeaders } from './site-settings';
 import { darkPagesActive, darkPagesCSS, setDarkPagesSwitch } from './dark-pages';
 import { desktopInputText } from '../src/shared/desktop-input';
 import { createDesktop, desktopAddress } from './desktop';
@@ -405,7 +405,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'sync-dismiss-conflict': return sync.dismissConflict(command.id);
       }
     }
-    if (privateWindow && ['switch-profile', 'create-profile', 'update-profile', 'delete-profile', 'set-blocking', 'set-site-permission', 'answer-permission', 'reset-site', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].includes(command.type)) throw new Error('Private window settings are fixed');
+    if (privateWindow && ['switch-profile', 'create-profile', 'update-profile', 'delete-profile', 'set-blocking', 'set-site-permission', 'answer-permission', 'reset-site', 'reset-lyra-desktop', 'set-block-ads', 'set-block-third-party-cookies', 'set-clear-history-on-close', 'set-clear-cache-on-close'].includes(command.type)) throw new Error('Private window settings are fixed');
     switch (command.type) {
       case 'answer-extension-install':
         if (!extensionDecision || extensionDecision.warning.requestId !== command.id) throw new Error('EXTENSION_NOT_FOUND');
@@ -582,6 +582,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     let storageError = false;
     let pendingWrite: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
+    const lyraDesktop = desktopNotice(resolve(dirname(storePath), 'lyra-desktop.json'));
     const lyra = createLyra({
       privateWindow, alive: () => !disposed && !closing && isCurrent(), language: () => resolveLanguage(settings.language, app.getLocale()), changed: () => { layout(); publish(); },
       page: id => {
@@ -590,11 +591,13 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         return { id, url: tab.state.url, title: tab.state.title || new URL(tab.state.url).hostname, generation: tab.pageLoad, contents };
       },
       decision: origin => siteSettings(store.siteSettings, origin)?.permissions.lyra ?? 'ask',
-      allow: origin => {
+      external: origin => lyraExternal(store.siteSettings, origin),
+      allow: (origin, external) => {
         const previous = structuredClone(store.siteSettings.permissions);
-        setPermission(store.siteSettings, origin, 'lyra', 'allow');
+        setPermission(store.siteSettings, origin, 'lyra', 'allow', external);
         try { saveNow(); } catch { store.siteSettings.permissions = previous; throw new Error('SITE_SETTINGS_SAVE_FAILED'); }
       },
+      desktopExternal: () => lyraDesktop.external(), allowDesktop: () => lyraDesktop.allow(),
       project: id => { desktop.assertUnlocked(); return desktop.content(id); },
       item: (project, id) => {
         if (sharedItemId(id)) {
@@ -722,7 +725,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
 
     const state = () => ({ ...desktop.state(), projects: desktop.state().projects.map(project => ({ ...project,
       ...(!privateWindow ? profileData.account?.projectState?.(project.id) : undefined) })), lyra: lyra.state(), desktopPanel: structuredClone(desktopPanel), groups: structuredClone(tabGroups), groupEditorId, tabs: tabs.map(tab => ({ ...tab.state, movable: movable(tab), translation: tab.translation?.state() ?? tab.state.translation, blocked: { ...tab.state.blocked } })), activeId, store, favoriteFaviconVersion: favicons?.version ?? 0, favoritesVersion: profileData.favoritesVersion, importProgress: profileData.importProgress, storageError: storageError || sessionError, storageReadError: readStatus.readError || sessionStatus.readError,
-      clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings),
+      clearHistoryOnClose: store.clearHistoryOnClose, clearCacheOnClose: store.clearCacheOnClose, sites: listSites(store.siteSettings), lyraDesktop: !privateWindow && lyraDesktop.external(),
       extensions: extensions?.list(page(active()?.view)) ?? [], extensionsUpdating: extensions?.status().updating ?? false, extensionsError: extensions?.status().storageError ?? false,
       canReopenTab: tabs.length < 200 && savedSession.closed.some(tab => sessionAddress(tab.url, ownAddress)),
       blockingReady: blocker.ready, siteSettings: active()?.state.settings || active()?.state.desktop ? null : privateSite(active()?.topURL ?? active()?.state.url ?? ''), permissionPrompt: privateWindow ? null : permissions.prompt(activeId) });
@@ -856,6 +859,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         try { saveNow(); } catch { store.history = previous; throw new Error('CLEAR_HISTORY_FAILED'); }
       }
       if (choice.cookies) try { await webSession.clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }); } catch { throw new Error('CLEAR_SITE_DATA_FAILED'); }
+      // Clearing site data also withdraws the lasting answer to the notice for saved items, so Lyra asks again.
+      if (choice.cookies && !privateWindow) try { lyraDesktop.clear(); } catch { throw new Error('CLEAR_SITE_DATA_FAILED'); }
       if (choice.cache) try { await webSession.clearCache(); } catch { throw new Error('CLEAR_CACHE_FAILED'); }
       publish(); return { history: choice.history, cookies: choice.cookies, cache: choice.cache };
       } finally { clearingData = false; }
@@ -1040,7 +1045,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       });
     };
     const makeTab = (url = ''): Tab => {
-      const tab: Tab = { host, pageLoad: 0, refusedCookies: new Set(), state: { translation: { open: false, phase: 'idle', source: null, target: resolveLanguage(settings.language, app.getLocale()), error: null }, id: randomUUID(), groupId: null, movable: true, settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
+      const tab: Tab = { host, pageLoad: 0, refusedCookies: new Set(), state: { translation: { open: false, phase: 'idle', source: null, target: resolveLanguage(settings.language, app.getLocale()), error: null, external: null, answeredBy: null }, id: randomUUID(), groupId: null, movable: true, settings: null, desktop: null, desktopItem: null, url, title: url, favicon: null, loading: false, fullscreen: false, canGoBack: false, canGoForward: false, zoom: 1, error: null, find: { active: 0, total: 0 }, blocked: { ads: 0, trackers: 0, cookies: 0 } } };
       // The live host follows a tab when its WebContentsView moves to another window.
       tab.translation = createTranslation({
         privateWindow, alive: () => tab.host.alive(tab), language: () => tab.host.translation(tab).language(), changed: () => tab.host.update(),
@@ -1580,8 +1585,12 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
             target.refusedCookies.clear(); target.state.blocked = { ads: 0, trackers: 0, cookies: 0 };
             if (settings.blockAds) page(target.view)?.reloadIgnoringCache();
           }
+          // Resetting what sites were allowed also withdraws the lasting answer to the notice for saved items.
+          lyraDesktop.clear();
           break;
         }
+        // Sets the notice for saved items back to asking each time.
+        case 'reset-lyra-desktop': lyraDesktop.clear(); break;
         case 'retry-desktop-storage': desktop.retry(); break;
         case 'open-desktop-panel':
           void lyra.run({ type: 'lyra-close' });

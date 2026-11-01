@@ -107,7 +107,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
     if (!valid || Object.keys(command).length !== fields.length + 1 || !fields.every(key => Object.hasOwn(command, key))) throw new Error('VAULT_COMMAND_INVALID');
     return value as BrowserCommand;
   }
-  const settingsCommands = ['set-show-capture', 'open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'register-default-browser', 'restart-to-update', 'check-updates', 'set-check-updates-automatically'];
+  const settingsCommands = ['set-show-capture', 'open-settings', 'set-search-engine', 'set-language', 'set-ask-where-to-save', 'set-block-ads', 'set-block-third-party-cookies', 'choose-downloads-folder', 'reset-downloads-folder', 'set-clear-history-on-close', 'set-clear-cache-on-close', 'clear-browsing-data', 'reset-site', 'reset-lyra-desktop', 'register-default-browser', 'restart-to-update', 'check-updates', 'set-check-updates-automatically'];
   if (type === 'set-on-start' || settingsCommands.includes(type as string)) {
     let allowed: string[] = ['type'];
     let valid = false;

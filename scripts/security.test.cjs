@@ -6006,6 +6006,19 @@ test('clear failures report each selected kind and profile reset rolls back a fa
   browser.command({ type: 'reset-site', host: 'example.com' }); assert.deepEqual(browser.state().sites, []); assert.equal(browser.views[0].webContents.bypassedCache, 1);
 });
 
+test('the lasting answer to Lyra\'s notice for saved items is shown in Settings and withdrawn there, by a site reset or by clearing site data', async t => {
+  const browser = notebookBrowser(t, plainCipher); browser.navigate();
+  const path = join(dirname(profileStorePath(browser.directory, browser.state().activeProfileId)), 'lyra-desktop.json');
+  const allow = () => { writeFileSync(path, JSON.stringify({ version: 1, external: true })); assert.equal(browser.state().lyraDesktop, true); };
+  assert.equal(browser.state().lyraDesktop, false);
+  assert.deepEqual(validateCommand({ type: 'reset-lyra-desktop' }), { type: 'reset-lyra-desktop' });
+  assert.throws(() => validateCommand({ type: 'reset-lyra-desktop', profile: true }), /SETTINGS_COMMAND_INVALID/);
+  allow(); await browser.command({ type: 'reset-lyra-desktop' }); assert.equal(browser.state().lyraDesktop, false); assert.equal(existsSync(path), false);
+  allow(); await browser.command({ type: 'reset-site', host: 'example.com' }); assert.equal(browser.state().lyraDesktop, false);
+  allow(); await browser.command({ type: 'clear-browsing-data', history: true, cookies: false, cache: false }); assert.equal(browser.state().lyraDesktop, true);
+  await browser.command({ type: 'clear-browsing-data', history: false, cookies: true, cache: false }); assert.equal(browser.state().lyraDesktop, false);
+});
+
 test('global ads off avoids network matches and cosmetics, keeps exceptions and counts refused cookies independently', t => {
   let matches = 0, cosmetics = 0;
   const blocker = { ready: true, start: async () => {}, setEnabled() {}, stop() {}, cosmeticCSS: () => { cosmetics++; return ''; }, match: () => { matches++; return { kind: 'ads' }; } };
@@ -7031,12 +7044,15 @@ function lyraFixture(options = {}) {
   const host = {
     privateWindow: options.privateWindow ?? false, alive: () => alive, language: () => options.language ?? 'en', changed() {},
     page: id => { if (!pages.has(id)) throw new Error('LYRA_PAGE_UNAVAILABLE'); return pages.get(id); },
-    decision: origin => decisions.get(origin) ?? 'ask', allow: origin => { decisions.set(origin, 'allow'); },
+    decision: origin => decisions.get(origin) ?? 'ask', external: () => options.external ?? true, allow: origin => { decisions.set(origin, 'allow'); },
+    desktopExternal: () => options.desktopExternal ?? false, allowDesktop() {},
     project: () => options.project ?? { id: 'project', items: [] }, item: () => options.item,
     save: (...args) => { calls.push(['save', ...args]); },
     connect: async () => {
       calls.push(['connect']); if (options.connectError) throw { code: options.connectError };
-      return { models: { status: async () => ({ ollama: { installed: true, running: true }, modes: { fast: { ready: !options.missing } } }) },
+      // A protocol 1 service: the 0.2.0 contract, answering on this computer only.
+      return { capabilities: async () => ({ protocol: 1, serviceVersion: '0.2.0', features: [] }),
+        models: { status: async () => ({ ollama: { installed: true, running: true }, modes: { fast: { ready: !options.missing } } }) },
         async *chat(request, { signal }) {
           calls.push(['chat', request]);
           if (options.chat) { yield* options.chat(request, signal); return; }
@@ -7105,12 +7121,12 @@ test('Lyra comparison authorizes every origin before any read and one-time grant
 
 test('Lyra refuses private windows at both command and page extraction boundaries', async t => {
   const fixture = lyraFixture({ privateWindow: true }); t.after(fixture.close); const page = fixture.add('first', 'https://private.example/'); fixture.decisions.set('https://private.example', 'allow');
-  for (const type of ['lyra-open', 'lyra-home', 'lyra-install', 'lyra-retry']) await assert.rejects(fixture.lyra.run({ type }), /LYRA_PRIVATE/);
+  for (const type of ['lyra-open', 'lyra-home', 'lyra-manage', 'lyra-retry']) await assert.rejects(fixture.lyra.run({ type }), /LYRA_PRIVATE/);
   await assert.rejects(fixture.ask(), /LYRA_PRIVATE/);
   await assert.rejects(readLyraPage(page.contents, page.url, () => true, true), /LYRA_PRIVATE/);
   assert.equal(fixture.reads.length, 0); assert.equal(fixture.calls.length, 0);
   const browser = notebookBrowser(t, authenticatedCipher()), peer = browser.addWindow({ privateWindow: true });
-  for (const type of ['lyra-open', 'lyra-install', 'lyra-home']) assert.throws(() => peer.command({ type }), /LYRA_PRIVATE/);
+  for (const type of ['lyra-open', 'lyra-manage', 'lyra-home']) assert.throws(() => peer.command({ type }), /LYRA_PRIVATE/);
 });
 
 test('Lyra context is capped in UTF-8, JSON delimited and contains no page text in instructions', async t => {
@@ -7225,6 +7241,7 @@ test('Lyra command schemas reject extra fields, oversize requests and sparse tab
 });
 require('./group-search-colors.test.cjs');
 require('./translate.test.cjs');
+require('./lyra-routes.test.cjs');
 
 require('./sync.test.cjs');
 require('./sync-ui.test.cjs');

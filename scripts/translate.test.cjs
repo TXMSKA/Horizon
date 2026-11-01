@@ -44,7 +44,7 @@ function pageFixture(options = {}) {
       connects++;
       if (options.lyraMissing) throw { code: 'not_installed' };
       if (options.connectError) throw { code: options.connectError };
-      return { chat(request, { signal }) {
+      return { capabilities: async () => ({ protocol: 1, serviceVersion: '0.2.0', features: [] }), chat(request, { signal }) {
         model.push(request);
         return (async function* () {
           if (options.chat) { yield* options.chat(request, signal); return; }

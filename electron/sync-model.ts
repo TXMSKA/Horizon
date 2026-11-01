@@ -47,7 +47,7 @@ export function snapshotRecords(snapshot: SyncSnapshot, mapping: Record<string, 
     });
     walk(local.store.favorites.bar, 'bar'); walk(local.store.favorites.other, 'other');
     for (const entry of local.store.history) add('history', profile, entry.url, entry);
-    for (const list of ['blocking', 'dark', 'permissions'] as const) for (const entry of local.store.siteSettings[list]) add('siteSettings', profile, `${list}:${'host' in entry ? entry.host : entry.origin}`, entry);
+    for (const list of ['blocking', 'dark', 'permissions'] as const) for (const entry of local.store.siteSettings[list]) add('siteSettings', profile, `${list}:${'host' in entry ? entry.host : entry.origin}`, 'origin' in entry ? sharedPermission(entry) : entry);
     const translation = local.store.siteSettings.translation;
     if (translation) {
       for (const host of translation.never) add('siteSettings', profile, `never:${host}`, host);
@@ -130,6 +130,11 @@ function localDesktopItem(value: Record<string, unknown>): DesktopItem {
   const image = value.image as { blob: BlobReference; width: number; height: number; bytes: number; cut: boolean } | null;
   return { ...value, image: image ? { filename: `${image.blob.id}.bin`, width: image.width, height: image.height, bytes: image.bytes, cut: image.cut } : null } as unknown as DesktopItem;
 }
+// lyraExternal stays on this computer: published entries keep the keys older builds accept.
+type SitePermissions = BrowserStore['siteSettings']['permissions'][number];
+function sharedPermission(entry: SitePermissions): SitePermissions {
+  const shared = { ...entry }; delete shared.lyraExternal; return shared;
+}
 function setSiteRecord(store: BrowserStore, key: string, value: unknown): void {
   if (key === 'clearHistoryOnClose' || key === 'clearCacheOnClose') { requireSync(typeof value === 'boolean'); store[key] = value; return; }
   const split = key.indexOf(':'), list = key.slice(0, split), name = key.slice(split + 1);
@@ -187,8 +192,11 @@ export function projectSnapshot(current: SyncSnapshot, mapping: Record<string, s
     }
     if (switches.history) profile.store.history = selected.filter(record => record.item === 'history').map(record => record.value as BrowserStore['history'][number]).sort((a, b) => b.lastVisit - a.lastVisit || a.url.localeCompare(b.url));
     if (switches.siteSettings) {
+      const external = new Set(profile.store.siteSettings.permissions.filter(entry => entry.lyra === 'allow' && entry.lyraExternal === true).map(entry => entry.origin));
       profile.store.siteSettings = { blocking: [], dark: [], permissions: [] };
       for (const record of selected.filter(record => record.item === 'siteSettings')) setSiteRecord(profile.store, record.key, record.value);
+      // A received lyraExternal is ignored; the local one survives only while the received decision is still allow.
+      profile.store.siteSettings.permissions = profile.store.siteSettings.permissions.map(entry => entry.lyra === 'allow' && external.has(entry.origin) ? { ...sharedPermission(entry), lyraExternal: true } : sharedPermission(entry));
     }
     if (switches.desktop) {
       const rows = selected.filter(record => record.item === 'desktop').map(record => record.value as { type: string; project?: string | null; entry: Record<string, unknown> }).sort((a, b) => Number(a.entry.createdAt) - Number(b.entry.createdAt) || String(a.entry.id).localeCompare(String(b.entry.id)));

@@ -233,6 +233,9 @@ function PrivacySettings({ state, language, onOpen, openClearDialog, onClearDial
         <SettingsToggle title="blockAdsTrackers" hint={t('blockAdsHint')} value={state.blockAds} command="set-block-ads" language={language} />
         <SettingsToggle title="blockThirdPartyCookies" hint={t('blockThirdPartyCookiesHint')} value={state.blockThirdPartyCookies} command="set-block-third-party-cookies" language={language} />
         <SettingRow title="sitesOwnSettings" hint={t(count === 0 ? 'sitesOwnSettingsNone' : count === 1 ? 'siteOwnSettingsCount' : 'sitesOwnSettingsCount').replace('{count}', String(count))} language={language}>{() => <button className="settings-button" type="button" onClick={() => onOpen('privacy/sites')}>{t('manage')}</button>}</SettingRow>
+        <SettingRow title="lyraDesktopSetting" hint={t(state.lyraDesktop ? 'lyraDesktopAllowed' : 'lyraDesktopAsk')} language={language}>{(id, apply, pending) => state.lyraDesktop &&
+          <button className="settings-button" type="button" disabled={pending} aria-describedby={`${id}-hint`} onClick={() => { void apply({ type: 'reset-lyra-desktop' }); }}>{t('lyraDesktopReset')}</button>
+        }</SettingRow>
       </>}
     </SettingsGroup>
     {!state.privateWindow && <SettingsGroup title="passwords" language={language}>

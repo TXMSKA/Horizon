@@ -1,9 +1,14 @@
 import type { Language } from './api';
+import type { LyraAnsweredBy } from './lyra';
 
 export interface TranslationChoices { always: { language: string; target: Language }[]; never: string[] }
 export interface TranslateState {
   open: boolean; phase: 'idle' | 'detecting' | 'offered' | 'running' | 'translated' | 'original' | 'failed';
   source: string | null; target: Language; error: string | null;
+  // Whether a translation the person asks for may go to an external source: null until Lyra was asked which sources are ready.
+  external: boolean | null;
+  // The source translating the running turn, from its start event.
+  answeredBy: LyraAnsweredBy | null;
 }
 export type TranslateCommand =
   | { type: 'translate-open' | 'translate-start' | 'translate-original' | 'translate-close' | 'translate-cancel' | 'translate-retry' }

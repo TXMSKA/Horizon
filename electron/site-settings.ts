@@ -100,7 +100,9 @@ export function setSiteDark(settings: SiteSettingsStore, host: string, enabled: 
     settings.dark.push({ host, enabled });
   }
 }
-export function setPermission(settings: SiteSettingsStore, origin: string, permission: SitePermission, decision: PermissionDecision): void {
+// A Lyra allow records the notice it was given under: lyraExternal only when that notice said external sources may answer.
+// Entries without the field, stored or synced before it existed, are allows under the local notice.
+export function setPermission(settings: SiteSettingsStore, origin: string, permission: SitePermission, decision: PermissionDecision, external = false): void {
   if (!validOrigin(origin)) throw new Error('SITE_UNAVAILABLE');
   let entry = settings.permissions.find(entry => entry.origin === origin);
   if (!entry) {
@@ -108,6 +110,11 @@ export function setPermission(settings: SiteSettingsStore, origin: string, permi
     entry = { origin, ...defaultPermissions() }; settings.permissions.push(entry);
   }
   entry[permission] = decision;
+  if (permission === 'lyra') { if (decision === 'allow' && external) entry.lyraExternal = true; else delete entry.lyraExternal; }
+}
+export function lyraExternal(settings: SiteSettingsStore, origin: string): boolean {
+  const entry = settings.permissions.find(entry => entry.origin === origin);
+  return entry?.lyra === 'allow' && entry.lyraExternal === true;
 }
 export function requestedPermissions(permission: string, details: { mediaTypes?: string[]; mediaType?: string; isMainFrame?: boolean } = {}): SitePermission[] {
   if (permission === 'geolocation') return ['location'];
