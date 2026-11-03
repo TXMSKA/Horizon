@@ -25,6 +25,21 @@ export function isLocalHTMLURL(value: unknown): value is string {
   } catch { return false; }
 }
 
+// An address-bar entry that names an existing local HTML file: a drive path (optionally quoted, as Explorer's
+// "Copy as path" yields) or a file URL. Returns the canonical file URL, or null so the normal rules apply.
+export function localHTMLAddress(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  let value = input.trim();
+  if (value.length > 2 && value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1).trim();
+  if (!boundedAddress(value)) return null;
+  try {
+    if (/^file:\/\//i.test(value)) return isLocalHTMLURL(value) ? pathToFileURL(fileURLToPath(value)).href : null;
+    if (!/^[a-z]:[\\/]/i.test(value)) return null;
+    const url = launchAddress([value]);
+    return url && isLocalHTMLURL(url) ? url : null;
+  } catch { return null; }
+}
+
 export function launchAddress(args: readonly string[], workingDirectory?: string): string | null {
   let address: string | null = null;
   for (const value of args) {
