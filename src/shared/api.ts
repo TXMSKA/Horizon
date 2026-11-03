@@ -71,7 +71,7 @@ export type Theme = BuiltInTheme | MarketplaceTheme;
 // Themes whose surfaces are light; every other theme is dark.
 export const LIGHT_THEMES: readonly string[] = ['daylight', 'dune', 'moss'];
 export type Contrast = 'standard' | 'high';
-export const HUB_APPS = ['desktop', 'translate', 'themes', 'nebula'] as const;
+export const HUB_APPS = ['desktop', 'translate', 'themes', 'nebula', 'vault'] as const;
 export type HubApp = typeof HUB_APPS[number];
 export const QUICK_ACCESS_LIMIT = 6;
 export type DarkPagesMode = 'off' | 'on' | 'system';

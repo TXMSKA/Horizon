@@ -941,7 +941,7 @@ test('Hub tiles, dock and menus support keyboard opening, pending saves, retry a
   const hooks = notebookTestHooks(), copy = interfaceModule('src/copy.ts'), sent = [], dismissed = [], announced = [], events = new Map();
   let page = 'home', complete, reject, focused = 0;
   const document = { addEventListener: (name, callback) => events.set(name, callback), removeEventListener: name => events.delete(name), activeElement: null };
-  const { Hub } = interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: (_reason, language) => copy.text('SETTINGS_SAVE_FAILED', language) } }, {
+  const { Hub } = interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Vault': { PasswordsPanel: 'passwords-panel' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: (_reason, language) => copy.text('SETTINGS_SAVE_FAILED', language) } }, {
     document, window: { horizon: { command: command => { sent.push(command); return new Promise((resolve, fail) => { complete = resolve; reject = fail; }); } } },
   });
   const state = { quickAccess: [], showCapture: true, tabs: [] }, opener = { current: { contains: () => false } }, focus = { focus: () => focused++ };
@@ -980,7 +980,8 @@ test('Hub tiles, dock and menus support keyboard opening, pending saves, retry a
   assert.equal(prevented, false); assert.deepEqual(dismissed.slice(-2), [true, true]);
   assert.deepEqual(announced, [copy.text('savingQuickAccess', 'en'), 'Added Themes to quick access', copy.text('savingQuickAccess', 'en'), copy.text('SETTINGS_SAVE_FAILED', 'en'), copy.text('savingQuickAccess', 'en'), 'Removed Themes from quick access']);
   tile(tree).props.onClick(); assert.equal(page, 'themes'); tree = render(); hooks.flush();
-  notebookNodes(tree, node => node.props['aria-label'] === 'Hub Home')[0].props.onClick(); assert.equal(page, 'home');
+  assert.equal(notebookNodes(tree, node => node.props['aria-label'] === 'Hub Home').length, 0);
+  notebookNodes(tree, node => node.props['aria-label'] === 'Back to Hub')[0].props.onClick(); assert.equal(page, 'home');
   hooks.dispose(); assert.equal(events.size, 0);
 });
 
@@ -991,7 +992,7 @@ test('installed theme radios save explicit choices, follow system changes and se
   let complete, changed;
   const system = { matches: true, addEventListener(_name, callback) { changed = callback; }, removeEventListener() {} };
   const state = { theme: 'system', contrast: 'standard', quickAccess: [], showCapture: true };
-  const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check' }, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: () => 'Failed' } }, {
+  const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check' }, './copy': copy, './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Vault': { PasswordsPanel: 'passwords-panel' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: () => 'Failed' } }, {
     matchMedia: query => query === '(forced-colors: active)' ? { matches: false, addEventListener() {}, removeEventListener() {} } : system, window: { horizon: { command: command => { commands.push(command); return new Promise(resolve => { complete = () => { state[command.type] = command.value; resolve(); }; }); } } },
   });
   // A Hub page supplies the radio component's props without needing a browser window.
@@ -1021,7 +1022,7 @@ test('Hub offers Fjord, Dune, Graphite and Moss, serializes Get and retries remo
     const state = { theme: 'daylight', contrast: 'standard', installedThemes: [], quickAccess: [] };
     const react = Object.fromEntries(Object.keys(hubHooks.react).map(key => [key, (...args) => hooks.react[key](...args)]));
     const { Hub } = interfaceModule('src/Hub.tsx', { react, 'lucide-react': { Check: 'Check', Trash2: 'Trash2' }, './copy': copy,
-      './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: () => 'Failed' } }, {
+      './shared/api': require('../dist/src/shared/api.js'), './Menu': {}, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Vault': { PasswordsPanel: 'passwords-panel' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: () => 'Failed' } }, {
       matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
       window: { horizon: { command: async command => {
         commands.push(command);
@@ -6754,10 +6755,49 @@ test('Desktop tab titles and card metadata follow the board in both languages', 
 });
 
 test('the Hub draws Desktop first and focuses its first built tile', () => {
-  assert.deepEqual(require('../dist/src/shared/api.js').HUB_APPS, ['desktop', 'translate', 'themes', 'nebula']);
+  assert.deepEqual(require('../dist/src/shared/api.js').HUB_APPS, ['desktop', 'translate', 'themes', 'nebula', 'vault']);
   const hub = readFileSync('src/Hub.tsx', 'utf8');
   assert.match(hub, /const apps = HUB_APPS.filter/); assert.match(hub, /apps.map/);
   assert.ok(hub.includes("querySelector<HTMLButtonElement>(page === 'home' ? '.hub-tile'"));
+});
+
+test('the Hub has no Home strip, offers Vault, hides it in private windows and returns home from a page', () => {
+  const copy = interfaceModule('src/copy.ts'), api = require('../dist/src/shared/api.js');
+  for (const [key, en, es] of [['vault', 'Vault', 'Vault'], ['hubBack', 'Back to Hub', 'Volver al Hub']]) { assert.equal(copy.text(key, 'en'), en); assert.equal(copy.text(key, 'es'), es); }
+  const load = hooks => interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': copy, './shared/api': api, './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Vault': { PasswordsPanel: 'passwords-panel' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: () => 'Failed' } }, {
+    document: { addEventListener() {}, removeEventListener() {} }, window: { horizon: { command: async () => {} } },
+  }).Hub;
+  const props = (state, page, onPage = () => {}) => ({ state: { quickAccess: ['themes'], tabs: [], ...state }, language: 'en', page, opener: { current: null }, onPage, onDismiss() {}, onAnnounce() {}, onShared() {}, run: async () => true, describe: () => 'Failed' });
+  for (const language of ['en', 'es']) {
+    const hooks = notebookTestHooks(), Hub = load(hooks);
+    const labels = (state, page = 'home') => notebookNodes(hooks.render(() => Hub({ ...props(state, page), language })), node => node.props.className === 'hub-tile').map(node => node.props.children[1].props.children);
+    assert.deepEqual(labels({ privateWindow: false }), ['desktop', 'translate', 'themes', 'nebula', 'vault'].map(key => copy.text(key, language)));
+    assert.deepEqual(labels({ privateWindow: true }), [copy.text('themes', language)]);
+    const tree = hooks.render(() => Hub({ ...props({ privateWindow: false }, 'home'), language }));
+    assert.equal(notebookNodes(tree, node => node.type === 'nav' || node.props.className === 'hub-dock').length, 0);
+    assert.equal(notebookNodes(tree, node => node.props.role === 'dialog')[0].props.className, 'hub-popup');
+    assert.equal(notebookNodes(tree, node => node.props.className === 'hub-page-heading')[0].props.children[0], false);
+    hooks.dispose();
+  }
+  const hooks = notebookTestHooks(), Hub = load(hooks); let page = 'vault';
+  const tree = hooks.render(() => Hub(props({ privateWindow: false }, 'vault', value => { page = value; })));
+  const panel = notebookNodes(tree, node => node.type === 'passwords-panel')[0];
+  assert.equal(panel.props.embedded, true); assert.equal(notebookNodes(tree, node => node.props.className === 'hub-tile').length, 0);
+  assert.equal(notebookNodes(tree, node => node.props.role === 'dialog')[0].props.className, 'hub-popup hub-fitted-page');
+  notebookNodes(tree, node => node.props['aria-label'] === 'Back to Hub')[0].props.onClick(); assert.equal(page, 'home');
+  hooks.dispose();
+  const source = file => readFileSync(file, 'utf8');
+  assert.ok(source('src/Vault.tsx').includes('return embedded ? body : <ToolbarPopover opener={opener}>{body}</ToolbarPopover>;'));
+  assert.ok(source('src/App.tsx').includes('run={run} describe={reason => settingsError(reason, language)} />}'));
+});
+
+test('popovers over the page wait for the native page view to be hidden so they appear in one frame', () => {
+  const styles = readFileSync('src/styles.css', 'utf8'), code = readFileSync('src/App.tsx', 'utf8');
+  assert.ok(styles.includes(':root[data-popovers-held] .toolbar-popover { opacity: 0; }'));
+  assert.ok(code.includes('const holdPopovers = ')); assert.equal(code.split('holdPopovers(true)').length - 1, 1);
+  // Released when nothing covers the page, when the capture is empty or fails, after the view is hidden, and on unmount.
+  assert.ok(code.split('holdPopovers(false)').length - 1 >= 6);
+  assert.ok(code.includes('reportArea(true).then(() => requestAnimationFrame(() => { if (captureGeneration.current === snapshot.generation) holdPopovers(false); }))'));
 });
 
 test('non-project panel pages expose a drop hint only during a candidate drag and keep dropping', async () => {

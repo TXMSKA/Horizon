@@ -44,6 +44,8 @@ import { ServiceDialog } from './Services';
 const LyraPanel = lazy(() => import('./Lyra').then(module => ({ default: module.LyraPanel })));
 
 type Panel = LibraryPanel | 'passwords' | null;
+// Popovers over the page stay unpainted while the native page view still covers their lower part (see `.toolbar-popover` in styles.css).
+const holdPopovers = (hold: boolean) => { if (hold) document.documentElement.dataset.popoversHeld = ''; else delete document.documentElement.dataset.popoversHeld; };
 const PasswordsPanel = lazy(() => import('./Vault').then(module => ({ default: module.PasswordsPanel })));
 const VaultSuggestion = lazy(() => import('./Vault').then(module => ({ default: module.VaultSuggestion })));
 const BrowserPanel = lazy(() => import('./BrowserPanel').then(module => ({ default: module.BrowserPanel })));
@@ -488,15 +490,18 @@ export function App({ language: initialLanguage }: { language: Language }) {
       snapshotUrl.current = null;
     };
     if (!covered || !pageShowing) {
+      holdPopovers(false);
       void reportArea(false).then(() => requestAnimationFrame(removeSnapshot));
     } else {
+      holdPopovers(true);
       void reportArea(false).then(() => window.horizon.capture()).then(bytes => {
-        if (!bytes || captureGeneration.current !== generation) return;
+        if (!bytes) { if (captureGeneration.current === generation) holdPopovers(false); return; }
+        if (captureGeneration.current !== generation) return;
         const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'image/jpeg' }));
         if (snapshotUrl.current) URL.revokeObjectURL(snapshotUrl.current);
         snapshotUrl.current = url;
         setSnapshot({ url, generation });
-      }).catch(() => { if (captureGeneration.current === generation) setError(text('browserError', language)); });
+      }).catch(() => { if (captureGeneration.current === generation) { holdPopovers(false); setError(text('browserError', language)); } });
     }
     return () => { captureGeneration.current++; };
   }, [panel, covered, pageShowing, pageCapturePending, state?.activeId, state?.desktopPanel.open, reportArea, language]);
@@ -504,9 +509,12 @@ export function App({ language: initialLanguage }: { language: Language }) {
     const image = snapshotRef.current;
     if (!snapshot || !image || pageCapturePending) return;
     void image.decode().then(() => requestAnimationFrame(() => {
-      if (captureGeneration.current === snapshot.generation) void reportArea(true);
-    })).catch(() => { if (captureGeneration.current === snapshot.generation) setError(text('browserError', language)); });
+      if (captureGeneration.current !== snapshot.generation) return;
+      // The popovers appear in the frame after the native page view is hidden, so no part of one waits behind it.
+      void reportArea(true).then(() => requestAnimationFrame(() => { if (captureGeneration.current === snapshot.generation) holdPopovers(false); }));
+    })).catch(() => { if (captureGeneration.current === snapshot.generation) { holdPopovers(false); setError(text('browserError', language)); } });
   }, [snapshot, pageCapturePending, reportArea, language]);
+  useEffect(() => () => holdPopovers(false), []);
   useEffect(() => { setHubPage(null); }, [state?.activeId, state?.activeProfileId]);
   useEffect(() => { setExtensionsOpen(false); setShieldScope(null); }, [siteScope]);
   useEffect(() => { setDesktopOverlay(null); }, [desktopScope]);
@@ -771,7 +779,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     {desktopMode === 'capture' && state && <CapturePreview state={state} language={language} shot={captureShot} header={headerRef} opener={desktopButtonRef} onClose={closeCapture} onSave={saveDesktopCapture} onVisible={captureVisible} onShot={setCaptureShot} />}
     {shieldOpen && site && active && state && <ShieldPopover key={siteScope} site={site} privateWindow={state.privateWindow} counts={active.blocked} ready={state.blockingReady} blockAds={state.blockAds} darkPages={state.darkPages} language={language} favicon={siteFavicon} initial={siteInitial} opener={shieldButtonRef} onDismiss={reason => closeShield(reason === 'escape')} onTabOut={backward => { closeShield(backward); if (!backward) addressRef.current?.focus(); }} run={run} />}
     {permissionOpen && permissionPrompt && <PermissionDialog key={`${siteScope}:${permissionPrompt.id}`} prompt={permissionPrompt} language={language} favicon={siteFavicon} initial={siteInitial} onAnswer={answerPermission} />}
-    {hubPage && state && <Hub onAnnounce={setAnnouncement} onShared={(space, dataset) => { setHubPage(null); void openDesktopPanel({ kind: 'shared', space, dataset }, hubButtonRef.current ?? undefined); }} state={state} language={language} page={hubPage} opener={hubButtonRef} onPage={page => { if (page === 'desktop') void openDesktopPanel({ kind: 'home' }, hubButtonRef.current ?? undefined); else if (page === 'translate') { setHubPage(null); void run({ type: 'translate-open' }); } else setHubPage(page); }} onDismiss={focus => { setHubPage(null); if (focus) hubButtonRef.current?.focus(); }} />}
+    {hubPage && state && <Hub onAnnounce={setAnnouncement} onShared={(space, dataset) => { setHubPage(null); void openDesktopPanel({ kind: 'shared', space, dataset }, hubButtonRef.current ?? undefined); }} state={state} language={language} page={hubPage} opener={hubButtonRef} onPage={page => { if (page === 'desktop') void openDesktopPanel({ kind: 'home' }, hubButtonRef.current ?? undefined); else if (page === 'translate') { setHubPage(null); void run({ type: 'translate-open' }); } else setHubPage(page); }} onDismiss={focus => { setHubPage(null); if (focus) hubButtonRef.current?.focus(); }} run={run} describe={reason => settingsError(reason, language)} />}
     {profileOpen === 'menu' && state && !state.privateWindow && <ProfilesMenu state={state} language={language} keyboard={profileByKeyboard.current} opener={profileButtonRef} onDismiss={reason => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); if (reason === 'escape') profileButtonRef.current?.focus(); }} onSwitch={profile => {
       setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus();
       void run({ type: 'switch-profile', id: profile.id }).then(success => { if (success) { setAnnouncement(t('switchedProfile').replace('{name}', profile.name)); profileButtonRef.current?.focus(); } });
