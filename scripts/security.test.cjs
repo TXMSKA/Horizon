@@ -8530,3 +8530,71 @@ test('Shared project and capture bridge replies are discarded after switching pr
   response = Promise.resolve(content); assert.deepEqual(await browser.command({ type: 'space-open-shared', space: space.id, dataset }), content);
   response = Promise.resolve(bytes); assert.deepEqual(await browser.image(null, item), bytes);
 });
+
+test('Tab inside the Vault unlock dialog cycles its controls and never reaches the Hub that would close', () => {
+  const hooks = notebookTestHooks(), closed = [];
+  const document = { activeElement: null };
+  const { VaultUnlock } = interfaceModule('src/Vault.tsx', { react: hooks.react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './ToolbarPopover': {} }, { document, window: { horizon: { command: async () => {} } } });
+  const tree = hooks.render(() => VaultUnlock({ language: 'en', describe: () => 'Failed', onClose: () => closed.push(true), onUnlocked: async () => {} }));
+  const dialog = notebookNodes(tree, node => node.type === 'dialog')[0];
+  let focused = null; const control = name => ({ focus: () => { focused = name; } }), controls = ['input', 'cancel', 'submit'].map(control);
+  dialog.props.ref.current = { querySelectorAll: () => controls };
+  const press = (active, shiftKey) => {
+    const seen = { prevented: false, stopped: false }; document.activeElement = active; focused = null;
+    dialog.props.onKeyDown({ key: 'Tab', shiftKey, preventDefault() { seen.prevented = true; }, stopPropagation() { seen.stopped = true; } });
+    return { ...seen, focused };
+  };
+  assert.deepEqual(press(controls[2], false), { prevented: true, stopped: true, focused: 'input' });
+  assert.deepEqual(press(controls[0], true), { prevented: true, stopped: true, focused: 'submit' });
+  assert.deepEqual(press(controls[1], false), { prevented: false, stopped: true, focused: null });
+  dialog.props.ref.current = { querySelectorAll: () => [] };
+  assert.equal(press(null, false).prevented, true);
+  const other = { key: 'a', stopPropagation() { assert.fail('Only Tab is held back'); }, preventDefault() {} }; dialog.props.onKeyDown(other);
+  assert.deepEqual(closed, []);
+  hooks.dispose();
+});
+
+test('Tab inside the Vault import permission dialog cycles its controls and never reaches the Hub that would close', () => {
+  const hooks = notebookTestHooks(), document = { activeElement: null };
+  const { VaultImportPermission } = interfaceModule('src/Vault.tsx', { react: hooks.react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './ToolbarPopover': {} }, { document, window: { horizon: { command: async () => {} } } });
+  const tree = hooks.render(() => VaultImportPermission({ language: 'en', windows: true, describe: () => 'Failed', onGranted: async () => {}, onClose() {} }));
+  const dialog = notebookNodes(tree, node => node.type === 'dialog')[0];
+  let focused = null; const control = name => ({ focus: () => { focused = name; } }), controls = ['input', 'cancel', 'hello', 'submit'].map(control);
+  dialog.props.ref.current = { querySelectorAll: () => controls };
+  const press = (active, shiftKey) => {
+    const seen = { prevented: false, stopped: false }; document.activeElement = active; focused = null;
+    dialog.props.onKeyDown({ key: 'Tab', shiftKey, preventDefault() { seen.prevented = true; }, stopPropagation() { seen.stopped = true; } });
+    return { ...seen, focused };
+  };
+  assert.deepEqual(press(controls[3], false), { prevented: true, stopped: true, focused: 'input' });
+  assert.deepEqual(press(controls[0], true), { prevented: true, stopped: true, focused: 'submit' });
+  assert.deepEqual(press(controls[2], false), { prevented: false, stopped: true, focused: null });
+  dialog.props.ref.current = { querySelectorAll: () => [] };
+  assert.equal(press(null, false).prevented, true);
+  dialog.props.onKeyDown({ key: 'a', stopPropagation() { assert.fail('Only Tab is held back'); }, preventDefault() {} });
+  hooks.dispose();
+});
+
+test('clicks inside the install notice never close the Hub, and clicks outside everything still do', () => {
+  const hooks = notebookTestHooks(), events = new Map(), dismissed = [];
+  const { Hub } = interfaceModule('src/Hub.tsx', { react: hooks.react, 'lucide-react': {}, './copy': interfaceModule('src/copy.ts'), './shared/api': require('../dist/src/shared/api.js'), './Menu': { Menu: 'menu' }, './ToolbarPopover': { ToolbarPopover: 'popover' }, './Vault': { PasswordsPanel: 'passwords-panel' }, './ShareProject': { ShareProjectDialog: 'share-project' }, './Settings': { settingsError: () => 'Failed' } }, {
+    document: { addEventListener: (name, callback) => events.set(name, callback), removeEventListener: name => events.delete(name) }, window: { horizon: { command: async () => {} } },
+  });
+  hooks.render(() => Hub({ state: { quickAccess: [], tabs: [], privateWindow: false }, language: 'en', page: 'home', opener: { current: { contains: () => false } }, onPage() {}, onDismiss: focus => dismissed.push(focus), onAnnounce() {}, onShared() {}, run: async () => true, describe: () => 'Failed' }));
+  hooks.flush();
+  const target = inside => ({ closest: selector => selector === '.service-dialog' && inside ? {} : null });
+  events.get('pointerdown')({ target: target(true) }); assert.deepEqual(dismissed, []);
+  events.get('pointerdown')({ target: target(false) }); assert.deepEqual(dismissed, [false]);
+  hooks.dispose();
+});
+
+test('a pinned Vault is never offered in the toolbar of a private window', () => {
+  const code = readFileSync('src/App.tsx', 'utf8');
+  const line = code.split('\n').find(row => row.includes('state?.quickAccess.filter('));
+  assert.ok(line, 'The quick access buttons are missing');
+  const filter = line.match(/state\?\.quickAccess\.filter\(app => ([^)]*)\)/)[1];
+  const offered = (app, privateWindow) => new Function('app', 'state', `return ${filter};`)(app, { privateWindow });
+  for (const app of ['desktop', 'translate', 'nebula', 'vault']) assert.equal(offered(app, true), false, app);
+  assert.equal(offered('themes', true), true);
+  for (const app of ['desktop', 'translate', 'themes', 'nebula', 'vault']) assert.equal(offered(app, false), true, app);
+});

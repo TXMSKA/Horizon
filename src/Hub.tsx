@@ -169,7 +169,8 @@ export function Hub({ state, language, page, opener, onPage, onDismiss, onAnnoun
   useEffect(() => {
     const outside = (event: PointerEvent) => {
       const target = event.target as Node;
-      if (!ref.current?.contains(target) && !menu.current?.contains(target) && !opener.current?.contains(target)) dismiss.current(false);
+      // The install notice is a modal dialog of its own, outside the Hub's element; answering it must not close the Hub it came from.
+      if (!ref.current?.contains(target) && !menu.current?.contains(target) && !opener.current?.contains(target) && !(target as Element).closest?.('.service-dialog')) dismiss.current(false);
     };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);

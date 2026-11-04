@@ -21,7 +21,14 @@ export function VaultUnlock({ language, describe, onClose, onUnlocked }: { langu
   useEffect(() => { dialog.current?.showModal(); input.current?.focus(); }, []);
   // The field is disabled while the request is pending, so focus can come back only once it is enabled again.
   useEffect(() => { if (failure && !pending) input.current?.focus(); }, [failure, pending]);
-  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }}>
+  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }} onKeyDown={event => {
+      if (event.key !== 'Tab') return;
+      // The dialog is modal, so Tab cycles inside it; the Hub and the Passwords panel around it close on a Tab off their last control.
+      event.stopPropagation();
+      const controls = [...(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? [])];
+      if (!controls.length) { event.preventDefault(); return; }
+      if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) { event.preventDefault(); (event.shiftKey ? controls.at(-1) : controls[0])?.focus(); }
+    }}>
     <form onSubmit={event => {
       event.preventDefault(); if (busy.current) return;
       busy.current = true; setPending(true); setFailure('');
@@ -47,7 +54,14 @@ export function VaultImportPermission({ language, windows, describe, onGranted, 
     busy.current = true; setPending(true); setFailure('');
     window.horizon.command(command).then(async () => { await onGranted(); onClose(); }, (reason: unknown) => setFailure(describe(reason))).finally(() => { busy.current = false; setPending(false); });
   };
-  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-describedby={`${id}-hint`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }}>
+  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-describedby={`${id}-hint`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }} onKeyDown={event => {
+      if (event.key !== 'Tab') return;
+      // The dialog is modal, so Tab cycles inside it and never reaches the Hub, which closes on a Tab off its last control.
+      event.stopPropagation();
+      const controls = [...(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? [])];
+      if (!controls.length) { event.preventDefault(); return; }
+      if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) { event.preventDefault(); (event.shiftKey ? controls.at(-1) : controls[0])?.focus(); }
+    }}>
     <form onSubmit={event => {
       event.preventDefault();
       const value = password; setPassword('');
