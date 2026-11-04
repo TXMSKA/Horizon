@@ -1057,7 +1057,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       target.restore = undefined; target.restoring = undefined;
       activate(target); update(); return target;
     };
-    const closeTab = (tab: Tab, remember = true) => {
+    // Only a close by the person ends the window, and only when no tab at all remains (tabs hidden in a folded group keep it open); a page, download or desktop that closes a tab leaves a home tab.
+    const closeTab = (tab: Tab, remember = true, byPerson = false) => {
       const index = tabs.indexOf(tab);
       if (index < 0 || closing || disposed) return;
       if (remember && recordsBrowsing(privateWindow) && !tab.retryDownload) { const saved = restorableTab(snapshotTab(tab), ownAddress); if (saved) rememberClosed(savedSession, saved, index); }
@@ -1078,8 +1079,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         try { if (!window.isDestroyed()) window.contentView.removeChildView(tab.view); } catch { /* Nothing left to detach. */ }
         page(tab.view)?.close();
       }
-      if (!activeId && isCurrent()) newTab();
-      update();
+      if (!activeId && isCurrent()) { if (byPerson && !tabs.length) window.close(); else newTab(); }
+      if (!disposed) update();
     };
     const replaceViews = () => {
       invalidateCaptures();
@@ -1722,7 +1723,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         case 'close-tab': {
           const target = tabs.find(tab => tab.state.id === command.id);
           if (!target) throw new Error('Unknown tab');
-          closeTab(target); break;
+          closeTab(target, true, true); break;
         }
         case 'navigate': {
           if (command.input === LYRA_ADDRESS) return run({ type: 'lyra-tab' });

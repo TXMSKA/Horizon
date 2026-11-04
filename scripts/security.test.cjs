@@ -30,7 +30,7 @@ function emptyExtensionService() {
   const services = new WeakMap();
   return {
     profileExtensions(_userData, _profile, target) {
-      if (!services.has(target)) services.set(target, { ready: Promise.resolve(), list: () => [], status: () => ({ updating: false, storageError: false }), attach: () => () => {}, checkUpdates: async () => {}, startUpdates: async () => {}, stop: async () => {} });
+      if (!services.has(target)) services.set(target, { ready: Promise.resolve(), list: () => [], status: () => ({ updating: false, storageError: false }), attach: () => () => {}, windows: [], attachWindow(owner) { this.windows.push(owner); return () => {}; }, checkUpdates: async () => {}, startUpdates: async () => {}, stop: async () => {} });
       return services.get(target);
     },
     existingExtensions: target => services.get(target),
@@ -483,8 +483,8 @@ test('Home preserves native history, trims the old forward branch and survives r
   assert.equal(next.state().tabs[0].url, ''); assert.equal(next.state().tabs[0].canGoBack, true); assert.equal(next.views[0].visible, false);
   assert.deepEqual(next.views[0].webContents.restored, { entries: saved.tabs[0].entries, index: 2 });
   await Promise.resolve(); await Promise.resolve();
-  next.command({ type: 'close-tab', id: next.state().activeId }); next.command({ type: 'reopen-tab' });
-  assert.equal(next.state().tabs.at(-1).url, ''); assert.deepEqual(next.views.at(-1).webContents.restored, { entries: saved.tabs[0].entries, index: 2 });
+  const restoredId = next.state().activeId; next.command({ type: 'new-tab' }); next.command({ type: 'close-tab', id: restoredId }); next.command({ type: 'reopen-tab' });
+  assert.equal(next.state().tabs.find(tab => tab.id === next.state().activeId).url, ''); assert.deepEqual(next.views.at(-1).webContents.restored, { entries: saved.tabs[0].entries, index: 2 });
   next.close();
 });
 
@@ -3530,6 +3530,7 @@ test('main paints the resolved palette and passes both settings before loading c
     app.getPath = () => directory;
     app.getLocale = () => 'en';
     app.exit = () => assert.fail('Main startup failed');
+    let quits = 0; app.quit = () => { quits++; };
     const electron = {
       app, nativeTheme,
       protocol: { registerSchemesAsPrivileged() {} },
@@ -3577,6 +3578,8 @@ test('main paints the resolved palette and passes both settings before loading c
     if (theme === 'system') assert.equal(painted, settings.contrast === 'high' || systemHigh ? dark ? '#ffffff' : '#000000' : dark ? '#eeebe9' : '#171514');
     window.emit('closed');
     assert.equal(nativeTheme.listenerCount('updated'), 0);
+    // Closing the last tab closes the window, and the app quits when no window is left, as it does for the window's own close button.
+    assert.equal(quits, 0); app.emit('window-all-closed'); assert.equal(quits, 1);
   }
 });
 
@@ -5367,7 +5370,7 @@ test('favorites tree drag refuses descendants and moves a folder with its conten
 
 test('retry cancellation and early failures release the temporary tab and allow another retry', t => {
   const { EventEmitter } = require('node:events'), options = {}, browser = notebookBrowser(t, plainCipher, options);
-  browser.navigate();
+  browser.navigate(); const closes = watchWindowClose(browser);
   const contents = browser.views.at(-1).webContents, session = contents.session, active = browser.state().activeId;
   const item = () => Object.assign(new EventEmitter(), { getURL: () => 'https://example.com/file.pdf', getFilename: () => 'file.pdf', getTotalBytes: () => 10, getReceivedBytes: () => 0, setSavePath(path) { this.path = path; }, cancel() { this.cancelled = true; } });
   const original = item(); session.emit('will-download', { preventDefault() { assert.fail('Original refused'); } }, original, contents);
@@ -5388,7 +5391,7 @@ test('retry cancellation and early failures release the temporary tab and allow 
     assert.equal(browser.state().store.downloads[0].status, 'failed');
   }
   options.downloadError = true; assert.throws(retry, /Download failed/);
-  assert.equal(browser.views.at(-1).webContents.destroyed, true);
+  assert.equal(browser.views.at(-1).webContents.destroyed, true); assert.equal(closes.count, 0, 'A refused retry tab never closes the window'); assert.equal(browser.state().tabs.length, 1);
   options.downloadError = false; options.saveError = false; retry();
   const target = browser.views.at(-1).webContents, download = item();
   options.saveChoice = join(browser.directory, 'downloads', 'retried.pdf');
@@ -8636,4 +8639,64 @@ test('a pinned Vault is never offered in the toolbar of a private window', () =>
   for (const app of ['desktop', 'translate', 'nebula', 'vault']) assert.equal(offered(app, true), false, app);
   assert.equal(offered('themes', true), true);
   for (const app of ['desktop', 'translate', 'themes', 'nebula', 'vault']) assert.equal(offered(app, false), true, app);
+});
+
+// Counts the window's own close, the path of its close button, and records the state the person left behind.
+function watchWindowClose(entry) {
+  const log = { count: 0, tabsAtClose: undefined, canReopenAtClose: undefined }, real = entry.window.close;
+  entry.window.close = () => {
+    log.count++; const state = entry.state(); log.tabsAtClose = state.tabs.length; log.canReopenAtClose = state.canReopenTab;
+    const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+    entry.window.emit('close', event);
+    if (!event.defaultPrevented) real();
+  };
+  return log;
+}
+
+test('closing the last tab by the person closes the window through its own close and keeps the tab for reopening', t => {
+  for (const privateWindow of [false, true]) {
+    const root = notebookBrowser(t), entry = privateWindow ? root.addWindow({ privateWindow: true, fresh: true }) : root, closes = watchWindowClose(entry);
+    entry.navigate('https://first.example/'); entry.command({ type: 'new-tab', input: 'https://second.example/' });
+    entry.command({ type: 'close-tab', id: entry.state().activeId });
+    assert.equal(closes.count, 0, 'A window with another tab stays open'); assert.equal(entry.state().tabs.length, 1);
+    entry.command({ type: 'close-tab', id: entry.state().activeId });
+    assert.equal(closes.count, 1, 'The last tab closes the window once'); assert.equal(closes.tabsAtClose, 0, 'No home tab replaces it');
+    if (!privateWindow) assert.equal(closes.canReopenAtClose, true, 'The closed tab stays in the reopen history');
+  }
+});
+
+test('tabs closed by the system leave a home tab and never close the window', t => {
+  const destroyed = notebookBrowser(t), destroyedCloses = watchWindowClose(destroyed);
+  destroyed.navigate('https://first.example/'); destroyed.views[0].webContents.close();
+  assert.equal(destroyedCloses.count, 0); assert.equal(destroyed.state().tabs.length, 1); assert.equal(destroyed.state().tabs[0].url, '');
+
+  const desktop = notebookBrowser(t), desktopCloses = watchWindowClose(desktop);
+  desktop.command({ type: 'create-project', name: 'Research' }); const project = desktop.state().projects[0].id; desktop.command({ type: 'open-desktop', id: project });
+  assert.equal(desktop.state().tabs.length, 1); assert.equal(desktop.state().tabs[0].desktop, project);
+  desktop.command({ type: 'delete-project', id: project });
+  assert.equal(desktopCloses.count, 0); assert.equal(desktop.state().tabs.length, 1); assert.equal(desktop.state().tabs[0].desktop, null);
+
+  const extension = notebookBrowser(t), extensionCloses = watchWindowClose(extension);
+  extension.navigate('https://first.example/');
+  const owner = [...extension.sessions.values()].map(target => browserTestExtensions.existingExtensions(target)).find(service => service?.windows.length).windows[0];
+  owner.removeTab(extension.views[0].webContents);
+  assert.equal(extensionCloses.count, 0); assert.equal(extension.state().tabs.length, 1); assert.equal(extension.state().tabs[0].url, '');
+
+  const moved = notebookBrowser(t), movedCloses = watchWindowClose(moved), target = moved.addWindow({ fresh: true, empty: true });
+  moved.navigate('https://first.example/'); const only = moved.state().activeId;
+  assert.throws(() => moved.browser.moveTab(only, target.browser.windowId), /Tab cannot be moved/, 'The only tab stays, so a move never empties its window');
+  moved.command({ type: 'new-tab' }); moved.browser.moveTab(only, target.browser.windowId);
+  assert.equal(movedCloses.count, 0); assert.equal(moved.state().tabs.length, 1); assert.deepEqual(target.state().tabs.map(tab => tab.id), [only]);
+});
+
+test('closing the only visible tab keeps the window while a folded group still holds tabs', t => {
+  const entry = notebookBrowser(t), closes = watchWindowClose(entry);
+  entry.navigate('https://grouped.example/'); const grouped = entry.state().activeId;
+  entry.command({ type: 'create-tab-group', id: grouped }); const group = entry.state().groups[0].id;
+  entry.command({ type: 'new-tab', input: 'https://visible.example/' }); const visible = entry.state().activeId;
+  entry.command({ type: 'set-tab-group-folded', id: group, folded: true });
+  entry.command({ type: 'close-tab', id: visible });
+  assert.equal(closes.count, 0, 'Tabs hidden in a folded group keep the window open');
+  const ids = entry.state().tabs.map(tab => tab.id);
+  assert.ok(ids.includes(grouped), 'The folded group keeps its tab'); assert.equal(ids.length, 2, 'A home tab replaces the closed one');
 });
