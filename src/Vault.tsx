@@ -21,7 +21,14 @@ export function VaultUnlock({ language, describe, onClose, onUnlocked }: { langu
   useEffect(() => { dialog.current?.showModal(); input.current?.focus(); }, []);
   // The field is disabled while the request is pending, so focus can come back only once it is enabled again.
   useEffect(() => { if (failure && !pending) input.current?.focus(); }, [failure, pending]);
-  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }}>
+  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }} onKeyDown={event => {
+      if (event.key !== 'Tab') return;
+      // The dialog is modal, so Tab cycles inside it; the Hub and the Passwords panel around it close on a Tab off their last control.
+      event.stopPropagation();
+      const controls = [...(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? [])];
+      if (!controls.length) { event.preventDefault(); return; }
+      if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) { event.preventDefault(); (event.shiftKey ? controls.at(-1) : controls[0])?.focus(); }
+    }}>
     <form onSubmit={event => {
       event.preventDefault(); if (busy.current) return;
       busy.current = true; setPending(true); setFailure('');
@@ -47,7 +54,14 @@ export function VaultImportPermission({ language, windows, describe, onGranted, 
     busy.current = true; setPending(true); setFailure('');
     window.horizon.command(command).then(async () => { await onGranted(); onClose(); }, (reason: unknown) => setFailure(describe(reason))).finally(() => { busy.current = false; setPending(false); });
   };
-  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-describedby={`${id}-hint`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }}>
+  return <dialog ref={dialog} className="settings-dialog vault-dialog" aria-labelledby={`${id}-title`} aria-describedby={`${id}-hint`} aria-busy={pending} onCancel={event => { event.preventDefault(); if (!busy.current) onClose(); }} onKeyDown={event => {
+      if (event.key !== 'Tab') return;
+      // The dialog is modal, so Tab cycles inside it and never reaches the Hub, which closes on a Tab off its last control.
+      event.stopPropagation();
+      const controls = [...(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? [])];
+      if (!controls.length) { event.preventDefault(); return; }
+      if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) { event.preventDefault(); (event.shiftKey ? controls.at(-1) : controls[0])?.focus(); }
+    }}>
     <form onSubmit={event => {
       event.preventDefault();
       const value = password; setPassword('');
@@ -66,9 +80,10 @@ function VaultBadge({ login }: { login: VaultLogin }) {
   return <span className="browser-site-badge vault-badge" data-profile-color="blue" aria-hidden="true">{loginTitle(login).slice(0, 1).toUpperCase()}</span>;
 }
 
-export function PasswordsPanel({ state, language, opener, run, describe, onDismiss, onAnnounce }: {
+// Embedded, the panel is a page of a popover that already has its title, outside click and Tab handling, and the Escape that closes it.
+export function PasswordsPanel({ state, language, opener, run, describe, onDismiss, onAnnounce, embedded = false }: {
   state: BrowserState; language: Language; opener: RefObject<HTMLButtonElement | null>; run(command: BrowserCommand): Promise<boolean>; describe(reason: unknown): string;
-  onDismiss(focus: boolean): void; onAnnounce(message: string): void;
+  onDismiss(focus: boolean): void; onAnnounce(message: string): void; embedded?: boolean;
 }) {
   const t = (key: CopyKey) => text(key, language), id = useId();
   const panel = useRef<HTMLElement>(null), search = useRef<HTMLInputElement>(null), busy = useRef(false);
@@ -77,11 +92,12 @@ export function PasswordsPanel({ state, language, opener, run, describe, onDismi
   useEffect(() => { void run({ type: 'vault-refresh' }); }, [run]);
   useEffect(() => { (search.current ?? panel.current?.querySelector<HTMLButtonElement>('button:not(:disabled)'))?.focus(); }, [state.vault.unlocked]);
   useEffect(() => {
+    if (embedded) return;
     // The install offer is a dialog of its own, outside the panel; answering it must not close the Passwords panel it came from.
     const outside = (event: PointerEvent) => { if (!panel.current?.contains(event.target as Node) && !opener.current?.contains(event.target as Node) && !(event.target as Element).closest?.('.service-dialog')) onDismiss(false); };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
-  }, [run, onDismiss, opener]);
+  }, [run, onDismiss, opener, embedded]);
   const action: Action = async command => {
     if (busy.current) return false;
     busy.current = true; setPending(true);
@@ -92,13 +108,17 @@ export function PasswordsPanel({ state, language, opener, run, describe, onDismi
     else setUnlock(true);
   };
   const logins = state.vault.logins.filter(item => `${item.title} ${item.username} ${item.origin}`.toLocaleLowerCase(language).includes(filter.toLocaleLowerCase(language)));
-  return <ToolbarPopover opener={opener}><section id="browser-library-panel" className="browser-library-panel vault-panel" ref={panel} role="dialog" aria-labelledby={`${id}-title`} aria-busy={pending} onKeyDown={event => {
+  const lock = state.vault.unlocked && <button className="icon-button" aria-label={t('vaultLock')} title={t('vaultLock')} disabled={pending} onClick={() => { void action({ type: 'vault-lock' }); }}><Lock aria-hidden="true" /></button>;
+  const body = <section id={embedded ? undefined : 'browser-library-panel'} className={`browser-library-panel vault-panel${embedded ? ' embedded' : ''}`} ref={panel} role={embedded ? undefined : 'dialog'} aria-labelledby={embedded ? undefined : `${id}-title`} aria-busy={pending} onKeyDown={event => {
+    // The unlock dialog's own Escape closes only the dialog, never the popover around it.
+    if (event.key === 'Escape' && unlock && embedded) event.stopPropagation();
+    if (embedded) return;
     if (event.key === 'Escape' && !unlock) { event.preventDefault(); event.stopPropagation(); onDismiss(true); }
     if (event.key === 'Tab' && !unlock) {
       const controls = [...(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? [])];
       if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) { event.preventDefault(); onDismiss(true); }
     }
-  }}><div className="browser-panel-title"><h2 id={`${id}-title`}>{t('passwords')}</h2>{state.vault.unlocked && <button className="icon-button" aria-label={t('vaultLock')} title={t('vaultLock')} disabled={pending} onClick={() => { void action({ type: 'vault-lock' }); }}><Lock aria-hidden="true" /></button>}</div>
+  }}>{embedded ? lock && <div className="browser-panel-title vault-lock-row">{lock}</div> : <div className="browser-panel-title"><h2 id={`${id}-title`}>{t('passwords')}</h2>{lock}</div>}
     <p className="vault-status"><Fingerprint aria-hidden="true" /><span>{t(state.vault.unlocked ? state.vault.unlockMethod === 'hello' ? 'vaultUnlockedHello' : 'vaultUnlocked' : 'vaultLocked')}</span></p>
     {state.vault.error && <p className="browser-panel-error" role="alert">{t(state.vault.error)}</p>}
     {state.vault.unlocked ? <>
@@ -116,7 +136,8 @@ export function PasswordsPanel({ state, language, opener, run, describe, onDismi
         : <button className="browser-panel-foot" type="button" onClick={() => setAdding(true)}><span><Plus aria-hidden="true" /></span>{t('vaultAdd')}</button>}
     </> : <><p className="vault-note">{t('vaultUnlockHint')}</p><button className="settings-button" type="button" disabled={pending} onClick={() => { void requestUnlock(); }}><KeyRound aria-hidden="true" />{t('vaultUnlock')}</button></>}
     {unlock && <VaultUnlock language={language} describe={describe} onClose={() => { setUnlock(false); search.current?.focus(); }} onUnlocked={async () => {}} />}
-  </section></ToolbarPopover>;
+  </section>;
+  return embedded ? body : <ToolbarPopover opener={opener}>{body}</ToolbarPopover>;
 }
 
 export function VaultSuggestion({ suggestion, state, language, run, describe }: { suggestion: Suggestion; state: BrowserState; language: Language; run(command: BrowserCommand): Promise<boolean>; describe(reason: unknown): string }) {

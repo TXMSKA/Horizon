@@ -421,6 +421,8 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 }
 
 .toolbar-popover { position: fixed; z-index: calc(var(--layer-overlay) + 1); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); }
+/* The native page view hides only after the page is captured; showing a popover earlier would draw its toolbar part alone. */
+:root[data-popovers-held] .toolbar-popover { opacity: 0; }
 .extensions-popover { display: flex; flex-direction: column; gap: var(--space-8); width: var(--width-menu); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow-y: auto; padding: calc(var(--space-14) - var(--border-width)); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); }
 .extensions-popover h2 { display: flex; align-items: center; height: var(--size-32); color: var(--text-title); font-size: var(--font-16); font-weight: var(--weight-heading); line-height: var(--line-body); }
 .extensions-popover hr { margin: 0; border: 0; border-top: var(--border-width) solid var(--divider); }
@@ -498,11 +500,7 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .hub-content { position: relative; display: flex; flex-direction: column; gap: var(--space-16); height: 100%; overflow-y: auto; scrollbar-width: none; padding: var(--space-16); }
 .hub-popup.hub-fitted-page .hub-content { height: auto; max-height: var(--popup-available-height); }
 .hub-popup:not(.hub-app-page):not(.hub-fitted-page) .hub-content { height: auto; max-height: var(--popup-available-height); padding: var(--space-24); padding-bottom: calc(var(--size-32) + var(--height-sun) + var(--space-16)); }
-.hub-dock { display: flex; flex: none; align-items: center; gap: var(--space-8); height: var(--height-hub-dock); padding: var(--space-8); border-radius: var(--radius-panel); background: var(--surface-sunken); }
-.hub-dock .icon-button { width: var(--size-40); height: var(--size-40); }
-.hub-dock .icon-button svg { width: var(--size-18); height: var(--size-18); }
-.hub-dock [aria-current=page] { background: var(--surface-pressed); color: var(--accent); }
-.hub-page { display: flex; flex-direction: column; gap: var(--space-12); }
+.hub-page { position: relative; display: flex; flex-direction: column; gap: var(--space-12); }
 .hub-nebula { display: flex; flex-direction: column; gap: var(--space-12); }
 .hub-nebula-text { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 .hub-nebula-waiting { display: flex; align-items: center; gap: var(--space-8); color: var(--text-title); font-size: var(--type-body); line-height: var(--line-body); }
@@ -532,10 +530,16 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .hub-nebula-members { display: flex; gap: var(--space-6); padding: 0 var(--space-10); }
 .hub-nebula-member { display: grid; place-items: center; width: var(--size-26); height: var(--size-26); border-radius: 50%; background: var(--surface-pressed); color: var(--text-title); font-size: var(--type-caption); font-weight: var(--weight-emphasis); }
 .hub-nebula hr { width: 100%; margin: 0; border: 0; border-top: var(--border-width) solid var(--divider); }
-.hub-page > h2 { color: var(--text-title); font-size: var(--type-heading); font-weight: var(--weight-heading); line-height: var(--line-heading); }
+.hub-page-heading { display: flex; align-items: center; gap: var(--space-8); }
+.hub-page-heading > h2 { color: var(--text-title); font-size: var(--type-heading); font-weight: var(--weight-heading); line-height: var(--line-heading); }
+.hub-page-heading > .icon-button { margin-inline-start: calc(var(--space-8) * -1); }
+.hub-page .vault-panel.embedded { width: auto; max-width: none; max-height: none; overflow: visible; padding: 0; border: 0; background: none; }
+.hub-page .vault-lock-row { position: absolute; inset-block-start: 0; inset-inline-end: 0; }
 .hub-tiles { display: grid; grid-template-columns: repeat(3, var(--size-hub-tile)); justify-content: center; gap: var(--space-24); }
 /* Four tiles sit two by two, wider apart across than down. */
 .hub-tiles:has(> :nth-child(4)) { grid-template-columns: repeat(2, var(--size-hub-tile)); column-gap: var(--space-40); row-gap: var(--space-20); }
+/* Five or more wrap three across with the last row centred. */
+.hub-tiles:has(> :nth-child(5)) { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-24); }
 .hub-tiles:has(> :only-child) { grid-template-columns: var(--size-hub-tile); }
 .hub-tile { display: flex; flex-direction: column; align-items: center; gap: var(--space-8); width: var(--size-hub-tile); padding: 0; border-radius: var(--radius-panel); font-size: var(--type-caption); line-height: var(--line-caption); color: var(--text-title); }
 .hub-tile-icon { display: grid; place-items: center; width: var(--size-hub-tile); height: var(--size-hub-tile); border: var(--border-width) solid var(--divider); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--accent); }

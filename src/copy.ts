@@ -350,6 +350,8 @@ export const copy = {
   toolbar: { en: 'Toolbar', es: 'Barra de herramientas' },
   hub: { en: 'Hub', es: 'Hub' },
   hubHome: { en: 'Hub Home', es: 'Inicio del Hub' },
+  hubBack: { en: 'Back to Hub', es: 'Volver al Hub' },
+  vault: { en: 'Vault', es: 'Vault' },
   themes: { en: 'Themes', es: 'Temas' },
   fjord: { en: 'Fjord', es: 'Fjord' },
   dune: { en: 'Dune', es: 'Dune' },
