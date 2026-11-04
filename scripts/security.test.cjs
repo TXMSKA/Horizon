@@ -8541,3 +8541,15 @@ test('tabs closed by the system leave a home tab and never close the window', t 
   moved.command({ type: 'new-tab' }); moved.browser.moveTab(only, target.browser.windowId);
   assert.equal(movedCloses.count, 0); assert.equal(moved.state().tabs.length, 1); assert.deepEqual(target.state().tabs.map(tab => tab.id), [only]);
 });
+
+test('closing the only visible tab keeps the window while a folded group still holds tabs', t => {
+  const entry = notebookBrowser(t), closes = watchWindowClose(entry);
+  entry.navigate('https://grouped.example/'); const grouped = entry.state().activeId;
+  entry.command({ type: 'create-tab-group', id: grouped }); const group = entry.state().groups[0].id;
+  entry.command({ type: 'new-tab', input: 'https://visible.example/' }); const visible = entry.state().activeId;
+  entry.command({ type: 'set-tab-group-folded', id: group, folded: true });
+  entry.command({ type: 'close-tab', id: visible });
+  assert.equal(closes.count, 0, 'Tabs hidden in a folded group keep the window open');
+  const ids = entry.state().tabs.map(tab => tab.id);
+  assert.ok(ids.includes(grouped), 'The folded group keeps its tab'); assert.equal(ids.length, 2, 'A home tab replaces the closed one');
+});
