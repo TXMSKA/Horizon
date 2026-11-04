@@ -6519,7 +6519,7 @@ test('address bar parser accepts only existing local HTML files in every support
   const { localHTMLAddress } = require('../dist/electron/launch.js'), { pathToFileURL } = require('node:url');
   const directory = temporaryDirectory(t, 'address-html'), html = join(directory, 'My Page.html'), htm = join(directory, 'old.HTM'); writeFileSync(html, '<html></html>'); writeFileSync(htm, '<html></html>');
   const fileURL = pathToFileURL(html).href, slashes = html.replaceAll('\\', '/');
-  for (const value of [html, slashes, `"${html}"`, `  "${slashes}"  `, fileURL, fileURL.replace('file:///', 'file://localhost/'), 'file:///' + slashes.replace(' ', '%20')]) assert.equal(localHTMLAddress(value), fileURL, value);
+  for (const value of [html, slashes, `"${html}"`, `  "${slashes}"  `, fileURL, fileURL.replace('file:///', 'file://localhost/'), (slashes.startsWith('/') ? 'file://' : 'file:///') + slashes.replace(' ', '%20')]) assert.equal(localHTMLAddress(value), fileURL, value);
   assert.equal(localHTMLAddress(htm), pathToFileURL(htm).href);
   writeFileSync(join(directory, 'notes.txt'), 'x'); mkdirSync(join(directory, 'folder.html'));
   for (const value of [join(directory, 'notes.txt'), join(directory, 'folder.html'), join(directory, 'missing.html'), '\\\\server\\share\\page.html', 'file://server/share/page.html', 'page.html', 'My Page.html', 'https://example.com/', 'javascript:alert(1)', 'data:text/html,x', 'horizon://settings', fileURL + '?x', fileURL + '#x', fileURL + '\u0085', fileURL.replace('Page', 'Pa\tge'), `"${html}`, '""', '', 42]) assert.equal(localHTMLAddress(value), null, String(value));

@@ -34,7 +34,8 @@ export function localHTMLAddress(input: unknown): string | null {
   if (!boundedAddress(value)) return null;
   try {
     if (/^file:\/\//i.test(value)) return isLocalHTMLURL(value) ? pathToFileURL(fileURLToPath(value)).href : null;
-    if (!/^[a-z]:[\\/]/i.test(value)) return null;
+    // Only absolute paths: a drive path on Windows, a path from the root elsewhere.
+    if (!(process.platform === 'win32' ? /^[a-z]:[\\/]/i.test(value) : value.startsWith('/'))) return null;
     const url = launchAddress([value]);
     return url && isLocalHTMLURL(url) ? url : null;
   } catch { return null; }
