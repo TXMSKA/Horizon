@@ -6523,6 +6523,10 @@ test('address bar parser accepts only existing local HTML files in every support
   assert.equal(localHTMLAddress(htm), pathToFileURL(htm).href);
   writeFileSync(join(directory, 'notes.txt'), 'x'); mkdirSync(join(directory, 'folder.html'));
   for (const value of [join(directory, 'notes.txt'), join(directory, 'folder.html'), join(directory, 'missing.html'), '\\\\server\\share\\page.html', 'file://server/share/page.html', 'page.html', 'My Page.html', 'https://example.com/', 'javascript:alert(1)', 'data:text/html,x', 'horizon://settings', fileURL + '?x', fileURL + '#x', fileURL + '\u0085', fileURL.replace('Page', 'Pa\tge'), `"${html}`, '""', '', 42]) assert.equal(localHTMLAddress(value), null, String(value));
+  // A typed absolute .html path that cannot open is refused, never searched, on every platform.
+  const { typedLocalHTMLPath } = require('../dist/electron/launch.js');
+  for (const value of [html, `"${join(directory, 'missing.html')}"`, join(directory, 'OLD.HTM')]) assert.equal(typedLocalHTMLPath(value), true, value);
+  for (const value of [join(directory, 'notes.txt'), 'page.html', 'My Page.html', 'https://example.com/page.html', 'file:///page.html', '', 42]) assert.equal(typedLocalHTMLPath(value), false, String(value));
 });
 
 test('typed local HTML path opens in the current tab with only its exact file authorization', t => {

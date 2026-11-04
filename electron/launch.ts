@@ -25,17 +25,34 @@ export function isLocalHTMLURL(value: unknown): value is string {
   } catch { return false; }
 }
 
-// An address-bar entry that names an existing local HTML file: a drive path (optionally quoted, as Explorer's
-// "Copy as path" yields) or a file URL. Returns the canonical file URL, or null so the normal rules apply.
+// Explorer's "Copy as path" wraps a path in quotes.
+function unquoted(input: string): string {
+  const value = input.trim();
+  return value.length > 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1).trim() : value;
+}
+
+// Only absolute paths: a drive path on Windows, a path from the root elsewhere.
+function absolutePath(value: string): boolean {
+  return process.platform === 'win32' ? /^[a-z]:[\\/]/i.test(value) : value.startsWith('/');
+}
+
+// A typed absolute path to an .html or .htm file, whether or not it exists. One that cannot open is refused
+// rather than searched, so a local file path never reaches a search engine (a Windows drive path already is).
+export function typedLocalHTMLPath(input: unknown): boolean {
+  if (typeof input !== 'string') return false;
+  const value = unquoted(input);
+  return boundedAddress(value) && absolutePath(value) && ['.html', '.htm'].includes(extname(value).toLowerCase());
+}
+
+// An address-bar entry that names an existing local HTML file: an absolute path (optionally quoted) or a file URL.
+// Returns the canonical file URL, or null so the normal rules apply.
 export function localHTMLAddress(input: unknown): string | null {
   if (typeof input !== 'string') return null;
-  let value = input.trim();
-  if (value.length > 2 && value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1).trim();
+  const value = unquoted(input);
   if (!boundedAddress(value)) return null;
   try {
     if (/^file:\/\//i.test(value)) return isLocalHTMLURL(value) ? pathToFileURL(fileURLToPath(value)).href : null;
-    // Only absolute paths: a drive path on Windows, a path from the root elsewhere.
-    if (!(process.platform === 'win32' ? /^[a-z]:[\\/]/i.test(value) : value.startsWith('/'))) return null;
+    if (!absolutePath(value)) return null;
     const url = launchAddress([value]);
     return url && isLocalHTMLURL(url) ? url : null;
   } catch { return null; }

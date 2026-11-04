@@ -36,7 +36,7 @@ import { resolvedDownloadsFolder, resolveLanguage } from './settings';
 import { text } from '../src/copy';
 import { createDefaultBrowser } from './default-browser';
 import type { Updates } from './updates';
-import { isLocalHTMLURL, localHTMLAddress } from './launch';
+import { isLocalHTMLURL, localHTMLAddress, typedLocalHTMLPath } from './launch';
 import { PageMenuSession } from './context-menu';
 import { cleanupPartitions, isProfileId, makeProfile, migrateStore, PROFILE_LIMIT, profileName, profileStorePath, readRegistry, removeProfileDirectory, writeRegistry } from './profiles';
 import type { ProfileRegistry } from './profiles';
@@ -1771,7 +1771,10 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
           if (section) { openSettings(section); break; }
           // A typed local HTML file gets the same exact-file authorization as a launched one; private windows refuse it like launches do.
           const localFile = privateWindow ? null : localHTMLAddress(command.input);
-          if (localFile) load(tab, localFile, true); else load(tab, classifyInput(command.input, settings.searchEngine)); break;
+          if (localFile) load(tab, localFile, true);
+          else if (typedLocalHTMLPath(command.input)) throw new Error('Unsupported address');
+          else load(tab, classifyInput(command.input, settings.searchEngine));
+          break;
         }
         case 'back': if (contents?.navigationHistory.canGoBack()) contents.navigationHistory.goBack(); break;
         case 'forward': if (contents?.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break;
