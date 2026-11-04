@@ -74,8 +74,9 @@ interface TabDestination {
 const profileSessions = new Set<Session>();
 const downloadPaths = new Set<string>();
 export const isProfileSession = (target: Session): boolean => profileSessions.has(target);
-const launchURLs = new WeakMap<WebContents, string>();
-export const isLaunchNavigation = (contents: WebContents, url: string): boolean => launchURLs.get(contents) === url && isLocalHTMLURL(url);
+// Every local HTML file the person opened in a tab stays authorized as an exact file for that tab, so back and forward keep working.
+const launchURLs = new WeakMap<WebContents, Set<string>>();
+export const isLaunchNavigation = (contents: WebContents, url: string): boolean => !!launchURLs.get(contents)?.has(url) && isLocalHTMLURL(url);
 
 interface SessionOwner {
   owns(contents: WebContents | number | null | undefined): boolean;
@@ -977,7 +978,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
       tab.navigating = true;
       clearFavicon(tab, url);
       ensureView(tab);
-      if (launch && isLocalHTMLURL(url)) launchURLs.set(tab.view!.webContents, url);
+      if (launch && isLocalHTMLURL(url)) { const view = tab.view!.webContents, files = launchURLs.get(view) ?? new Set<string>(); files.add(url); launchURLs.set(view, files); }
       tab.state.url = url === 'about:blank' ? '' : url;
       tab.state.title = tab.state.url;
       tab.state.error = null;
@@ -1091,7 +1092,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         const entries = contents?.navigationHistory.getAllEntries() ?? [], index = contents?.navigationHistory.getActiveIndex() ?? -1;
         const url = tab.committedURL ?? entries[index]?.url ?? tab.state.url;
         const originalLaunch = contents && launchURLs.get(contents);
-        const trustedLaunch = originalLaunch === url && isLocalHTMLURL(url);
+        const trustedLaunch = !!originalLaunch?.has(url) && isLocalHTMLURL(url);
         contents?.stopFindInPage('clearSelection');
         tab.findRequest = undefined; tab.state.find = { active: 0, total: 0 }; clearFavicon(tab);
         view.setVisible(false);
@@ -1102,7 +1103,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         ensureView(tab);
         tab.state.error = null;
         const next = page(tab.view)!;
-        if (originalLaunch && isLocalHTMLURL(originalLaunch)) launchURLs.set(next, originalLaunch);
+        if (originalLaunch?.size) launchURLs.set(next, new Set(originalLaunch));
         if (entries.length && index >= 0 && index < entries.length) {
           tab.state.url = entries[index]!.url === 'about:blank' ? '' : entries[index]!.url; tab.state.loading = Boolean(tab.state.url); tab.navigating = true;
           const navigation = tab.navigation;

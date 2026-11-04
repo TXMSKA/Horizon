@@ -6536,6 +6536,14 @@ test('typed local HTML path opens in the current tab with only its exact file au
   assert.equal(isAllowedURL(url), false);
 });
 
+test('typed local HTML files stay authorized in their tab for back and forward, exact files only', t => {
+  const browser = notebookBrowser(t), { pathToFileURL } = require('node:url');
+  const [first, second, untyped] = ['first.html', 'second.html', 'untyped.html'].map(name => join(browser.directory, name)); for (const file of [first, second, untyped]) writeFileSync(file, '<html></html>');
+  browser.command({ type: 'navigate', input: first }); const contents = browser.views.at(-1).webContents; browser.command({ type: 'navigate', input: second });
+  for (const [file, allowed] of [[first, true], [second, true], [untyped, false]]) contents.session.onBeforeRequest({ id: 1, url: pathToFileURL(file).href, resourceType: 'mainFrame', webContentsId: contents.id }, result => assert.equal(result.cancel, !allowed, file));
+  assert.equal(browser.isLaunchNavigation(contents, pathToFileURL(first).href), true); assert.equal(browser.isLaunchNavigation(contents, pathToFileURL(untyped).href), false);
+});
+
 test('typed local HTML path is refused in a private window', t => {
   const browser = notebookBrowser(t, undefined, { browserOptions: { privateWindow: true } }), html = join(browser.directory, 'private.html'); writeFileSync(html, '<html></html>');
   const before = browser.views.length;
