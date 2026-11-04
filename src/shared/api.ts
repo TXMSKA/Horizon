@@ -16,9 +16,9 @@ export type SpaceCommand = { type: 'space-share-project'; project: string; space
 export type VaultTimeout = 'close' | '5' | '15' | '60';
 export interface VaultLogin { id: string; origin: string; title: string; username: string }
 export interface VaultSuggestion { id: string; origin: string; x: number; y: number; width: number; locked: boolean; logins: VaultLogin[] }
-export interface VaultState { available: boolean; created: boolean; unlocked: boolean; importAllowed: boolean; unlockMethod: 'hello' | 'master' | null; timeout: VaultTimeout; logins: VaultLogin[]; suggestion: VaultSuggestion | null; error: 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAILABLE' | null; reason: ServiceReason | null; windows: boolean }
+export interface VaultState { available: boolean; created: boolean; unlocked: boolean; importAllowed: boolean; unlockMethod: 'hello' | 'master' | null; timeout: VaultTimeout; logins: VaultLogin[]; suggestion: VaultSuggestion | null; unlockPrompt: { origin: string } | null; error: 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAILABLE' | null; reason: ServiceReason | null; windows: boolean }
 export type VaultCommand =
-  | { type: 'vault-refresh' | 'vault-lock' | 'vault-hello' | 'vault-dismiss' }
+  | { type: 'vault-refresh' | 'vault-lock' | 'vault-hello' | 'vault-dismiss' | 'vault-ask' | 'vault-cancel' }
   | { type: 'vault-unlock'; password: string }
   | { type: 'vault-import-permission'; password: string }
   | { type: 'vault-import-permission-hello' }
@@ -228,6 +228,20 @@ export type BrowserCommand = AccountCommand | SpaceCommand | VaultCommand | Sync
 export interface ContentArea { top: number; hidden: boolean }
 export interface ExtensionState { id: string; name: string; description: string; version: string; enabled: boolean; pinned: boolean; icon: number[] | null; action?: { title: string; badge: string; icon: number[] | null }; unsupported: string[]; permissions: string[]; failed: boolean }
 export interface ExtensionWarning { requestId: string; id: string; name: string; unsupported: string[]; permissions: string[] }
+
+// The suggestion over a sign-in field lives in a view of its own, above the live page; this is all it may know and ask.
+export interface VaultOverlayState { suggestion: VaultSuggestion | null; windows: boolean; language: Language; theme: Theme; contrast: Contrast }
+export type VaultOverlayCommand = { type: 'vault-dismiss' | 'vault-ask' } | { type: 'vault-fill'; suggestion: string; id: string };
+export interface VaultOverlayAPI {
+  readonly initialTheme: Theme;
+  readonly initialContrast: Contrast;
+  getState(): Promise<VaultOverlayState>;
+  onState(callback: (state: VaultOverlayState) => void): () => void;
+  command(command: VaultOverlayCommand): Promise<void>;
+  // The card's size in its own pixels, once the suggestion with this id is drawn.
+  resize(id: string, width: number, height: number): Promise<void>;
+  onFocus(callback: () => void): () => void;
+}
 
 export interface HorizonAPI {
   readonly initialTheme: Theme;

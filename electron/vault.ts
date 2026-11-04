@@ -3,7 +3,7 @@ import { readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { BrowserWindow, WebContents } from 'electron';
 import type { Client, EntryRow, ImportCount } from 'vault-client' with { 'resolution-mode': 'import' };
-import type { ImportPasswordsResult, VaultCommand, VaultLogin, VaultState, VaultTimeout } from '../src/shared/api';
+import type { ImportPasswordsResult, VaultCommand, VaultLogin, VaultState, VaultSuggestion, VaultTimeout } from '../src/shared/api';
 import { serviceReason } from '../src/shared/services';
 import type { ServiceReason } from '../src/shared/services';
 import type { ReachAnswer } from './services-install';
@@ -16,10 +16,15 @@ import type { PasswordsFormat } from './import-passwords';
 
 // pixels is the display scale: DOM snapshot bounds arrive in device pixels.
 export interface VaultPage { contents: WebContents; generation: number; id: string; zoom: number; pixels?: number; bounds: { x: number; y: number; width: number; height: number } }
+export interface SuggestionRect { x: number; y: number; width: number; height: number }
+// Where the field in view is, in window coordinates, with the boxes of the other inputs a suggestion should stay clear of.
+export interface SuggestionAnchor { field: SuggestionRect; avoid: SuggestionRect[]; page: SuggestionRect }
 interface Options {
   window: BrowserWindow; directory: string; privateWindow: boolean; cipher: StoreCipher; clipboard: Parameters<typeof vaultClipboard>[0];
   page(): VaultPage | null; covered(): boolean; changed(): void; timeout(): VaultTimeout; saveTimeout(value: VaultTimeout): void;
   revealPage(): void;
+  // Shows, moves or removes the suggestion over the live page; the page itself is never hidden for it.
+  present?(suggestion: VaultSuggestion | null, anchor: SuggestionAnchor | null): void;
   connect?: () => Promise<Client>;
   // Called when the person reached a Vault feature and the client says Vault is missing or did not start (never from a sign-in field).
   unavailable?(reason: ServiceReason): void;
@@ -39,6 +44,8 @@ function permissionCode(error: unknown, hello: boolean): string | null {
   return code === 'unavailable' && hello ? 'VAULT_HELLO_UNAVAILABLE' : null;
 }
 const PERMISSION_CODES = ['VAULT_PERMISSION_PASSWORD', 'VAULT_PERMISSION_LIMITED', 'VAULT_HELLO_NOT_SET_UP', 'VAULT_PERMISSION_FORBIDDEN', 'VAULT_HELLO_UNAVAILABLE', 'VAULT_HELLO_FAILED'];
+// The address a page view is at now; a view that cannot say has none.
+const originOf = (page: VaultPage) => { try { return vaultOrigin(page.contents.getURL()); } catch { return null; } };
 const value = (row: EntryRow, id: string) => row.entry.fields.find(field => field.id === id)?.value ?? '';
 export function loginMetadata(rows: EntryRow[], origin: string): VaultLogin[] {
   return rows.filter(row => row.entry.kind === 'login' && vaultOrigin(value(row, 'website')) === origin)
@@ -87,19 +94,34 @@ function errorCode(error: unknown): 'VAULT_UNAVAILABLE' | 'VAULT_STORAGE_UNAVAIL
   return error instanceof Error && error.message === 'VAULT_STORAGE_UNAVAILABLE' ? 'VAULT_STORAGE_UNAVAILABLE' : 'VAULT_UNAVAILABLE';
 }
 export function createVault(options: Options) {
-  const state: VaultState = { available: false, created: false, unlocked: false, importAllowed: false, unlockMethod: null, timeout: options.timeout(), logins: [], suggestion: null, error: null, reason: null, windows: process.platform === 'win32' };
+  const state: VaultState = { available: false, created: false, unlocked: false, importAllowed: false, unlockMethod: null, timeout: options.timeout(), logins: [], suggestion: null, unlockPrompt: null, error: null, reason: null, windows: process.platform === 'win32' };
   removeLegacyIndex(options.directory);
   // The sign-ins found for the field in view exist only here, only while Vault is unlocked.
-  let found: VaultLogin[] = [], client: Client | undefined, connection: Promise<Client> | undefined;
-  let closed = false, working = false, scanning = false, contacted = false, epoch = 0, unlockedAt = 0, suppressed = '';
+  let client: Client | undefined, connection: Promise<Client> | undefined;
+  let closed = false, working = false, scanning = false, again: 'scan' | 'reoffer' | null = null, epoch = 0, unlockedAt = 0;
+  // What Vault last said is kept for a short while, so a field never waits for the service; a failure to reach it is retried with a growing pause, never final.
+  let statusAt = 0, loginsAt = 0, failures = 0, retryAt = 0, contacting: Promise<void> | undefined, wake: NodeJS.Timeout | undefined, reofferNext = false, burstUntil = 0;
   let closeTask: Promise<void> | undefined;
-  let target: { page: VaultPage; fields: LoginFields; id: string } | null = null, lastLookup = '';
+  let target: { page: VaultPage; fields: LoginFields; id: string } | null = null;
+  // The fields whose suggestion was dismissed or used; focusing or clicking one again offers it again.
+  const suppressed = new Set<string>();
+  const focusKey = (page: VaultPage, node: number) => `${page.id}:${page.generation}:${node}`;
   const copied = vaultClipboard(options.clipboard);
-  const publish = () => { if (!closed) { state.timeout = options.timeout(); options.changed(); } };
-  const dismiss = () => { target = null; state.suggestion = null; };
+  // The field's place follows the page: its view offset is read now, so a banner or a resize moves the suggestion without another page inspection.
+  const anchor = (): SuggestionAnchor | null => {
+    if (!target) return null;
+    const live = options.page(), page = live && live.contents === target.page.contents ? live : target.page, pixels = page.pixels ?? 1;
+    const rect = (x: number, y: number, width: number, height: number) => ({ x: page.bounds.x + x / pixels, y: page.bounds.y + y / pixels, width: width / pixels, height: height / pixels });
+    const { fields } = target;
+    return { field: rect(fields.x, fields.y, fields.width, fields.height), avoid: fields.others.map(other => rect(other[0]!, other[1]!, other[2]!, other[3]!)), page: { ...page.bounds } };
+  };
+  const place = () => { if (!closed) options.present?.(state.suggestion ? structuredClone(state.suggestion) : null, state.suggestion ? anchor() : null); };
+  const publish = () => { if (!closed) { state.timeout = options.timeout(); options.changed(); place(); } };
+  const dismiss = () => { target = null; state.suggestion = null; state.unlockPrompt = null; };
+  const refocus = () => { const page = options.page(); if (page && !page.contents.isDestroyed()) page.contents.focus(); };
   // While Vault is locked nothing of it stays in memory: the panel list and the field's sign-ins go, and an open suggestion becomes only the offer to unlock.
   const forget = () => {
-    state.logins = []; found = []; lastLookup = '';
+    state.logins = []; loginsAt = 0;
     if (state.suggestion) state.suggestion = { ...state.suggestion, locked: true, logins: [] };
   };
   const getClient = async () => {
@@ -118,15 +140,17 @@ export function createVault(options: Options) {
         catch (error) { if (--shared.users === 0) connections.delete(options.directory); throw new Unreachable(serviceReason(error)); }
       })();
     }
-    try { client = await connection; state.reason = null; return client; }
+    try { client = await connection; state.reason = null; failures = 0; retryAt = 0; return client; }
     catch (error) { connection = undefined; state.reason = error instanceof Unreachable ? error.reason : serviceReason(error); throw error; }
   };
-  const updateStatus = async (service: Client) => {
+  // background is a refresh nobody asked for: when a command of the person is under way its answer may already be stale, so it is let go.
+  const updateStatus = async (service: Client, background = false) => {
     const status = await service.status();
     if (closed) throw new Error('VAULT_UNAVAILABLE');
-    state.available = true; state.created = status.created; state.error = null;
+    if (background && working) return;
+    state.available = true; state.created = status.created; state.error = null; statusAt = Date.now();
     if (state.unlocked !== status.unlocked) {
-      epoch++; lastLookup = '';
+      epoch++;
       if (status.unlocked) unlockedAt = Date.now();
       else { unlockedAt = 0; state.unlockMethod = null; forget(); }
     }
@@ -136,15 +160,23 @@ export function createVault(options: Options) {
       await service.lock(); epoch++; state.unlocked = false; state.unlockMethod = null; forget(); dismiss();
     }
   };
+  // The sign-ins as display metadata only; a value is asked for one exact origin when it is copied or filled.
+  const statusTtl = 15000, loginsTtl = 30000;
+  const loadLogins = async (service: Client) => {
+    const ticket = epoch, summaries = loginSummaries(await service.listLogins());
+    if (closed || ticket !== epoch) throw new Error('VAULT_PAGE_CHANGED');
+    state.logins = bounded(summaries); loginsAt = Date.now();
+  };
   // Once Vault is unlocked, a suggestion that only offered the unlock shows the sign-ins of its own origin, without waiting for the field to be focused again.
   const reveal = async () => {
     const current = target, shown = state.suggestion;
     if (!current || !shown?.locked || !client || !state.unlocked) return;
     const ticket = epoch;
     try {
-      const rows = await client.logins(current.fields.origin), page = options.page();
-      if (closed || ticket !== epoch || target !== current || state.suggestion !== shown || !page || page.contents !== current.page.contents || page.generation !== current.page.generation || page.id !== current.page.id || vaultOrigin(page.contents.getURL()) !== current.fields.origin) return;
-      found = loginMetadata(rows, current.fields.origin);
+      if (!loginsAt) await loadLogins(client);
+      const page = options.page();
+      if (closed || ticket !== epoch || target !== current || state.suggestion !== shown || !page || page.contents !== current.page.contents || page.generation !== current.page.generation || page.id !== current.page.id || originOf(page) !== current.fields.origin) return;
+      const found = state.logins.filter(item => item.origin === current.fields.origin);
       if (found.length) state.suggestion = { ...shown, locked: false, logins: structuredClone(found) };
       else dismiss();
     } catch { dismiss(); }
@@ -153,66 +185,111 @@ export function createVault(options: Options) {
   const refresh = async () => {
     const service = await getClient(); await updateStatus(service);
     state.importAllowed = await askImportPermission(service);
-    if (state.unlocked) {
-      // Every saved sign-in comes as display metadata only; a value is asked for one exact origin when it is copied or filled.
-      const ticket = epoch, summaries = loginSummaries(await service.listLogins());
-      if (closed || ticket !== epoch) throw new Error('VAULT_PAGE_CHANGED');
-      state.logins = bounded(summaries);
-    }
+    if (state.unlocked) await loadLogins(service);
     await reveal();
     publish();
   };
-  const scan = async () => {
-    if (closed || working || scanning || options.privateWindow) return;
+  // Reaches Vault when there is no connection yet (as soon as a web page is in view, not at the first field) and keeps the cache fresh; one attempt at a time, off the scan.
+  const contact = () => {
+    if (closed || options.privateWindow || contacting || Date.now() < retryAt) return;
+    const stale = Boolean(client) && (Date.now() - statusAt > statusTtl || state.unlocked && Date.now() - loginsAt > loginsTtl);
+    if (client && !stale) return;
+    contacting = (async () => {
+      try {
+        const service = await getClient(); await updateStatus(service, true);
+        if (!working && state.unlocked && Date.now() - loginsAt > loginsTtl) await loadLogins(service);
+        failures = 0; retryAt = 0;
+      } catch { failures++; retryAt = Date.now() + Math.min(30000, 1000 * 2 ** Math.min(failures, 5)); }
+      finally { contacting = undefined; }
+      if (client) await reveal();
+      schedule(0);
+    })();
+  };
+  const schedule = (delay: number, reoffer = false) => {
+    if (closed || options.privateWindow) return;
+    reofferNext ||= reoffer; clearTimeout(wake);
+    wake = setTimeout(() => { const next = reofferNext; reofferNext = false; void scan(next).finally(() => schedule(target ? 200 : Date.now() < burstUntil ? 100 : 400)); }, delay);
+    wake.unref();
+  };
+  const scan = async (reoffer = false): Promise<void> => {
+    if (closed || working || options.privateWindow || state.unlockPrompt) return;
+    if (scanning) { again = reoffer || again === 'reoffer' ? 'reoffer' : 'scan'; return; }
     const page = options.page();
     if (!page || options.covered()) {
-      // The suggestion itself covers a frozen page while chrome receives input.
-      if (target && (!page || target.page.contents !== page.contents || target.page.generation !== page.generation || target.page.id !== page.id || vaultOrigin(page.contents.getURL()) !== target.fields.origin)) { epoch++; dismiss(); publish(); }
+      // A dialog of the chrome covers the page meanwhile.
+      if (target && (!page || target.page.contents !== page.contents || target.page.generation !== page.generation || target.page.id !== page.id || originOf(page) !== target.fields.origin)) { epoch++; dismiss(); publish(); }
       return;
     }
-    const origin = vaultOrigin(page.contents.getURL());
+    const origin = originOf(page);
     if (!origin) return;
+    contact();
     scanning = true;
     try {
       const fields = await inspectLogin(page.contents, origin, false);
       const now = options.page();
       if (!now || page.contents !== now.contents || page.generation !== now.generation || page.id !== now.id || options.covered()) return;
-      const signature = fields ? `${page.id}:${page.generation}:${fields.username}` : '';
-      if (!fields || signature === suppressed) { if (target) { dismiss(); publish(); } return; }
-      if (suppressed && signature !== suppressed) suppressed = '';
-      // The first sign-in field of the session makes the one attempt to reach Vault, in the background. Vault's answer (not installed included)
-      // is final for the sign-in fields: a failure leaves them without any offer and nothing retries it on a later scan. The next scan uses the connection.
-      if (!client && !contacted) { contacted = true; void getClient().catch(() => undefined); }
-      if (client && signature !== lastLookup) {
-        lastLookup = signature;
-        await updateStatus(client);
-        if (state.unlocked) {
-          const ticket = epoch, rows = await client.logins(origin);
-          const current = options.page();
-          if (closed || ticket !== epoch || !current || current.id !== page.id || current.generation !== page.generation || current.contents !== page.contents || options.covered()) return;
-          found = loginMetadata(rows, origin);
-        }
-      }
-      const logins = state.unlocked ? found.filter(item => item.origin === origin) : [];
+      if (!fields) { suppressed.clear(); if (target) { dismiss(); publish(); } return; }
+      const key = focusKey(page, fields.focused);
+      if (reoffer) suppressed.delete(key);
+      if (suppressed.has(key)) { if (target) { dismiss(); publish(); } return; }
+      // Only the very first sight of the sign-ins waits for the service; after that the cache answers and refreshes itself.
+      if (client && state.unlocked && !loginsAt) await loadLogins(client);
+      const logins = state.unlocked ? state.logins.filter(item => item.origin === origin) : [];
       // A locked Vault shows nothing of itself, only the way to unlock it, and only once Horizon has reached a created Vault.
       const locked = !state.unlocked && Boolean(client) && state.available && state.created && !state.error;
       if (!locked && !logins.length) { if (target) { dismiss(); publish(); } return; }
       // DOM snapshot bounds are device pixels; the view's bounds and the chrome's layout are not.
       const pixels = page.pixels ?? 1, chromeZoom = options.window.webContents.getZoomFactor();
       const left = fields.x / pixels, bottom = (fields.y + fields.height) / pixels;
-      const x = (page.bounds.x + left) / chromeZoom, y = (page.bounds.y + bottom) / chromeZoom;
-      if (left < 0 || fields.y < 0 || left >= page.bounds.width || bottom >= page.bounds.height) return;
-      const id = randomUUID(); target = { page, fields, id };
-      state.suggestion = { id, origin, x, y, width: fields.width / pixels / chromeZoom, locked, logins: locked ? [] : structuredClone(logins) };
+      if (left < 0 || fields.y < 0 || left >= page.bounds.width || bottom >= page.bounds.height) { if (target) { dismiss(); publish(); } return; }
+      const x = (page.bounds.x + left) / chromeZoom, y = (page.bounds.y + bottom) / chromeZoom, width = fields.width / pixels / chromeZoom;
+      const shown = state.suggestion;
+      const same = target !== null && shown !== null && target.page.contents === page.contents && target.page.generation === page.generation && target.page.id === page.id && target.fields.focused === fields.focused
+        && shown.origin === origin && shown.locked === locked && shown.logins.length === logins.length && shown.logins.every((item, index) => item.id === logins[index]!.id);
+      target = { page, fields, id: same ? target!.id : randomUUID() };
+      if (same) { state.suggestion = { ...shown, x, y, width }; place(); return; }
+      state.suggestion = { id: target.id, origin, x, y, width, locked, logins: locked ? [] : structuredClone(logins) };
       publish();
-    } catch { if (target) { dismiss(); publish(); } } // Unreadable pages never get a suggestion.
-    finally { scanning = false; }
+    } catch (error) {
+      // A page another tool is reading for a moment keeps what is shown; the next look settles it. Unreadable pages never get a suggestion.
+      if (target && !(error instanceof Error && error.message === 'VAULT_PAGE_UNAVAILABLE')) { dismiss(); publish(); }
+    }
+    finally {
+      scanning = false;
+      if (again) { const next = again; again = null; schedule(0, next === 'reoffer'); }
+    }
+  };
+  // Fills one sign-in of the suggestion in view. The values are read now, for this one origin, and go straight into the page.
+  const fillInto = async (service: Client, selected: NonNullable<typeof target>, id: string) => {
+    const ticket = epoch;
+    const check = () => { if (closed || ticket !== epoch || !state.unlocked) throw new Error('VAULT_PAGE_CHANGED'); };
+    const checkPage = () => {
+      check(); const page = options.page();
+      if (!page || page.contents !== selected.page.contents || page.id !== selected.page.id || page.generation !== selected.page.generation) throw new Error('VAULT_PAGE_CHANGED');
+      assertVaultPage(page.contents, selected.fields.origin, options.privateWindow);
+    };
+    checkPage();
+    const rows = await service.logins(selected.fields.origin); checkPage();
+    const row = rows.find(row => row.entry.id === id && row.entry.kind === 'login' && vaultOrigin(value(row, 'website')) === selected.fields.origin);
+    if (!row) throw new Error('VAULT_PAGE_CHANGED');
+    options.revealPage(); selected.page.contents.focus();
+    await fillLogin(selected.page.contents, selected.fields, { username: value(row, 'username'), password: value(row, 'password') }, options.privateWindow, checkPage);
+    for (const node of [selected.fields.focused, selected.fields.username, selected.fields.password]) if (node) suppressed.add(focusKey(selected.page, node));
+    dismiss(); publish();
   };
   const run = async (command: VaultCommand): Promise<void> => {
     if (closed || options.privateWindow) throw new Error('VAULT_UNAVAILABLE');
-    if (command.type === 'vault-dismiss') {
-      suppressed = target ? `${target.page.id}:${target.page.generation}:${target.fields.username}` : '';
-      epoch++; dismiss(); publish(); return;
+    if (command.type === 'vault-dismiss' || command.type === 'vault-cancel') {
+      // A dialog that closed after its unlock has nothing left to cancel.
+      if (command.type === 'vault-cancel' && !state.unlockPrompt) return;
+      // The field stays quiet until the person focuses or clicks it again.
+      if (target) suppressed.add(focusKey(target.page, target.fields.focused));
+      epoch++; dismiss(); publish(); refocus(); return;
+    }
+    if (command.type === 'vault-ask') {
+      // The chrome shows one dialog for the locked suggestion; the suggestion itself gives way to it.
+      if (!target || !state.suggestion?.locked) throw new Error('VAULT_PAGE_CHANGED');
+      state.unlockPrompt = { origin: target.fields.origin }; publish(); return;
     }
     if (command.type === 'vault-lock') {
       // Lock can interrupt a value request. It must not queue behind a pending fill.
@@ -244,8 +321,17 @@ export function createVault(options: Options) {
           else await (command.type === 'vault-import-permission' ? service.permissions.importWithPassword(command.password) : service.permissions.importWithHello(windowHandle()));
         } catch (error) { const mapped = permissionCode(error, hello); throw mapped ? new Error(mapped) : error; }
         if (closed || ticket !== epoch) throw new Error('VAULT_PAGE_CHANGED');
-        epoch++; lastLookup = ''; state.unlocked = true; unlockedAt = Date.now(); state.unlockMethod = hello ? 'hello' : 'master';
+        epoch++; state.unlocked = true; unlockedAt = Date.now(); state.unlockMethod = hello ? 'hello' : 'master';
+        const asked = state.unlockPrompt;
         await refresh();
+        // The unlock was asked from a sign-in field: the one sign-in of this site goes in at once; several are offered to choose from.
+        if (asked) {
+          state.unlockPrompt = null;
+          const selected = target, shown = state.suggestion;
+          if (selected && shown && !shown.locked && shown.logins.length === 1 && selected.fields.origin === asked.origin) {
+            try { await fillInto(service, selected, shown.logins[0]!.id); } catch { dismiss(); publish(); }
+          } else publish();
+        }
       } else if (command.type === 'vault-refresh') await refresh();
       else {
         await updateStatus(service);
@@ -255,18 +341,7 @@ export function createVault(options: Options) {
         if (command.type === 'vault-fill') {
           const selected = target;
           if (!selected || selected.id !== command.suggestion || !state.suggestion?.logins.some(item => item.id === command.id)) throw new Error('VAULT_PAGE_CHANGED');
-          const checkPage = () => {
-            check(); const page = options.page();
-            if (!page || page.contents !== selected.page.contents || page.id !== selected.page.id || page.generation !== selected.page.generation) throw new Error('VAULT_PAGE_CHANGED');
-            assertVaultPage(page.contents, selected.fields.origin, options.privateWindow);
-          };
-          checkPage();
-          const rows = await service.logins(selected.fields.origin); checkPage();
-          const row = rows.find(row => row.entry.id === command.id && row.entry.kind === 'login' && vaultOrigin(value(row, 'website')) === selected.fields.origin);
-          if (!row) throw new Error('VAULT_PAGE_CHANGED');
-          options.revealPage(); selected.page.contents.focus();
-          await fillLogin(selected.page.contents, selected.fields, { username: value(row, 'username'), password: value(row, 'password') }, options.privateWindow, checkPage);
-          suppressed = `${selected.page.id}:${selected.page.generation}:${selected.fields.username}`; dismiss(); publish();
+          check(); await fillInto(service, selected, command.id);
         } else if (command.type === 'vault-copy') {
           if (!state.logins.some(item => item.id === command.id && item.origin === command.origin)) throw new Error('VAULT_PAGE_CHANGED');
           const rows = await service.logins(command.origin); check();
@@ -340,8 +415,7 @@ export function createVault(options: Options) {
     await refresh().catch(() => undefined);
     return { imported: count.imported, duplicates: count.duplicates, skipped: count.skipped };
   };
-  const scanner = options.privateWindow ? undefined : setInterval(() => { void scan(); }, 750);
-  scanner?.unref();
+  schedule(400);
   const statusTimer = options.privateWindow ? undefined : setInterval(() => {
     if (client && !working && !closed) void updateStatus(client).then(reveal).then(publish).catch(() => { state.unlocked = false; forget(); state.error = 'VAULT_UNAVAILABLE'; epoch++; publish(); });
   }, 20000);
@@ -353,12 +427,19 @@ export function createVault(options: Options) {
     catch { publish(); return state.reason ?? 'did_not_start'; }
   };
   return {
-    state: () => structuredClone(state), status: () => ({ available: state.available, reason: state.reason }), run, scan, importPasswords, reach, hasSession: () => Boolean(connection),
+    state: () => structuredClone(state), status: () => ({ available: state.available, reason: state.reason }), run, scan: (reoffer = false) => scan(reoffer), importPasswords, reach, hasSession: () => Boolean(connection),
+    // A page is in view or something in it moved or was pressed: look at the field soon, instead of at the next poll. The cache is refreshed in the background.
+    nudge(delay = 40, reoffer = false) { burstUntil = Date.now() + 2000; schedule(delay, reoffer); },
+    navigated() { statusAt = 0; if (loginsAt) loginsAt = 1; burstUntil = Date.now() + 3000; contact(); schedule(120); },
+    // The view moved (a banner, a resize): the suggestion follows without another inspection.
+    reposition() { if (target) place(); },
+    // True while a suggestion is up, so the chrome can route Escape to it.
+    offering: () => Boolean(state.suggestion),
     invalidate() { epoch++; dismiss(); publish(); },
     close(): Promise<void> {
       if (closeTask) return closeTask;
       closeTask = (async () => {
-        closed = true; epoch++; clearInterval(scanner); clearInterval(statusTimer); dismiss(); forget();
+        closed = true; epoch++; clearTimeout(wake); clearInterval(statusTimer); dismiss(); forget(); options.present?.(null, null);
         try { await copied.clear(); } catch { /* Presence must still leave if the clipboard is unavailable. */ }
         if (!connection) return;
         try {

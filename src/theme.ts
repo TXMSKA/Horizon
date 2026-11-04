@@ -1,7 +1,9 @@
 import type { Contrast, Theme } from './shared/api';
 
-let theme: Theme = window.horizon.initialTheme;
-let contrast: Contrast = window.horizon.initialContrast;
+// The chrome and the suggestion's view both start from the theme the main process passed them.
+const starting = window.horizon ?? window.horizonVault;
+let theme: Theme = starting.initialTheme;
+let contrast: Contrast = starting.initialContrast;
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
 const systemContrast = matchMedia('(forced-colors: active)');
 export function applyTheme(value: Theme, pair: Contrast): void {

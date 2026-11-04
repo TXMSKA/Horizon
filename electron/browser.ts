@@ -1,4 +1,5 @@
 import { createVault } from './vault';
+import { createVaultOverlay } from './vault-overlay';
 import { createAccount } from './account';
 import { sharedItemId } from './space-reader';
 import type { VaultCommand } from '../src/shared/api';
@@ -218,18 +219,38 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
     const tab = current().active()?.state;
     window.setTitle(tab?.url && tab.url !== 'about:blank' ? `${tab.title || tab.url} - Horizon` : 'Horizon');
     window.webContents.send(IPC.stateChanged, state());
+    overlay?.refresh();
   };
+  // The sign-in suggestion is a view of its own above the live page, so the page stays visible, current and clickable while it shows.
+  let overlay: ReturnType<typeof createVaultOverlay> | undefined;
   const vault = createVault({ window, directory: userData, privateWindow, cipher: safeStorage, clipboard,
     timeout: () => settings.vaultTimeout ?? 'close', saveTimeout: value => settings.setVaultTimeout(value), changed: publish,
     covered: () => area.hidden,
     unavailable: reason => services.unavailable('vault', reason, () => { void vault.run({ type: 'vault-refresh' }).catch(() => undefined); }),
     revealPage: () => { area = { ...area, hidden: false }; layout(); },
+    present: (suggestion, anchor) => (suggestion ? ensureOverlay() : overlay)?.present(suggestion, anchor),
     page: () => {
       const runtime = current(), tab = runtime?.active(), contents = runtime?.page(tab?.view);
       if (!tab?.view || !contents || tab.navigating || tab.state.loading || tab.state.error || tab.state.settings || tab.state.desktop || tab.state.fullscreen) return null;
       return { contents, generation: tab.pageLoad, id: tab.state.id, bounds: tab.view.getBounds(), zoom: contents.getZoomFactor(), pixels: screen.getDisplayMatching(window.getContentBounds()).scaleFactor };
     },
   });
+  // The view is made when the window starts and again if a suggestion needs it; a failure to make it leaves the browser as it was.
+  const ensureOverlay = () => {
+    if (!overlay && !privateWindow && !window.isDestroyed()) {
+      try {
+        overlay = createVaultOverlay({
+          window, preload: resolve(__dirname, 'vault-overlay-preload.js'), theme: settings.theme, contrast: nativeTheme.shouldUseHighContrastColors ? 'high' : settings.contrast,
+          info: () => ({ windows: process.platform === 'win32', language: resolveLanguage(settings.language, app.getLocale()), theme: settings.theme, contrast: nativeTheme.shouldUseHighContrastColors ? 'high' : settings.contrast }),
+          run: command => vault.run(command), covered: () => area.hidden,
+        });
+      } catch { overlay = undefined; }
+    }
+    return overlay;
+  };
+  ensureOverlay();
+  // A resized window moves the field, and so the suggestion, without any page event.
+  for (const event of ['resize', 'maximize', 'unmaximize', 'restore', 'enter-full-screen', 'leave-full-screen'] as const) window.on(event as 'resize', () => { vault.reposition(); vault.nudge(80); });
   const connectLyra = async () => {
     const { connect } = await import('horizon-lyra');
     return connect({ app: { id: 'horizon', name: 'Horizon', kind: 'cosmic' }, tokens: sealedLyraTokens(resolve(userData, 'lyra.token'), safeStorage) });
@@ -860,6 +881,8 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         tab.view.setBounds({ x: 0, y, width: Math.max(0, width - panelWidth), height: Math.max(0, height - y) });
         tab.view.setVisible(isCurrent() && tab.state.id === activeId && Boolean(tab.state.url) && !tab.state.desktop && !tab.state.settings && !area.hidden && !tab.state.error && !tab.cosmeticPending && y < height);
       }
+      // A banner, a panel or a resize moved the page view: the suggestion follows it.
+      vault.reposition(); overlay?.refresh();
     };
     const update = () => { for (const tab of tabs) page(tab.view)?.emit('tab-updated'); persistSession(); layout(); publish(); };
     const host: TabHost = { translation: tab => ({
@@ -1280,6 +1303,21 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
         event.preventDefault();
         dispatchShortcut(shortcut);
       });
+      // The pointer and the keyboard tell when a field may have taken or lost focus; no script runs in the page.
+      on('before-input-event', (event, input) => {
+        if (privateWindow || tab.view !== view || !isCurrent() || tab.state.id !== activeId || input.type !== 'keyDown' || input.isComposing) return;
+        if (input.key === 'Escape' && vault.offering()) { void vault.run({ type: 'vault-dismiss' }).catch(() => undefined); return; }
+        // Arrow down moves into the suggestion, like the list of a browser's own autofill.
+        if (input.key === 'ArrowDown' && !input.alt && !input.control && !input.meta && vault.offering() && overlay?.visible()) { event.preventDefault(); overlay.focus(); return; }
+        if (input.key === 'Tab') vault.nudge(60, true);
+      });
+      on('before-mouse-event', (_event, mouse) => {
+        if (privateWindow || tab.view !== view || !isCurrent() || tab.state.id !== activeId) return;
+        const kind: string = mouse.type;
+        if (kind === 'mouseDown') vault.nudge(40, true); else if (kind === 'mouseWheel') vault.nudge(60);
+      });
+      on('did-finish-load', () => { if (tab.view === view && isCurrent() && tab.state.id === activeId && !privateWindow) vault.navigated(); });
+      on('did-navigate-in-page', () => { if (tab.view === view && isCurrent() && tab.state.id === activeId && !privateWindow) vault.navigated(); });
       on('zoom-changed', (_event, direction) => { if (tab.view === view && isCurrent() && tab.state.id === activeId) zoom(tab, direction === 'in' ? 1 : -1); });
     }
 
@@ -2099,7 +2137,7 @@ export function createBrowser(window: BrowserWindow, userData: string, downloads
   const chromeContents = window.webContents;
   window.on('closed', () => {
     cancelExtensionDecision();
-    closing = true; invalidateMenu(); services.close(); void vault.close().catch(() => undefined);
+    closing = true; invalidateMenu(); services.close(); void vault.close().catch(() => undefined); overlay?.dispose();
     blocker.stop();
     nativeTheme.removeListener('updated', systemDarkPages);
     for (const runtime of runtimes.values()) runtime.dispose();
