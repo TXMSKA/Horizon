@@ -6502,7 +6502,7 @@ test('local HTML launch authorizes only its exact tab main-frame URL and survive
   browser.openLaunch(url); const first = browser.views.at(-1).webContents, target = first.session;
   assert.equal(browser.isLaunchNavigation(first, url), true); assert.equal(browser.isLaunchNavigation(first, unrelated), false);
   for (const [address, type, allowed] of [[url, 'mainFrame', true], [unrelated, 'mainFrame', false], [url, 'subFrame', false], [url, 'image', false]]) target.onBeforeRequest({ id: 1, url: address, resourceType: type, webContentsId: first.id }, result => assert.equal(result.cancel, !allowed));
-  assert.equal(isAllowedURL(url), false); assert.throws(() => browser.command({ type: 'navigate', input: url }));
+  assert.equal(isAllowedURL(url), false); assert.throws(() => browser.command({ type: 'navigate', input: pathToFileURL(join(browser.directory, 'missing.html')).href }));
   const handlers = {}; hardenContents({ on: (name, fn) => { handlers[name] = fn; }, setWindowOpenHandler() {} }, true, address => browser.isLaunchNavigation(first, address));
   for (const [address, main, allowed] of [[url, true, true], [unrelated, true, false], [url, false, false]]) {
     let prevented = false; handlers['will-frame-navigate']({ url: address, isMainFrame: main, preventDefault() { prevented = true; } }); assert.equal(prevented, !allowed);
@@ -6510,6 +6510,45 @@ test('local HTML launch authorizes only its exact tab main-frame URL and survive
   browser.command({ type: 'dark-pages', value: 'on' }); const replacement = browser.views.at(-1).webContents;
   assert.notEqual(first, replacement); assert.equal(browser.isLaunchNavigation(replacement, url), true); assert.equal(browser.isLaunchNavigation(replacement, unrelated), false);
   assert.deepEqual(browser.state().store.history, []);
+});
+
+test('address bar parser accepts only existing local HTML files in every supported spelling', t => {
+  const { localHTMLAddress } = require('../dist/electron/launch.js'), { pathToFileURL } = require('node:url');
+  const directory = temporaryDirectory(t, 'address-html'), html = join(directory, 'My Page.html'), htm = join(directory, 'old.HTM'); writeFileSync(html, '<html></html>'); writeFileSync(htm, '<html></html>');
+  const fileURL = pathToFileURL(html).href, slashes = html.replaceAll('\\', '/');
+  for (const value of [html, slashes, `"${html}"`, `  "${slashes}"  `, fileURL, fileURL.replace('file:///', 'file://localhost/'), 'file:///' + slashes.replace(' ', '%20')]) assert.equal(localHTMLAddress(value), fileURL, value);
+  assert.equal(localHTMLAddress(htm), pathToFileURL(htm).href);
+  writeFileSync(join(directory, 'notes.txt'), 'x'); mkdirSync(join(directory, 'folder.html'));
+  for (const value of [join(directory, 'notes.txt'), join(directory, 'folder.html'), join(directory, 'missing.html'), '\\\\server\\share\\page.html', 'file://server/share/page.html', 'page.html', 'My Page.html', 'https://example.com/', 'javascript:alert(1)', 'data:text/html,x', 'horizon://settings', fileURL + '?x', fileURL + '#x', fileURL + '\u0085', fileURL.replace('Page', 'Pa\tge'), `"${html}`, '""', '', 42]) assert.equal(localHTMLAddress(value), null, String(value));
+});
+
+test('typed local HTML path opens in the current tab with only its exact file authorization', t => {
+  const browser = notebookBrowser(t), { pathToFileURL } = require('node:url'), html = join(browser.directory, 'typed.html'), other = join(browser.directory, 'other.html'); writeFileSync(html, '<html></html>'); writeFileSync(other, '<html></html>');
+  const url = pathToFileURL(html).href, unrelated = pathToFileURL(other).href;
+  browser.command({ type: 'navigate', input: 'https://example.com/' }); const tabs = browser.state().tabs.length;
+  browser.command({ type: 'navigate', input: `"${html}"` });
+  const contents = browser.views.at(-1).webContents, target = contents.session;
+  assert.equal(browser.state().tabs.length, tabs); assert.equal(contents.mainFrame.url, url);  assert.equal(browser.isLaunchNavigation(contents, url), true); assert.equal(browser.isLaunchNavigation(contents, unrelated), false);
+  for (const [address, type, allowed] of [[url, 'mainFrame', true], [unrelated, 'mainFrame', false], [url, 'subFrame', false], [url, 'image', false]]) target.onBeforeRequest({ id: 1, url: address, resourceType: type, webContentsId: contents.id }, result => assert.equal(result.cancel, !allowed));
+  for (const input of [html.replaceAll('\\', '/'), url]) { browser.command({ type: 'navigate', input }); assert.equal(browser.views.at(-1).webContents.mainFrame.url, url); }
+  for (const input of ['file:///C:/Windows/win.ini', join(browser.directory, 'missing.html'), 'javascript:alert(1)']) assert.throws(() => browser.command({ type: 'navigate', input }), input);
+  // A UNC path keeps its existing meaning (plain text, so a search) and never gains file authorization.
+  browser.command({ type: 'navigate', input: '\\\\server\\share\\page.html' }); assert.ok(browser.views.at(-1).webContents.mainFrame.url.startsWith('https://'));
+  assert.equal(isAllowedURL(url), false);
+});
+
+test('typed local HTML files stay authorized in their tab for back and forward, exact files only', t => {
+  const browser = notebookBrowser(t), { pathToFileURL } = require('node:url');
+  const [first, second, untyped] = ['first.html', 'second.html', 'untyped.html'].map(name => join(browser.directory, name)); for (const file of [first, second, untyped]) writeFileSync(file, '<html></html>');
+  browser.command({ type: 'navigate', input: first }); const contents = browser.views.at(-1).webContents; browser.command({ type: 'navigate', input: second });
+  for (const [file, allowed] of [[first, true], [second, true], [untyped, false]]) contents.session.onBeforeRequest({ id: 1, url: pathToFileURL(file).href, resourceType: 'mainFrame', webContentsId: contents.id }, result => assert.equal(result.cancel, !allowed, file));
+  assert.equal(browser.isLaunchNavigation(contents, pathToFileURL(first).href), true); assert.equal(browser.isLaunchNavigation(contents, pathToFileURL(untyped).href), false);
+});
+
+test('typed local HTML path is refused in a private window', t => {
+  const browser = notebookBrowser(t, undefined, { browserOptions: { privateWindow: true } }), html = join(browser.directory, 'private.html'); writeFileSync(html, '<html></html>');
+  const before = browser.views.length;
+  assert.throws(() => browser.command({ type: 'navigate', input: html })); assert.equal(browser.views.length, before);
 });
 
 function settingsMain(t, options) {
