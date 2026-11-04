@@ -45,7 +45,7 @@ const LyraPanel = lazy(() => import('./Lyra').then(module => ({ default: module.
 
 type Panel = LibraryPanel | 'passwords' | null;
 const PasswordsPanel = lazy(() => import('./Vault').then(module => ({ default: module.PasswordsPanel })));
-const VaultSuggestion = lazy(() => import('./Vault').then(module => ({ default: module.VaultSuggestion })));
+const VaultUnlock = lazy(() => import('./Vault').then(module => ({ default: module.VaultUnlock })));
 const BrowserPanel = lazy(() => import('./BrowserPanel').then(module => ({ default: module.BrowserPanel })));
 const sites = {
   wikipedia: 'https://www.wikipedia.org/', youtube: 'https://www.youtube.com/',
@@ -174,8 +174,9 @@ export function App({ language: initialLanguage }: { language: Language }) {
   const showCaptureHint = captureHint && state?.showCapture !== false && !desktopMode && !pageCapturePending;
   const popover = extensionsOpen || Boolean(state?.extensionWarning) || Boolean(serviceDialog) || Boolean(groupEditor) || favoritesOpen || showCaptureHint || Boolean(desktopNotice) || desktopModalOpen || Boolean(panel) || aboutOpen || firstRunOpen || Boolean(hubPage) || menuOpen || Boolean(profileOpen) || Boolean(desktopMode) || suggestionsOpen || Boolean(contextMenu) || Boolean(tabMenu) || shieldOpen || permissionOpen;
   const translationMenuShowing = translateOptions && Boolean(translation) && !popover;
-  const vaultSuggestion = !state?.privateWindow && !popover && !translationMenuShowing && !findOpen ? state?.vault.suggestion : null;
-  const covered = popover || translationMenuShowing || Boolean(vaultSuggestion);
+  // The suggestion over a sign-in field is a view of its own above the live page; only the dialog that unlocks Vault covers the page.
+  const vaultPrompt = !state?.privateWindow && !popover && !translationMenuShowing && !findOpen ? state?.vault.unlockPrompt : null;
+  const covered = popover || translationMenuShowing || Boolean(vaultPrompt);
   const hidden = Boolean(panel || covered);
   const pageShowing = Boolean(activeUrl && !active?.desktop && !active?.settings && activeUrl !== LYRA_ADDRESS && !active?.error && (!active?.fullscreen || popover));
   const totalBlocked = active ? blockedTotal(active.blocked) : 0;
@@ -778,7 +779,7 @@ export function App({ language: initialLanguage }: { language: Language }) {
     }} onNew={() => setProfileOpen('new')} onManage={() => openSettings('profiles')} onPrivate={() => { setProfileOpen(null); profileButtonRef.current?.focus(); void run({ type: 'new-private-window' }); }} />}
     {profileOpen === 'new' && state && !state.privateWindow && <NewProfilePopover state={state} language={language} opener={profileButtonRef} onCancel={() => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); profileButtonRef.current?.focus(); }} onSuccess={name => { setProfileOpen(null); setHubPage(null); setLyraOpen(false); setAnnouncement(t('createdProfile').replace('{name}', name)); profileButtonRef.current?.focus(); }} />}
     {menuOpen && <BrowserMenu privateWindow={state?.privateWindow ?? false} syncConflicts={!state?.privateWindow && Boolean(state?.sync.conflicts.length)} language={language} active={active} canReopen={state?.canReopenTab ?? false} keyboard={menuByKeyboard.current} opener={menuButtonRef} onDismiss={focus => { setMenuOpen(false); if (focus) menuButtonRef.current?.focus(); }} onShortcut={action => { setMenuOpen(false); if (action === 'new-window' || action === 'new-private-window') menuButtonRef.current?.focus(); shortcut(action); }} onPanel={openPanel} onExtensions={() => { setMenuOpen(false); setExtensionsOpen(true); }} onSettings={() => openSettings('general')} onAbout={() => { setMenuOpen(false); setAboutOpen(true); }} run={run} />}
-    <Suspense fallback={null}>{vaultSuggestion && state && <VaultSuggestion key={vaultSuggestion.id} suggestion={vaultSuggestion} state={state} language={language} run={run} describe={reason => settingsError(reason, language)} />}
+    <Suspense fallback={null}>{vaultPrompt && state && <VaultUnlock language={language} windows={state.vault.windows} site={new URL(vaultPrompt.origin).host} describe={reason => settingsError(reason, language)} onUnlocked={async () => {}} onClose={() => { void run({ type: 'vault-cancel' }); }} />}
     {panel === 'passwords' && state && <PasswordsPanel state={state} language={language} opener={menuButtonRef} run={run} describe={reason => settingsError(reason, language)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}</Suspense>
     {panel === 'bookmarks' && state && <FavoritesPanel key={state.activeProfileId} state={state} language={language} opener={menuButtonRef} undo={undo} onRestore={() => { dismissUndo(); void run({ type: 'restore', kind: 'bookmarks' }); }} onDelete={destructive} run={run} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}
     <Suspense fallback={null}>{panel && panel !== 'bookmarks' && panel !== 'passwords' && state && <BrowserPanel key={state.activeProfileId + ':' + panel} panel={panel} state={state} language={language} opener={menuButtonRef} favicons={favicons} undo={undo} onRestore={() => { if (undo) { const kind = undo.kind; dismissUndo(); void run({ type: 'restore', kind }); } }} onDelete={destructive} run={run} onNavigate={navigate} onBrowse={focusAddress} onClear={() => openSettings('privacy', true)} onDismiss={focus => { setPanel(null); if (focus) menuButtonRef.current?.focus(); }} onAnnounce={setAnnouncement} />}</Suspense>

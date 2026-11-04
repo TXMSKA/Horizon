@@ -85,7 +85,7 @@ function validatedCommand(value: unknown, profileIds?: ReadonlySet<string>, proj
   if (typeof type === 'string' && (type.startsWith('vault-') || type === 'set-vault-timeout')) {
     let fields: string[] = [], valid = false;
     switch (type) {
-      case 'vault-refresh': case 'vault-lock': case 'vault-hello': case 'vault-dismiss': case 'vault-import-permission-hello': valid = true; break;
+      case 'vault-refresh': case 'vault-lock': case 'vault-hello': case 'vault-dismiss': case 'vault-ask': case 'vault-cancel': case 'vault-import-permission-hello': valid = true; break;
       case 'set-vault-timeout': fields = ['value']; valid = isVaultTimeout(command.value); break;
       case 'vault-unlock': case 'vault-import-permission': fields = ['password']; valid = string(command.password, 128); break;
       case 'vault-fill': fields = ['suggestion', 'id']; valid = string(command.suggestion, 128) && string(command.id, 128); break;

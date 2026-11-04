@@ -919,6 +919,17 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .vault-form-field { display: flex; flex-direction: column; gap: var(--space-6); font-size: var(--type-label); }
 .vault-form-field input { width: 100%; min-height: var(--size-36); padding: var(--space-8) var(--space-10); border: var(--border-width) solid var(--border-control); border-radius: var(--radius-small); background: var(--surface-field); color: var(--text-title); }
 .vault-suggestion { position: fixed; z-index: var(--layer-overlay); display: flex; flex-direction: column; gap: var(--space-6); width: var(--width-vault-suggestion); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: calc(100vh - var(--toolbar-popup-edge) * 2); overflow-y: auto; padding: var(--space-10); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--text-title); }
+/* The suggestion's own view is transparent around the card; the card is the whole of what covers the page. */
+:root[data-vault-overlay], :root[data-vault-overlay] body { background: transparent; }
+.vault-suggestion.vault-overlay-card { position: static; box-sizing: border-box; width: var(--width-vault-suggestion); max-width: none; max-height: none; overflow: visible; }
+.vault-dialog h2 { display: flex; align-items: center; gap: var(--space-10); }
+.vault-dialog h2 > svg { flex: none; width: var(--icon-control); height: var(--icon-control); color: var(--accent); }
+.vault-hello { width: 100%; height: var(--size-36); }
+.vault-divider { display: flex; align-items: center; gap: var(--space-10); margin: 0; color: var(--text-secondary); font-size: var(--type-caption); }
+.vault-divider::before, .vault-divider::after { content: ''; flex: 1; height: var(--border-width); background: var(--border-control); }
+.vault-form-field input[aria-invalid=true] { border-color: var(--text-error); }
+.vault-error { display: flex; align-items: flex-start; gap: var(--space-8); margin: 0; padding: var(--space-8) var(--space-10); border-radius: var(--radius-small); background: var(--surface-error); color: var(--text-error); font-size: var(--type-caption); line-height: var(--line-caption); }
+.vault-error > svg { flex: none; width: var(--icon-control); height: var(--icon-control); margin-top: var(--space-2, 0); }
 .vault-heading { display: flex; align-items: center; gap: var(--space-10); padding-inline-start: var(--space-10); font-size: var(--type-label); }
 .vault-heading > svg { width: var(--icon-control); height: var(--icon-control); color: var(--accent); }
 .vault-heading > strong { flex: 1; }

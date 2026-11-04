@@ -4,7 +4,7 @@ import { Check, LoaderCircle } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { SEARCH_ENGINES } from './shared/api';
-import type { ImportBrowser, ImportPasswordsFile, ImportPasswordsResult, ImportProfile, ImportProgress, ImportResult, ImportSettingName, ImportSettingsSummary, ImportSource, Language, VaultCommand, VaultState } from './shared/api';
+import type { ImportBrowser, ImportPasswordsFile, ImportPasswordsResult, ImportProfile, ImportProgress, ImportResult, ImportSettingName, ImportSettingsSummary, ImportSource, Language, VaultState } from './shared/api';
 import { VaultImportPermission, VaultUnlock } from './Vault';
 
 export interface ImportChoice { browser: ImportBrowser; profile: string; favorites: boolean; history: boolean; searchEngine: boolean; settings: boolean }
@@ -112,15 +112,8 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
     finally { busy.current = false; }
   };
   const proceed = () => { if (requested.current) void run(requested.current); };
-  const vaultAction = (command: VaultCommand) => window.horizon.command(command).then(() => true, () => false);
-  // Windows Hello is tried first where it exists; the master password step opens in place when it is not available or does not answer.
-  const requestUnlock = async () => {
-    if (busy.current) return;
-    busy.current = true; setPhase('running');
-    const unlocked = vault.windows && await vaultAction({ type: 'vault-hello' });
-    busy.current = false; setPhase('idle');
-    if (unlocked) proceed(); else setUnlock(true);
-  };
+  // The unlock dialog offers Windows Hello where it exists and the master password in the same place.
+  const requestUnlock = () => { setUnlock(true); };
   const submit = () => {
     if (running) return;
     if (!browserData && !passwords) { setProblem(t('IMPORT_NO_CHOICE')); return; }
@@ -194,7 +187,7 @@ export function ImportDialog({ sources, language, profileName, firstRun, vault, 
       setPermission(false);
       if (afterUnlock.current) { afterUnlock.current = false; proceed(); } else importButton.current?.focus();
     }} />}
-    {unlock && <VaultUnlock language={language} describe={describe} onUnlocked={async () => { afterUnlock.current = true; }} onClose={() => {
+    {unlock && <VaultUnlock language={language} windows={vault.windows} describe={describe} onUnlocked={async () => { afterUnlock.current = true; }} onClose={() => {
       setUnlock(false);
       if (afterUnlock.current) { afterUnlock.current = false; proceed(); } else importButton.current?.focus();
     }} />}
