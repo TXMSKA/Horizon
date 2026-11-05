@@ -2,6 +2,7 @@ import type { Language } from './shared/api';
 
 export const copy = {
   nebula: { en: 'Nebula', es: 'Nebula' },
+  cosmicAccount: { en: 'Cosmic account', es: 'Cuenta de Cosmic' },
   nebulaSignedOutText: { en: 'Sign in with a Cosmic account to see its Spaces and what others share with it.', es: 'Iniciar sesión con una cuenta de Cosmic para ver sus Spaces y lo que otros comparten con ella.' },
   nebulaBrowserNote: { en: 'Sign-in opens in the browser set as default on this computer.', es: 'El inicio de sesión se abre en el navegador predeterminado de este equipo.' },
   signIn: { en: 'Sign in', es: 'Iniciar sesión' },

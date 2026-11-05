@@ -229,15 +229,22 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 [data-profile-color=cyan] { --profile-color: var(--profile-cyan); }
 .profiles-menu, .new-profile-popover { position-anchor: --profile; top: anchor(bottom); left: anchor(left); right: auto; margin-top: var(--gap-profile-anchor); }
 .profiles-menu { width: min(var(--width-profiles-menu), calc(100vw - var(--gap-control))); max-height: calc(100vh - var(--height-tabs)); }
-.browser-menu > .profile-menu-row { height: var(--size-44); }
-.browser-menu > .profile-menu-row > .profile-dot { flex: none; }
+.profiles-list > .profile-menu-row { line-height: var(--line-label); flex-shrink: 0; display: flex; align-items: center; gap: var(--gap-control); width: 100%; height: var(--size-44); border-radius: var(--radius-small); padding: 0 var(--gap-control); text-align: left; font-size: var(--type-label); }
+.profiles-list > .profile-menu-row > svg { width: var(--icon-control); height: var(--icon-control); color: var(--text-secondary); flex: none; }
+.profiles-list > .profile-menu-row > .profile-row-body { flex: 1; }
+.profiles-list > .profile-menu-row:hover, .profiles-list > .profile-menu-row:focus-visible { background: var(--surface-hover); }
+.profiles-list > .profile-menu-row:active { background: var(--surface-pressed); }
 .profile-menu-row .profile-dot, .managed-profile .profile-dot { width: var(--size-profile-dot); height: var(--size-profile-dot); }
 .profile-row-body { display: flex; flex-direction: column; gap: 0; min-width: 0; }
 .profile-row-body strong { font-weight: 400; font-size: var(--type-label); color: var(--text-title); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.profile-row-body small { font-size: var(--type-caption); line-height: var(--line-caption); color: var(--text-secondary); }
-.browser-menu > .profile-menu-row[aria-checked=true] { background: var(--surface-selected); }
+.profile-row-body small { font-size: var(--type-caption); line-height: var(--line-caption); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.profiles-list > .profile-menu-row[aria-checked=true] { background: var(--surface-selected); }
 .profile-menu-row[aria-checked=true] strong { font-weight: var(--weight-emphasis); }
-.browser-menu > .profile-menu-row > .profile-check { color: var(--accent); }
+.profiles-list > .profile-menu-row > .profile-check { color: var(--accent); }
+.profiles-scroll { position: relative; flex: none; }
+.profiles-scroll::after { content: ''; position: absolute; inset: auto 0 0; height: var(--size-28); background: linear-gradient(transparent, var(--surface-raised)); opacity: 0; pointer-events: none; }
+.profiles-scroll[data-more]::after { opacity: 1; }
+.profiles-list { position: relative; display: flex; flex-direction: column; gap: var(--space-6); max-height: calc(var(--size-44) * 6 + var(--space-6) * 6 + var(--size-32)); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-popover) transparent; }
 .new-profile-popover { position: fixed; z-index: var(--layer-overlay); width: min(var(--width-profile-form), calc(100vw - var(--gap-control))); background: var(--surface-raised); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); padding: var(--padding-popover-form); max-height: calc(100vh - var(--height-tabs)); overflow-y: auto; }
 .profile-form { display: flex; flex-direction: column; gap: var(--gap-control); }
 .profile-form label, .profile-field-label { font-size: var(--type-caption); font-weight: var(--weight-emphasis); color: var(--text-secondary); line-height: var(--line-caption); }
@@ -447,8 +454,39 @@ button:not(:disabled):active, .browser-menu > button:not(:disabled):active, .win
 .extension-details + .extension-details { border-top: var(--border-width) solid var(--divider); }
 .extension-details > button { align-self: flex-end; }
 .extension-settings-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
-.toolbar-popover > .profiles-menu, .toolbar-popover > .new-profile-popover { position: static; margin: 0; max-height: var(--popup-available-height); }
-.toolbar-popover > .profiles-menu { width: var(--width-account-popover); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); padding: calc(var(--space-14) - var(--border-width)); gap: var(--space-6); }
+.toolbar-popover > .new-profile-popover { position: static; margin: 0; max-height: var(--popup-available-height); }
+.profiles-popover { display: flex; flex-direction: column; gap: var(--space-6); width: var(--width-account-popover); max-width: calc(100vw - var(--toolbar-popup-edge) * 2); max-height: var(--popup-available-height); overflow-y: auto; padding: calc(var(--space-14) - var(--border-width)); border: var(--border-width) solid var(--border-popover); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--text-title); }
+.profiles-popover > .profiles-menu { position: static; flex: none; width: auto; max-width: none; max-height: none; margin: var(--space-4) 0 0; padding: 0; overflow: visible; border: 0; border-radius: 0; background: transparent; gap: var(--space-6); }
+.account-card { display: flex; flex: none; flex-direction: column; min-width: 0; padding: var(--space-12); border-radius: var(--radius-control); background: var(--surface-sunken); }
+.account-card-phrase { display: flex; flex-direction: column; min-width: 0; }
+.account-card-title { color: var(--text-title); font-size: var(--type-label); font-weight: var(--weight-emphasis); line-height: var(--line-label); }
+.account-card-text, .account-card-note, .account-card-local { margin-top: var(--space-4); color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); }
+.account-card-note { margin-top: var(--space-8); }
+.account-card-local { margin-top: var(--space-6); }
+.account-card-action, .account-card-stack, .account-card-buttons, .account-card-heading, .account-card-error { margin-top: var(--space-12); }
+.account-card-error:first-child { margin-top: 0; }
+.account-card-action { width: 100%; }
+.account-card-stack { display: flex; flex-direction: column; gap: var(--space-8); }
+.account-card-stack > .desktop-action { width: 100%; }
+.account-card-waiting { display: flex; align-items: center; gap: var(--space-8); color: var(--text-title); font-size: var(--type-label); line-height: var(--line-label); }
+.account-card-waiting svg { flex: none; width: var(--size-16); height: var(--size-16); }
+.account-card-identity { display: flex; align-items: center; gap: var(--space-12); min-width: 0; }
+.account-card-avatar { display: grid; flex: none; place-items: center; width: var(--size-40); height: var(--size-40); border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: var(--type-label); font-weight: var(--weight-heading); }
+.account-card-who { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.account-card-name { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.account-card-name strong { min-width: 0; overflow: hidden; color: var(--text-title); font-size: var(--type-body); font-weight: var(--weight-heading); line-height: var(--line-body); text-overflow: ellipsis; white-space: nowrap; }
+.account-card-plan { display: inline-flex; flex: none; align-items: center; height: var(--size-18); padding: 0 var(--space-8); border-radius: var(--radius-pill); background: var(--surface-selected); color: var(--accent); font-size: var(--type-caption); font-weight: var(--weight-emphasis); white-space: nowrap; }
+.account-card-who small { overflow: hidden; color: var(--text-secondary); font-size: var(--type-caption); line-height: var(--line-caption); text-overflow: ellipsis; white-space: nowrap; }
+.account-card-heading { color: var(--text-title); font-size: var(--type-label); font-weight: var(--weight-heading); line-height: var(--line-label); }
+.account-card-words { min-height: calc(var(--size-44) * 2); margin-top: var(--space-8); padding: var(--space-10); resize: vertical; border: var(--border-width) solid var(--border-control); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--text-title); font: inherit; font-size: var(--type-label); }
+.account-card-words:focus { outline: none; border-color: var(--accent); }
+.account-card-wrong { margin-top: var(--space-6); }
+.account-card-buttons { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+.account-card-buttons.equal > .desktop-action { flex: 1 1 0; min-width: 0; }
+/* On one row Manage account takes the free space and Sign out keeps its content width; when the labels do not fit (Spanish) each takes a full row instead of wrapping its text. */
+.account-card-buttons:not(.equal) > .desktop-action { flex: 1 0 auto; white-space: nowrap; }
+.account-card-buttons:not(.equal) > .account-card-manage { flex-grow: 1000; }
+.account-card .desktop-action[aria-disabled=true] { opacity: var(--opacity-disabled); }
 .profiles-label { color: var(--text-secondary); font-size: var(--type-caption); font-weight: var(--weight-emphasis); line-height: var(--line-caption); }
 .profile-icon-slot { flex: none !important; display: grid; place-items: center; width: var(--size-16); height: var(--size-16); }
 .profile-icon-slot .profile-dot { width: var(--size-profile-dot); height: var(--size-profile-dot); }

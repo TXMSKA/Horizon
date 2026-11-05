@@ -1,10 +1,10 @@
-import { useEffect, useId, useRef, useState } from 'react';
-import type { RefObject } from 'react';
-import { Check, EyeOff, LoaderCircle, Plus, Trash2, TriangleAlert, Users } from 'lucide-react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import type { ReactNode, RefObject } from 'react';
+import { Check, ExternalLink, EyeOff, LoaderCircle, LogIn, LogOut, Plus, Trash2, TriangleAlert, Users } from 'lucide-react';
 import { text } from './copy';
 import type { CopyKey } from './copy';
 import { PROFILE_COLORS } from './shared/api';
-import type { BrowserCommand, BrowserState, Language, ProfileColor, ProfileState } from './shared/api';
+import type { AccountState, BrowserCommand, BrowserState, Language, ProfileColor, ProfileState } from './shared/api';
 import { Menu } from './Menu';
 import { ToolbarPopover } from './ToolbarPopover';
 
@@ -86,19 +86,146 @@ export function ProfileControl({ profile, privateWindow, language, open, opener,
   return <button className="icon-button profile-avatar" type="button" ref={opener} aria-haspopup="menu" aria-expanded={Boolean(open)} aria-controls={open === 'new' ? 'new-profile-popover' : 'profiles-menu'} aria-label={text('profile', language).replace('{name}', name)} title={name} onClick={event => onClick(event.detail === 0)}><span className="avatar-circle" aria-hidden="true">{Array.from(name)[0]?.toLocaleUpperCase(language)}</span></button>;
 }
 
-export function ProfilesMenu({ state, language, keyboard, opener, onDismiss, onSwitch, onNew, onManage, onPrivate }: {
-  state: BrowserState; language: Language; keyboard: boolean; opener: RefObject<HTMLButtonElement | null>;
-  onDismiss: (reason: 'escape' | 'tab' | 'outside') => void; onSwitch: (profile: ProfileState) => void; onNew: () => void; onManage: () => void; onPrivate: () => void;
+// Initials as the Hub's Nebula page computes them.
+export const accountInitials = (account: AccountState): string => account.status === 'signedIn' ? (account.displayName ?? account.email).split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(part => part[0]!.toUpperCase()).join('') : '';
+
+// The Cosmic account commands, with the same rules as the Hub's Nebula page.
+export function useAccountCommands(describe: (reason: unknown) => string) {
+  const pending = useRef(false);
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState<BrowserCommand | null>(null), [phrase, setPhrase] = useState('');
+  const run = async (command: BrowserCommand) => {
+    if (pending.current) return;
+    pending.current = true; setBusy(true); setError(''); setRetry(null);
+    try { await window.horizon.command(command); }
+    // The phrase is never kept for a retry.
+    catch (reason) { setError(describe(reason)); setRetry(command.type === 'account-phrase' ? null : command); }
+    finally { pending.current = false; setBusy(false); }
+  };
+  return { pending, busy, error, retry, phrase, setPhrase, run };
+}
+
+type AccountCommands = ReturnType<typeof useAccountCommands>;
+const cardStops = (card: HTMLElement | null) => [...(card?.querySelectorAll<HTMLElement>('button:not(:disabled), textarea:not(:disabled)') ?? [])];
+
+export function AccountCard({ account, language, commands, card, describe }: {
+  account: AccountState; language: Language; commands: AccountCommands; card: RefObject<HTMLDivElement | null>; describe: (reason: unknown) => string;
 }) {
   const t = (key: CopyKey) => text(key, language);
-  return <ToolbarPopover opener={opener}><Menu id="profiles-menu" className="profiles-menu" label={t('profiles')} keyboard={keyboard} initialFocus="[aria-checked=true]" opener={opener} onDismiss={onDismiss}>
-    <div className="profiles-label">{t('profiles')}</div>
-    {state.profiles.map(profile => <button className="profile-menu-row" type="button" role="menuitemradio" tabIndex={-1} key={profile.id} aria-checked={profile.id === state.activeProfileId} onClick={() => onSwitch(profile)}><span className="profile-icon-slot" aria-hidden="true"><span className="profile-dot" data-profile-color={profile.color} /></span><span className="profile-row-body"><strong>{profile.name}</strong></span>{profile.id === state.activeProfileId && <Check className="profile-check" aria-hidden="true" />}</button>)}
-    <button type="button" role="menuitem" tabIndex={-1} onClick={onNew}><Plus aria-hidden="true" /><span>{t('newProfile')}</span></button>
-    <button type="button" role="menuitem" tabIndex={-1} onClick={onManage}><Users aria-hidden="true" /><span>{t('manageProfiles')}</span></button>
-    <hr />
-    <button type="button" role="menuitem" tabIndex={-1} onClick={onPrivate}><EyeOff aria-hidden="true" /><span>{t('privateWindow')}</span></button>
-  </Menu></ToolbarPopover>;
+  const { busy, error, retry, phrase, setPhrase, run } = commands;
+  const identity = account.status === 'signedIn' && <div className="account-card-identity">
+    <span className="account-card-avatar" aria-hidden="true">{accountInitials(account)}</span>
+    <span className="account-card-who"><span className="account-card-name"><strong>{account.displayName ?? account.email}</strong>{account.plan && <span className="account-card-plan">{account.plan}</span>}</span>{account.displayName && <small>{account.email}</small>}</span>
+  </div>;
+  return <div className="account-card" ref={card} role="group" aria-label={t('cosmicAccount')} aria-busy={busy}>
+    {account.status === 'signedOut' && <>
+      <p className="account-card-title">{t('cosmicAccount')}</p><p className="account-card-text">{t('nebulaSignedOutText')}</p>
+      <button className="desktop-action primary account-card-action" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-sign-in' }); }}><LogIn aria-hidden="true" />{t('signIn')}</button>
+      <p className="account-card-note">{t('nebulaBrowserNote')}</p>
+    </>}
+    {account.status === 'signingIn' && <>
+      <p className="account-card-waiting" role="status"><LoaderCircle className="spinner accent" aria-hidden="true" /><span>{t('nebulaWaiting')}</span></p><p className="account-card-text">{t('nebulaWaitingNote')}</p>
+      <div className="account-card-stack"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-reopen' }); }}><ExternalLink aria-hidden="true" />{t('nebulaReopen')}</button>
+        <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-cancel' }); }}>{t('cancel')}</button></div>
+    </>}
+    {account.status === 'signedIn' && account.phrase !== 'ready' && <form className="account-card-phrase" onSubmit={event => { event.preventDefault(); if (busy || !phrase.trim()) return; const value = phrase; setPhrase(''); void run({ type: 'account-phrase', phrase: value }); }}>
+      {identity}
+      <p className="account-card-heading">{t('nebulaPhraseTitle')}</p><p className="account-card-text">{t('nebulaPhraseHint')}</p>
+      <textarea className="account-card-words" aria-label={t('nebulaPhraseTitle')} value={phrase} maxLength={1000} spellCheck={false} autoComplete="off" autoCapitalize="off" onChange={event => setPhrase(event.target.value)} />
+      {account.phrase === 'wrong' && <p className="settings-feedback error account-card-wrong" role="alert">{t('ACCOUNT_PHRASE_WRONG')}</p>}
+      <p className="account-card-local">{t('nebulaPhraseLocal')}</p>
+      <div className="account-card-buttons equal"><button className="desktop-action primary" type="submit" aria-disabled={busy || !phrase.trim()}>{t('phraseContinue')}</button>
+        <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { setPhrase(''); void run({ type: 'account-sign-out' }); }}>{t('cancel')}</button></div>
+    </form>}
+    {account.status === 'signedIn' && account.phrase === 'ready' && <>
+      {identity}
+      <div className="account-card-buttons"><button className="desktop-action outline account-card-manage" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-manage' }); }}><ExternalLink aria-hidden="true" />{t('nebulaManage')}</button>
+        <button className="desktop-action" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-sign-out' }); }}><LogOut aria-hidden="true" />{t('signOut')}</button></div>
+    </>}
+    {account.status === 'error' && <div className="settings-feedback error" role="alert"><span>{describe(new Error(account.code))}</span><button className="text-button" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-retry' }); }}>{t('retry')}</button></div>}
+    {error && <div className="settings-feedback error account-card-error" role="alert"><span>{error}</span>{retry && <button className="text-button" type="button" aria-disabled={busy} onClick={() => { void run(retry); }}>{t('retry')}</button>}</div>}
+  </div>;
+}
+
+type MenuDismiss = (reason: 'escape' | 'tab' | 'outside') => void;
+
+// The account card above the profiles menu. It keeps the popover open for pointers inside it, typed words or a pending command.
+export function ProfilesPopover({ account, language, describe, gate, profileCount, onDismiss, children }: {
+  account: AccountState; language: Language; describe: (reason: unknown) => string; gate: { dismiss: MenuDismiss }; profileCount: number; onDismiss: MenuDismiss; children: ReactNode;
+}) {
+  const commands = useAccountCommands(describe);
+  const popover = useRef<HTMLDivElement>(null), card = useRef<HTMLDivElement>(null), pointerInside = useRef(false);
+  const live = useRef({ phrase: commands.phrase, onDismiss });
+  useLayoutEffect(() => {
+    live.current = { phrase: commands.phrase, onDismiss };
+    gate.dismiss = reason => {
+      if (reason === 'outside' && (pointerInside.current || live.current.phrase || commands.pending.current)) return;
+      live.current.onDismiss(reason);
+    };
+  });
+  // Records, before the menu's own outside check runs, whether a pointer landed in this popover.
+  useEffect(() => {
+    const record = (event: PointerEvent) => { pointerInside.current = Boolean(popover.current?.contains(event.target as Node)); };
+    document.addEventListener('pointerdown', record, true);
+    return () => document.removeEventListener('pointerdown', record, true);
+  }, []);
+  // The current profile is scrolled into view when the menu opens.
+  useLayoutEffect(() => {
+    const rows = popover.current?.querySelector<HTMLElement>('.profiles-list'), current = rows?.querySelector<HTMLElement>('[aria-checked=true]');
+    if (rows && current && current.offsetTop + current.offsetHeight > rows.scrollTop + rows.clientHeight) rows.scrollTop = current.offsetTop + current.offsetHeight - rows.clientHeight;
+  }, []);
+  // The fade shows only while more rows remain below.
+  useLayoutEffect(() => {
+    const rows = popover.current?.querySelector<HTMLElement>('.profiles-list');
+    if (!rows) return;
+    const measure = () => { rows.parentElement?.toggleAttribute('data-more', rows.scrollTop + rows.clientHeight < rows.scrollHeight - 1); };
+    measure(); rows.addEventListener('scroll', measure, { passive: true });
+    return () => rows.removeEventListener('scroll', measure);
+  }, [profileCount]);
+  // A command that replaces the focused control keeps focus inside the card instead of losing it to the page.
+  const status = account.status, phraseState = account.status === 'signedIn' ? account.phrase : null;
+  useEffect(() => { if (!document.activeElement || document.activeElement === document.body) cardStops(card.current)[0]?.focus(); }, [status, phraseState]);
+  const menuEntry = () => popover.current?.querySelector<HTMLElement>('#profiles-menu [aria-checked=true]') ?? popover.current?.querySelector<HTMLElement>('#profiles-menu [role^=menuitem]');
+  return <div className="profiles-popover" ref={popover} onKeyDown={event => {
+    if (!card.current?.contains(event.target as Node)) return;
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onDismiss('escape'); return; }
+    if (event.key !== 'Tab') return;
+    const stops = cardStops(card.current);
+    if (document.activeElement !== (event.shiftKey ? stops[0] : stops.at(-1))) return;
+    // Native Shift+Tab before the first control leaves the popover, as Tab from the menu does.
+    if (event.shiftKey) { onDismiss('tab'); return; }
+    const entry = menuEntry();
+    if (entry) { event.preventDefault(); entry.focus(); }
+  }} onKeyDownCapture={event => {
+    // Shift+Tab from the menu returns to the card instead of closing the popover.
+    if (event.key !== 'Tab' || !event.shiftKey || card.current?.contains(event.target as Node)) return;
+    const last = cardStops(card.current).at(-1);
+    if (!last) return;
+    event.preventDefault(); event.stopPropagation(); last.focus();
+  }}>
+    <AccountCard account={account} language={language} commands={commands} card={card} describe={describe} />
+    {children}
+  </div>;
+}
+
+export function ProfilesMenu({ state, language, keyboard, opener, describe, onDismiss, onSwitch, onNew, onManage, onPrivate }: {
+  state: BrowserState; language: Language; keyboard: boolean; opener: RefObject<HTMLButtonElement | null>; describe: (reason: unknown) => string;
+  onDismiss: MenuDismiss; onSwitch: (profile: ProfileState) => void; onNew: () => void; onManage: () => void; onPrivate: () => void;
+}) {
+  const t = (key: CopyKey) => text(key, language);
+  // The popover replaces this with its guarded dismissal once mounted.
+  const gate = { dismiss: onDismiss };
+  return <ToolbarPopover opener={opener}><ProfilesPopover account={state.account} language={language} describe={describe} gate={gate} profileCount={state.profiles.length} onDismiss={onDismiss}>
+    <Menu id="profiles-menu" className="profiles-menu" label={t('profiles')} keyboard={keyboard} initialFocus="[aria-checked=true]" opener={opener} onDismiss={reason => gate.dismiss(reason)}>
+      <div className="profiles-label">{t('profiles')}</div>
+      <div className="profiles-scroll"><div className="profiles-list">
+        {state.profiles.map(profile => { const current = profile.id === state.activeProfileId, tabs = profileTabCount(profile.tabCount, language); return <button className="profile-menu-row" type="button" role="menuitemradio" tabIndex={-1} key={profile.id} aria-checked={current} onClick={() => onSwitch(profile)}><span className="profile-icon-slot" aria-hidden="true"><span className="profile-dot" data-profile-color={profile.color} /></span><span className="profile-row-body"><strong>{profile.name}</strong><small>{current ? t('thisWindowTabs').replace('{tabs}', tabs) : tabs}</small></span>{current && <Check className="profile-check" aria-hidden="true" />}</button>; })}
+      </div></div>
+      <button type="button" role="menuitem" tabIndex={-1} onClick={onNew}><Plus aria-hidden="true" /><span>{t('newProfile')}</span></button>
+      <button type="button" role="menuitem" tabIndex={-1} onClick={onManage}><Users aria-hidden="true" /><span>{t('manageProfiles')}</span></button>
+      <hr />
+      <button type="button" role="menuitem" tabIndex={-1} onClick={onPrivate}><EyeOff aria-hidden="true" /><span>{t('privateWindow')}</span></button>
+    </Menu>
+  </ProfilesPopover></ToolbarPopover>;
 }
 
 export function NewProfilePopover({ state, language, opener, onCancel, onSuccess }: {
