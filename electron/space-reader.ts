@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import type { AccountSharedDataset, AccountSpace, DesktopItem, SharedProjectContent } from '../src/shared/api';
-import { accountId, accountRecord, accountSuccess } from './spaces';
+import { accountId, accountRecord, accountSuccess, spaceGeneration, spaceObject } from './spaces';
 import type { AccountResponse } from './spaces';
 import { openProjectManifest, openSpacePackage, validateSpaceCheckpoint } from './space-sharing';
 import type { SpaceCheckpoint, SpaceIdentity } from './space-sharing';
 import { integer, SYNC_LIMITS, uuid } from './sync-format';
 
-interface Context { accountId: string; session: number; spaces: AccountSpace[]; shared: AccountSharedDataset[] }
+interface Context { accountId: string; session: number; accessRevision?: number; accessRevisions?: Record<string, number>; spaces: AccountSpace[]; shared: AccountSharedDataset[] }
 interface Options {
   context(): Context | undefined;
   key(space: string, generation: number): Promise<{ key: Uint8Array }>;
@@ -17,6 +17,7 @@ interface Cached {
   items: Map<string, SpaceCheckpoint['project']['items'][number]>;
 }
 const unavailable = () => new Error('SPACE_SHARED_UNAVAILABLE');
+const invalid = () => new Error('ACCOUNT_INVALID_RESPONSE');
 const cacheId = (space: string, dataset: string) => `${space}:${dataset}`;
 export const sharedItemId = (value: unknown): value is string => typeof value === 'string' && /^shared:[0-9a-f]{64}$/.test(value);
 
@@ -33,9 +34,10 @@ export function createSharedProjects(options: Options) {
   const access = (context: Context, dataset: AccountSharedDataset) => {
     const current = options.context();
     if (!current || current.accountId !== context.accountId || current.session !== context.session
-      || !current.spaces.some(space => space.id === dataset.spaceId && !space.pending && space.members.some(member => member.accountId === dataset.sharedBy.accountId))
+      || (current.accessRevisions?.[dataset.spaceId] ?? (current.accessRevisions ? 0 : current.accessRevision)) !== (context.accessRevisions?.[dataset.spaceId] ?? (context.accessRevisions ? 0 : context.accessRevision))
+      || !current.spaces.some(space => space.id === dataset.spaceId && (!space.pending || space.stale) && space.members.some(member => member.accountId === current.accountId))
       || !current.shared.some(entry => entry.spaceId === dataset.spaceId && entry.datasetId === dataset.datasetId
-        && entry.updatedAt === dataset.updatedAt && entry.sharedBy.accountId === dataset.sharedBy.accountId && entry.sharedBy.accountId !== current.accountId)) throw unavailable();
+        && entry.sharedBy.accountId === dataset.sharedBy.accountId && entry.sharedBy.accountId !== current.accountId)) throw unavailable();
   };
   const lookup = (project: string | null, id: string) => {
     if (project !== null || !sharedItemId(id)) throw unavailable();
@@ -44,67 +46,87 @@ export function createSharedProjects(options: Options) {
   };
   const read = async (route: string, check: () => void): Promise<Buffer> => {
     const bytes = accountSuccess(await options.request(route)); check();
-    if (!Buffer.isBuffer(bytes)) throw unavailable();
+    if (!Buffer.isBuffer(bytes)) throw invalid();
     return bytes;
   };
   return {
     async openSharedProject(spaceId: string, datasetId: string): Promise<SharedProjectContent> {
       const id = cacheId(spaceId, datasetId), ticket = {}, version = revision;
       openings.set(id, ticket);
+      const current = options.context(), dataset = current?.shared.find(entry => entry.spaceId === spaceId && entry.datasetId === datasetId);
+      const check = () => {
+        if (!current || !dataset || version !== revision || openings.get(id) !== ticket) throw unavailable();
+        access(current, dataset);
+      };
       try {
-        const current = options.context(), dataset = current?.shared.find(entry => entry.spaceId === spaceId && entry.datasetId === datasetId);
         if (!current || !accountId(spaceId) || !uuid(datasetId) || !dataset) throw unavailable();
-        const check = () => { if (version !== revision || openings.get(id) !== ticket) throw unavailable(); access(current, dataset); };
         check();
         const route = `/v1/spaces/${encodeURIComponent(spaceId)}/datasets/${datasetId}/objects`;
-        const objects = new Map<string, number>(), cursors = new Set<string>();
+        const objects = new Map<string, { createdAt: number; size: number; sha256: string }>(), cursors = new Set<string>();
         let after: string | null = null, count = 0;
         do {
-          const query = new URLSearchParams({ prefix: 'project/', limit: '1000', ...(after === null ? {} : { after }) });
-          const value = accountSuccess(await options.request(`${route}?${query}`)); check();
+          const query = new URLSearchParams({ prefix: 'kg', limit: '1000', ...(after === null ? {} : { after }) });
+          const response = await options.request(`${route}?${query}`); check();
+          if (response.status === 404) throw unavailable();
+          const value = accountSuccess(response);
           if (!accountRecord(value) || !Array.isArray(value.objects) || value.objects.length > 1000
-            || !(value.after === null || typeof value.after === 'string' && /^[A-Za-z0-9_./-]{1,255}$/.test(value.after))) throw unavailable();
-          count += value.objects.length; if (count > SYNC_LIMITS.files) throw unavailable();
+            || !(value.after === null || typeof value.after === 'string' && /^[A-Za-z0-9_./-]{1,255}$/.test(value.after))) throw invalid();
+          count += value.objects.length; if (count > SYNC_LIMITS.files) throw invalid();
+          let previous: string | null = after;
           for (const object of value.objects) {
-            if (!accountRecord(object) || typeof object.path !== 'string' || !/^[A-Za-z0-9_./-]{1,255}$/.test(object.path) || objects.has(object.path)) throw unavailable();
-            const createdAt = typeof object.createdAt === 'number' ? object.createdAt : typeof object.createdAt === 'string' ? Date.parse(object.createdAt) : NaN;
-            if (!integer(createdAt)) throw unavailable();
-            objects.set(object.path, createdAt);
+            if (!spaceObject(object) || !object.path.startsWith('kg') || objects.has(object.path) || previous !== null && object.path <= previous) throw invalid();
+            previous = object.path;
+            objects.set(object.path, object);
           }
+          if (value.after !== null && (value.objects.length === 0 || value.after !== previous)) throw invalid();
           after = value.after;
-          if (after !== null) { if (cursors.has(after)) throw unavailable(); cursors.add(after); }
+          if (after !== null) { if (cursors.has(after)) throw invalid(); cursors.add(after); }
         } while (after !== null);
+        const sequences = new Map<string, number>();
+        for (const path of objects.keys()) {
+          const checkpoint = /^(kg[1-9][0-9]{0,9}\/project\/[^/]+\/[^/]+\/)checkpoints\/([1-9][0-9]*)-[0-9a-f-]{36}\.hzs$/.exec(path);
+          if (checkpoint && integer(Number(checkpoint[2]))) sequences.set(checkpoint[1]!, Math.max(sequences.get(checkpoint[1]!) ?? 0, Number(checkpoint[2])));
+        }
         const manifests = [...objects].filter(([path]) => {
-          const parts = path.split('/'); return parts.length === 4 && parts[0] === 'project' && uuid(parts[1]) && uuid(parts[2]) && parts[3] === 'dataset.hzs';
-        }).sort((a, b) => b[1] - a[1] || b[0].localeCompare(a[0]));
-        if (!manifests.length || manifests.length > SYNC_LIMITS.writers) throw unavailable();
+          const parts = path.split('/'); return parts.length === 5 && /^kg[1-9][0-9]{0,9}$/.test(parts[0]!) && spaceGeneration(Number(parts[0]!.slice(2)))
+            && parts[1] === 'project' && uuid(parts[2]) && uuid(parts[3]) && parts[4] === 'dataset.hzs';
+        }).sort((a, b) => Number(b[0].split('/')[0]!.slice(2)) - Number(a[0].split('/')[0]!.slice(2)) || b[1].createdAt - a[1].createdAt
+          || (sequences.get(b[0].slice(0, -'dataset.hzs'.length)) ?? 0) - (sequences.get(a[0].slice(0, -'dataset.hzs'.length)) ?? 0) || b[0].localeCompare(a[0]));
+        if (!manifests.length || new Set(manifests.map(([path]) => path.split('/').slice(2, 4).join('/'))).size > SYNC_LIMITS.writers) throw invalid();
         const manifestPath = manifests[0]![0], base = manifestPath.slice(0, -'dataset.hzs'.length);
         const checkpoints = [...objects.keys()].filter(path => path.startsWith(`${base}checkpoints/`)).map(path => {
           const match = /^(\d+)-([0-9a-f-]{36})\.hzs$/.exec(path.slice(`${base}checkpoints/`.length));
-          if (!match || !integer(Number(match[1])) || !uuid(match[2])) throw unavailable();
+          if (!match || !integer(Number(match[1])) || !uuid(match[2])) throw invalid();
           return { path, sequence: Number(match[1]), id: match[2] };
         }).sort((a, b) => b.sequence - a.sequence || b.path.localeCompare(a.path));
-        const latest = checkpoints[0]; if (!latest) throw unavailable();
+        const latest = checkpoints[0]; if (!latest) throw invalid();
         const manifestBytes = await read(`${route}/${manifestPath}`, check);
-        if (manifestBytes.length > 16384) throw unavailable();
+        const verified = (path: string, bytes: Buffer) => {
+          const metadata = objects.get(path);
+          if (!metadata || bytes.length !== metadata.size || createHash('sha256').update(bytes).digest('hex') !== metadata.sha256) throw invalid();
+        };
+        verified(manifestPath, manifestBytes);
+        if (manifestBytes.length > 16384) throw invalid();
         const descriptor: unknown = JSON.parse(manifestBytes.toString('utf8'));
-        if (!accountRecord(descriptor) || !integer(descriptor.keyGeneration) || descriptor.keyGeneration < 1 || descriptor.keyGeneration > 0xffffffff) throw unavailable();
+        if (!accountRecord(descriptor) || !spaceGeneration(descriptor.keyGeneration) || descriptor.keyGeneration !== Number(base.split('/')[0]!.slice(2))
+          || descriptor.keyGeneration > current.spaces.find(space => space.id === spaceId)!.currentGeneration) throw invalid();
         const manifestKey = await options.key(spaceId, descriptor.keyGeneration);
-        let title: string;
-        try { check(); title = (await openProjectManifest(manifestKey.key, spaceId, datasetId, manifestBytes)).title; check(); }
+        try { check(); await openProjectManifest(manifestKey.key, spaceId, datasetId, manifestBytes); check(); }
         finally { manifestKey.key.fill(0); }
         const bytes = await read(`${route}/${latest.path}`, check);
-        if (bytes.length < 12 || bytes.length > SYNC_LIMITS.package) throw unavailable();
-        const keyGeneration = bytes.readUInt32BE(8), material = await options.key(spaceId, keyGeneration);
+        verified(latest.path, bytes);
+        if (bytes.length < 12 || bytes.length > SYNC_LIMITS.package) throw invalid();
+        const keyGeneration = bytes.readUInt32BE(8);
+        if (keyGeneration !== descriptor.keyGeneration) throw invalid();
+        const material = await options.key(spaceId, keyGeneration);
         let snapshot: unknown;
-        const identity: SpaceIdentity = { spaceId, dataset: datasetId, device: base.split('/')[1]!, generation: base.split('/')[2]!, keyGeneration,
+        const identity: SpaceIdentity = { spaceId, dataset: datasetId, device: base.split('/')[2]!, generation: base.split('/')[3]!, keyGeneration,
           sequence: latest.sequence, id: latest.id, kind: 'checkpoint' };
         try { check(); snapshot = openSpacePackage(material.key, identity, bytes); }
         finally { material.key.fill(0); }
         check(); validateSpaceCheckpoint(snapshot, identity);
-        if (snapshot.project.name !== title) throw unavailable();
         const items = new Map<string, SpaceCheckpoint['project']['items'][number]>();
-        const content: SharedProjectContent = { spaceId, datasetId, title, sharedBy: { displayName: dataset.sharedBy.displayName },
+        const content: SharedProjectContent = { spaceId, datasetId, title: snapshot.project.name, sharedBy: { displayName: dataset.sharedBy.displayName },
           spaceName: current.spaces.find(space => space.id === spaceId)!.name, updatedAt: dataset.updatedAt, readOnly: true,
           folders: snapshot.project.folders, items: snapshot.project.items.map(({ image, ...item }) => {
             const itemId = `shared:${createHash('sha256').update(JSON.stringify([current.accountId, current.session, spaceId, datasetId, item.id])).digest('hex')}`;
@@ -115,7 +137,21 @@ export function createSharedProjects(options: Options) {
         if (projects.size >= 16) remove(projects.keys().next().value!);
         projects.set(id, { context: current, dataset, content, identity, items });
         return structuredClone(content);
-      } catch { if (openings.get(id) === ticket) remove(id); throw unavailable(); }
+      } catch (error) {
+        try { check(); } catch { error = unavailable(); }
+        if (error instanceof Error && error.message === 'SPACE_SHARED_UNAVAILABLE') {
+          if (openings.get(id) === ticket) remove(id);
+          throw error;
+        }
+        if (error instanceof Error && ['ACCOUNT_NETWORK', 'ACCOUNT_TIMEOUT', 'ACCOUNT_DENIED', 'ACCOUNT_INVALID_RESPONSE'].includes(error.message)) {
+          // Electron preserves only the error message across invoke, so carry bounded retry metadata with the code.
+          if ('retryAfterMs' in error && typeof error.retryAfterMs === 'number' && Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0) {
+            error.message += `; retryAfterMs=${Math.min(86400000, Math.ceil(error.retryAfterMs))}`;
+          }
+          throw error;
+        }
+        throw invalid();
+      }
       finally { if (openings.get(id) === ticket) openings.delete(id); }
     },
     item(project: string | null, id: string): DesktopItem {
@@ -132,7 +168,7 @@ export function createSharedProjects(options: Options) {
         const check = () => { access(cached.context, cached.dataset); if (projects.get(cacheId(cached.dataset.spaceId, cached.dataset.datasetId)) !== cached) throw unavailable(); };
         const task = (async () => {
           const identity: SpaceIdentity = { ...cached.identity, id: image.blob.id, keyGeneration: image.blob.keyGeneration, sequence: 0, kind: 'blob' };
-          const route = `/v1/spaces/${encodeURIComponent(identity.spaceId)}/datasets/${identity.dataset}/objects/project/${identity.device}/${identity.generation}/blobs/${identity.id}.hzs`;
+          const route = `/v1/spaces/${encodeURIComponent(identity.spaceId)}/datasets/${identity.dataset}/objects/kg${identity.keyGeneration}/project/${identity.device}/${identity.generation}/blobs/${identity.id}.hzs`;
           const bytes = await read(route, check);
           if (bytes.length > SYNC_LIMITS.blob) throw unavailable();
           const material = await options.key(identity.spaceId, identity.keyGeneration);
@@ -148,6 +184,11 @@ export function createSharedProjects(options: Options) {
         pending.set(id, task); return task;
       } catch { return Promise.reject(unavailable()); }
     },
-    clear() { revision++; projects.clear(); images.clear(); pending.clear(); openings.clear(); imageBytes = 0; },
+    clear(spaceId?: string) {
+      if (spaceId !== undefined) {
+        for (const [id, cached] of projects) if (cached.dataset.spaceId === spaceId) remove(id);
+        for (const id of openings.keys()) if (id.slice(0, -37) === spaceId) openings.delete(id);
+      } else { revision++; projects.clear(); images.clear(); pending.clear(); openings.clear(); imageBytes = 0; }
+    },
   };
 }

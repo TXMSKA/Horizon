@@ -163,25 +163,90 @@ function Home({ props }: { props: DesktopProps }) {
   return <><h1>{t('desktop')}</h1>{!state.projects.length && !state.captures.length ? <div className="desktop-empty"><p>{t('emptyDesktop')}</p><button className="desktop-action primary" type="button" onClick={() => { void onPage({ kind: 'new-project' }); }}>{t('newProject')}</button></div> : <><section className="desktop-latest"><div className="desktop-section-heading"><h2>{t('captures')}</h2><button className="desktop-small-link" type="button" onClick={() => { void onPage({ kind: 'captures' }); }}>{t('seeAll')}</button></div>{state.captures.length ? <div className="desktop-latest-images">{[...state.captures].sort((a, b) => b.createdAt - a.createdAt).slice(0, 3).map(item => <div key={item.id}><CaptureImage project={null} item={item} language={language} preview /><button className="desktop-preview-target" type="button" aria-label={t('openItem').replace('{title}', item.title)} onClick={() => { void onPage({ kind: 'item', project: null, id: item.id }); }} /></div>)}</div> : <small>{t('noCaptures')}</small>}</section><section className="desktop-project-list"><h2>{t('projects')}</h2>{state.projects.map(project => <button className="desktop-project-row" type="button" key={project.id} onClick={() => { void onPage({ kind: 'project', project: project.id }); }}><span className="desktop-mark"><Folder aria-hidden="true" /></span><span>{project.name}</span><small>{itemCount(projectSize(project), language)}</small></button>)}</section><button className="desktop-action desktop-home-new" type="button" onClick={() => { void onPage({ kind: 'new-project' }); }}><Plus aria-hidden="true" />{t('newProject')}</button></>}</>;
 }
 
+function SharedCaptureImage({ item, language, version }: { item: DesktopItemContent; language: Language; version: string }) {
+  const [image, setImage] = useState<string | null>(null), [failed, setFailed] = useState(false), [attempt, setAttempt] = useState(0);
+  const box = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (box.current && item.image) box.current.style.setProperty('aspect-ratio', `${item.image.width} / ${item.image.height}`);
+  }, [item.image?.width, item.image?.height]);
+  useEffect(() => {
+    let current = true; setFailed(false);
+    void window.horizon.getCaptureImage(null, item.id).then(bytes => {
+      if (!current) return;
+      if (!bytes) { setFailed(true); return; }
+      setImage(URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'image/png' })));
+    }).catch(() => { if (current) setFailed(true); });
+    return () => { current = false; };
+  }, [item.id, item.updatedAt, version, attempt]);
+  useEffect(() => () => { if (image) URL.revokeObjectURL(image); }, [image]);
+  return <div ref={box} className="desktop-image" aria-busy={!image && !failed}>{image ? <img src={image} alt={text('captureImage', language).replace('{title}', item.title)} onError={() => { setImage(null); setFailed(true); }} /> : failed ? <div className="desktop-image-error" role="alert"><p>{text('captureImageFailed', language)}</p><button className="desktop-small-link" type="button" onClick={() => setAttempt(value => value + 1)}>{text('retry', language)}</button></div> : <div className="desktop-skeleton" role="status"><span className="visually-hidden">{text('loading', language)}</span></div>}</div>;
+}
+
 // A project another member shared: read only, items open to read, with Open page and Ask Lyra and nothing that changes it.
-function SharedBody({ page, props }: { page: Extract<DesktopPanelPage, { kind: 'shared' }>; props: DesktopProps }) {
+function SharedBody({ page, props, onClose }: { page: Extract<DesktopPanelPage, { kind: 'shared' }>; props: DesktopProps; onClose: () => void }) {
   const { state, language, onPage, run } = props, t = (key: CopyKey) => text(key, language);
   const [content, setContent] = useState<SharedProjectContent | null>(null), [error, setError] = useState(''), [attempt, setAttempt] = useState(0), [lyraError, setLyraError] = useState('');
+  const [loadedVersion, setLoadedVersion] = useState('');
+  const root = useRef<HTMLElement>(null);
+  const unavailable = useRef(false);
+  const retryFailures = useRef(0);
+  const attach = (element: HTMLElement | null) => { root.current = element; };
+  const restore = useRef<{ panel: HTMLElement; top: number; left: number; anchor: Node | null; anchorOffset: number; focus: Node | null; focusOffset: number } | null>(null);
+  const dataset = state.account.status === 'signedIn' ? state.account.shared.find(entry => entry.spaceId === page.space && entry.datasetId === page.dataset) : undefined;
+  const version = JSON.stringify([dataset?.updatedAt, dataset?.size, dataset?.title, dataset?.contentRevision, dataset?.stale === true]);
+  const listingError = dataset?.stale ? state.account.status === 'signedIn' && state.account.spacesError || 'ACCOUNT_NETWORK' : '';
+  const accountError = state.account.status === 'error' ? state.account.code : '';
+  const retry = () => { if (state.account.status === 'error' || dataset?.stale) void run({ type: 'account-retry' }); else setAttempt(value => value + 1); };
   useEffect(() => {
-    let current = true; setError('');
-    void window.horizon.command({ type: 'space-open-shared', space: page.space, dataset: page.dataset }).then(next => { if (current) setContent(next); }, reason => { if (current) setError(desktopError(reason, language)); });
-    return () => { current = false; };
-  }, [page.space, page.dataset, attempt, language]);
-  if (error && !content) return <Feedback language={language} error={error} onRetry={() => setAttempt(value => value + 1)} />;
+    const closeUnavailable = () => {
+      setContent(null); setError(t('SPACE_SHARED_UNAVAILABLE'));
+      if (unavailable.current) return;
+      unavailable.current = true; props.onRejected?.(t('SPACE_SHARED_UNAVAILABLE')); onClose();
+    };
+    if (state.account.status === 'signedOut' || state.account.status === 'signedIn' && !dataset) { closeUnavailable(); return; }
+    if (state.account.status !== 'signedIn') { if (accountError) setError(desktopError(new Error(accountError), language)); return; }
+    let current = true, retryTimer: ReturnType<typeof setTimeout> | undefined;
+    setError(listingError ? desktopError(new Error(listingError), language) : '');
+    if (listingError) return;
+    void window.horizon.command({ type: 'space-open-shared', space: page.space, dataset: page.dataset }).then(next => {
+      if (!current) return;
+      const panel = root.current?.closest<HTMLElement>('.desktop-panel-body'), selection = document.getSelection();
+      if (panel) restore.current = { panel, top: panel.scrollTop, left: panel.scrollLeft,
+        anchor: selection?.anchorNode && panel.contains(selection.anchorNode) ? selection.anchorNode : null, anchorOffset: selection?.anchorOffset ?? 0,
+        focus: selection?.focusNode && panel.contains(selection.focusNode) ? selection.focusNode : null, focusOffset: selection?.focusOffset ?? 0 };
+      retryFailures.current = 0; setContent(next); setLoadedVersion(version);
+    }, reason => {
+      if (!current) return;
+      if (/\bSPACE_SHARED_UNAVAILABLE\b/.test(reason instanceof Error ? reason.message : String(reason))) closeUnavailable();
+      else {
+        setError(desktopError(reason, language)); retryFailures.current++;
+        const retryAfter = /\bretryAfterMs=(\d{1,8})\b/.exec(reason instanceof Error ? reason.message : String(reason));
+        retryTimer = setTimeout(() => { if (current) setAttempt(value => value + 1); },
+          Math.max(Math.min(86400000, Number(retryAfter?.[1] ?? 0)), Math.min(60000, 5000 * 2 ** Math.min(retryFailures.current - 1, 4))));
+      }
+    });
+    return () => { current = false; clearTimeout(retryTimer); };
+  }, [page.space, page.dataset, attempt, language, version, state.account.status, accountError, listingError]);
+  useLayoutEffect(() => {
+    const previous = restore.current; restore.current = null;
+    if (!previous) return;
+    const { panel, top, left, anchor, anchorOffset, focus, focusOffset } = previous;
+    panel.scrollTop = top; panel.scrollLeft = left;
+    const limit = (node: Node, offset: number) => Math.min(offset, node.nodeType === 3 ? node.textContent?.length ?? 0 : node.childNodes.length);
+    if (anchor?.isConnected && focus?.isConnected && panel.contains(anchor) && panel.contains(focus)) document.getSelection()?.setBaseAndExtent(anchor, limit(anchor, anchorOffset), focus, limit(focus, focusOffset));
+  }, [content]);
+  if (unavailable.current) return <div className="desktop-feedback" role="alert"><p>{t('SPACE_SHARED_UNAVAILABLE')}</p></div>;
+  if (error && !content) return <Feedback language={language} error={error} onRetry={retry} />;
   if (!content) return <Loading language={language} />;
   const by = content.sharedBy.displayName ?? t('spaceMember'), item = page.item ? content.items.find(entry => entry.id === page.item) : null;
   if (page.item && !item) return <Feedback language={language} error={t('DESKTOP_ITEM_NOT_FOUND')} onRetry={() => { void onPage({ kind: 'shared', space: page.space, dataset: page.dataset }); }} />;
   if (item) {
     const askLyra = async () => { try { setLyraError(''); await run({ type: 'lyra-ask', task: 'item', question: t('lyraItemQuestion'), tabs: [], project: null, item: item.id }); } catch (reason) { setLyraError(desktopError(reason, language)); } };
-    return <article className="desktop-detail" aria-label={item.title || t('newNote')}>
+    return <article ref={attach} className="desktop-detail" aria-label={item.title || t('newNote')}>
+      {error && <Feedback language={language} error={error} onRetry={retry} />}
       <div className="desktop-title-block"><button className="desktop-breadcrumb" type="button" onClick={() => { void onPage({ kind: 'shared', space: page.space, dataset: page.dataset }); }}>{content.title}</button><h1>{item.title || t('newNote')}</h1></div>
       {item.source && <div className="desktop-site"><ItemMark item={item} /><small>{itemSite(item.source.url)}</small></div>}
-      {item.image ? <CaptureImage project={null} item={item} language={language} /> : item.kind === 'link' ? <PagePreview item={item} /> : <p className="desktop-kept-text">{item.text}</p>}
+      {item.image ? <SharedCaptureImage key={item.id} item={item} language={language} version={loadedVersion} /> : item.kind === 'link' ? <PagePreview item={item} /> : <p className="desktop-kept-text">{item.text}</p>}
       {item.note && <div className="desktop-field"><span className="share-label">{t('captureNote')}</span><p className="desktop-kept-text">{item.note}</p></div>}
       <div className="desktop-item-actions">{item.source && <button className="desktop-action primary" type="button" onClick={() => { void run({ type: 'new-tab', input: item.source!.url }); }}><ExternalLink aria-hidden="true" />{t('openPage')}</button>}
         {!state.privateWindow && <button className="desktop-action primary" type="button" onClick={() => { void askLyra(); }}><Sparkles aria-hidden="true" />{t(item.image ? 'lyraSavedText' : 'lyraAsk')}</button>}</div>
@@ -189,7 +254,8 @@ function SharedBody({ page, props }: { page: Extract<DesktopPanelPage, { kind: '
     </article>;
   }
   return <>
-    <div className="desktop-title-block"><small>{t('sharedByIn').replace('{name}', by).replace('{space}', content.spaceName)}</small><h1>{content.title}</h1></div>
+    {error && <Feedback language={language} error={error} onRetry={retry} />}
+    <div ref={attach} className="desktop-title-block"><small>{t('sharedByIn').replace('{name}', by).replace('{space}', content.spaceName)}</small><h1>{content.title}</h1></div>
     <small className="desktop-shared-note">{t('sharedReadOnly').replace('{name}', by)}</small>
     <div className="desktop-items">{content.items.length ? [...content.items].reverse().map(entry => <button className="desktop-item-row" type="button" key={entry.id} onClick={() => { void onPage({ kind: 'shared', space: page.space, dataset: page.dataset, item: entry.id }); }}><ItemMark item={entry} /><span><strong>{entry.title || t('newNote')}</strong><small>{entry.kind === 'note' ? entry.text || desktopItemLabel(entry, language) : entry.kind === 'link' ? itemSite(entry.source?.url ?? '') : t('savedDate').replace('{date}', relativeDesktopDate(entry.createdAt, language))}</small></span></button>) : <p className="desktop-empty-hint">{t('emptyFolder')}</p>}</div>
   </>;
@@ -209,7 +275,7 @@ export function DesktopPanel({ props, onClose, onTab, onLyra }: { props: Desktop
   const destination = project ?? state.projectInUse;
   let content: ReactNode;
   if (page.kind === 'home') content = <Home props={props} />;
-  else if (page.kind === 'shared') content = <SharedBody key={`${page.space}:${page.dataset}`} page={page} props={props} />;
+  else if (page.kind === 'shared') content = <SharedBody key={`${page.space}:${page.dataset}`} page={page} props={props} onClose={onClose} />;
   else if (page.kind === 'new-project') content = <><h1>{t('newProject')}</h1><ProjectNameForm state={state} language={language} onSuccess={project => { void onPage({ kind: 'project', project: project.id }); }} /></>;
   else if (state.desktopLocked) content = null;
   else if (data.error && !data.content && !data.captures) content = <Feedback language={language} error={data.error} onRetry={data.retry} />;

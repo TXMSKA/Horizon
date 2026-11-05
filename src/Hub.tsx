@@ -120,7 +120,13 @@ function NebulaAccount({ state, language, onShared }: { state: BrowserState; lan
       <div className="hub-nebula-actions"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-reopen' }); }}><ExternalLink aria-hidden="true" />{t('nebulaReopen')}</button>
         <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-cancel' }); }}>{t('cancel')}</button></div>
     </>}
-    {account.status === 'signedIn' && account.phrase !== 'ready' && <form className="hub-nebula-phrase" onSubmit={event => { event.preventDefault(); const value = phrase; setPhrase(''); void run({ type: 'account-phrase', phrase: value }); }}>
+    {account.status === 'signedIn' && account.consent === 'required' && <>
+      <h3>{t('nebulaConsentTitle')}</h3><p className="hub-nebula-text">{t('nebulaConsentText')}</p>
+      <div className="hub-nebula-actions"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-manage' }); }}><ExternalLink aria-hidden="true" />{t('nebulaConsentOpen')}</button>
+        <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-retry' }); }}>{t('retry')}</button>
+        <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-sign-out' }); }}><LogOut aria-hidden="true" />{t('signOut')}</button></div>
+    </>}
+    {account.status === 'signedIn' && account.consent === 'accepted' && account.phrase !== 'ready' && <form className="hub-nebula-phrase" onSubmit={event => { event.preventDefault(); const value = phrase; setPhrase(''); void run({ type: 'account-phrase', phrase: value }); }}>
       <h3>{t('nebulaPhraseTitle')}</h3><p className="hub-nebula-text">{t('nebulaPhraseHint')}</p>
       <textarea className="hub-nebula-words" aria-label={t('nebulaPhraseTitle')} value={phrase} maxLength={1000} spellCheck={false} autoComplete="off" autoCapitalize="off" onChange={event => setPhrase(event.target.value)} />
       {account.phrase === 'wrong' && <p className="settings-feedback error" role="alert">{t('ACCOUNT_PHRASE_WRONG')}</p>}
@@ -128,7 +134,7 @@ function NebulaAccount({ state, language, onShared }: { state: BrowserState; lan
       <div className="hub-nebula-actions"><button className="desktop-action primary" type="submit" aria-disabled={busy || !phrase.trim()}>{t('phraseContinue')}</button>
         <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { setPhrase(''); void run({ type: 'account-sign-out' }); }}>{t('cancel')}</button></div>
     </form>}
-    {account.status === 'signedIn' && account.phrase === 'ready' && <>
+    {account.status === 'signedIn' && account.consent === 'accepted' && account.phrase === 'ready' && <>
       <div className="hub-nebula-account"><span className="hub-nebula-avatar" aria-hidden="true">{initials}</span><span className="hub-nebula-who"><strong>{account.displayName ?? account.email}</strong><small>{account.plan ?? t('nebulaSignedInNote')}</small></span></div>
       <hr />
       <section className="hub-nebula-section" aria-labelledby="nebula-spaces"><h3 id="nebula-spaces">{t('spaces')}</h3>

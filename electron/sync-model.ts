@@ -6,7 +6,7 @@ import type { DesktopStore } from './desktop';
 import { isProfileColor, profileName } from './profiles';
 import { isMarketplaceTheme, validateSettings } from './settings';
 import type { Settings } from './settings';
-import { integer, recordId, requireSync, shape, uuid } from './sync-format';
+import { canonical, integer, recordId, requireSync, shape, uuid } from './sync-format';
 import type { SyncOperation, SyncRecord } from './sync-format';
 import { isWebURL } from './browsing';
 
@@ -221,6 +221,6 @@ export function mergeOperation(records: Map<string, SyncOperation>, incoming: Sy
     const edit = incoming.value === null ? previous : incoming, deletion = incoming.value === null ? incoming : previous;
     if (edit.value !== null && (edit.value as { lastVisit: number }).lastVisit > deletion.time) { winner = edit; loser = deletion; }
   }
-  if (incoming.item !== 'computer' && JSON.stringify(previous.value) !== JSON.stringify(incoming.value)) conflicts.set(loser.id, loser);
+  if (incoming.item !== 'computer' && canonical(previous.value) !== canonical(incoming.value)) conflicts.set(loser.id, loser);
   records.set(key, winner);
 }

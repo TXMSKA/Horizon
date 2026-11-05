@@ -7314,6 +7314,8 @@ require('./translate.test.cjs');
 
 require('./sync.test.cjs');
 require('./sync-ui.test.cjs');
+require('./quantum-sync.test.cjs');
+require('./quantum-sharing-review.test.cjs');
 
 test('sync save uses the native destination and writes only the explicitly exported code', async t => {
   const folder = temporaryDirectory(t, 'sync-save-cloud'), destination = join(temporaryDirectory(t, 'sync-save-export'), 'code.txt');
@@ -7524,7 +7526,7 @@ test('packaged send commands ignore the development Cosmic root override', async
 
 function accountTokens() {
   const token = () => require('node:crypto').randomBytes(32).toString('base64url');
-  return { accessToken: token(), refreshToken: token(), tokenType: 'Bearer', expiresIn: 900, deviceId: randomUUID() };
+  return { accessToken: token(), refreshToken: token(), tokenType: 'Bearer', expiresIn: 900, deviceId: randomUUID(), account_id: 'account-fixture' };
 }
 async function accountHTTP(url, method = 'GET') {
   return new Promise((done, reject) => {
@@ -7550,9 +7552,25 @@ async function accountFixture(t, options = {}) {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const bytes = Buffer.concat(chunks), body = chunks.length ? request.headers['content-type']?.startsWith('application/octet-stream') ? bytes : JSON.parse(bytes.toString('utf8')) : undefined;
     const call = { path: request.url, method: request.method, headers: request.headers, body }; requests.push(call);
-    const answer = handler?.(call) ?? (request.url === '/v1/oauth/token' ? { status: 200, body: tokens } : request.url === '/v1/me' ? { status: 200, body: { ...me, devices: [{ id: tokens.deviceId, userId: 'account-fixture', appId: 'horizon' }] } } : request.url === '/v1/keys' ? { status: 200, body: { keys: [] } } : { status: 200, body: { success: true } });
+    const url = new URL(request.url, 'http://127.0.0.1');
+    const answer = await handler?.(call) ?? (request.url === '/v1/oauth/token' ? { status: 200, body: tokens } : request.url === '/v1/me' ? { status: 200, body: { ...me, devices: [{ id: tokens.deviceId, userId: 'account-fixture', appId: 'horizon' }] } } : request.url === '/v1/keys' ? { status: 200, body: { keys: [] } } : request.url === '/v1/entitlements' ? { status: 200, body: { entitlements: {}, capabilities: managedSyncCapabilities(false) } } : call.method === 'PUT' && /^\/v1\/(?:spaces\/[^/]+\/)?datasets\/[^/]+$/.test(url.pathname) ? { status: 200, body: { id: url.pathname.split('/').at(-1), appId: 'horizon', createdAt: 1792627200000 } } : url.pathname === '/v1/changes' || url.pathname === '/v1/bootstrap' ? { status: 503, headers: { 'retry-after': '60' }, body: { error: { code: 'standby_read_only' } } } : { status: 200, body: { success: true } });
+    if (request.url === '/v1/oauth/token' && body?.grantType === 'authorization_code'
+      && (Object.hasOwn(body, 'clientId') || !/^http:\/\/127\.0\.0\.1:[1-9]\d*\/callback$/.test(body.redirectUri)
+        || body.redirectUri !== new URL(opened.at(-1)).searchParams.get('redirectUri'))) {
+      answer.status = 400; answer.body = { error: { code: 'invalid_request' } };
+    }
+    if (answer.status === 200 && request.url === '/v1/me') {
+      answer.body = { accountId: 'account-fixture', displayName: null, plans: [], twoFactorEnabled: false, createdAt: '2026-10-22T00:00:00.000Z', consentRequired: false, deleteAt: null, ...answer.body };
+      answer.body.devices = (answer.body.devices ?? []).map(device => ({ accountId: 'account-fixture', userId: 'account-fixture', computerId: readFileSync(join(directory, 'account-computer-id'), 'utf8'), name: 'Computer', createdAt: 1792627200000, lastSeenAt: 1792627200000, revokedAt: null, ...device }));
+    }
+    if (Array.isArray(answer.body?.keys)) answer.body.keys = answer.body.keys.map(key => ({ createdAt: 1792627200000, ...key }));
+    if (answer.body?.error) {
+      const error = typeof answer.body.error === 'string' ? { code: answer.body.error } : answer.body.error;
+      answer.body = { error: { message: 'Synthetic contract refusal', fields: {}, requestId: randomUUID(), ...error } };
+      if (answer.status === 429) answer.headers = { 'retry-after': '1', ...answer.headers };
+    }
     const binary = Buffer.isBuffer(answer.body);
-    response.writeHead(answer.status, { 'content-type': binary ? 'application/octet-stream' : 'application/json', ...(binary ? { 'content-length': answer.body.length, 'x-content-sha256': require('node:crypto').createHash('sha256').update(answer.body).digest('hex') } : {}), ...answer.headers }); response.end(binary ? answer.body : JSON.stringify(answer.body));
+    response.writeHead(answer.status, { 'content-type': binary ? 'application/octet-stream' : 'application/json', 'x-request-id': answer.body?.error?.requestId ?? randomUUID(), ...(binary ? { 'content-length': answer.body.length, 'x-content-sha256': require('node:crypto').createHash('sha256').update(answer.body).digest('hex'), 'content-disposition': 'attachment', 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' } : {}), ...answer.headers }); response.end(binary ? answer.body : JSON.stringify(answer.body));
   });
   await new Promise(done => server.listen(0, '127.0.0.1', done));
   t.after(() => new Promise(done => { server.close(done); server.closeAllConnections(); }));
@@ -7602,17 +7620,19 @@ test('account endpoints ignore overrides when packaged and accept only HTTPS ori
   }
 });
 
-test('account token responses strictly require complete Bearer tokens and a positive finite lifetime', () => {
+test('account token responses strictly require complete Bearer tokens and an integer lifetime within fifteen minutes', () => {
   const { validateAccountTokens } = require('../dist/electron/account.js'), valid = accountTokens();
   assert.deepEqual(validateAccountTokens(valid), valid);
   for (const field of Object.keys(valid)) { const missing = { ...valid }; delete missing[field]; assert.throws(() => validateAccountTokens(missing), /ACCOUNT_INVALID_RESPONSE/); }
-  for (const changes of [{ accessToken: 'a'.repeat(42) }, { accessToken: '!'.repeat(43) }, { refreshToken: 'a'.repeat(44) }, { refreshToken: null }, { tokenType: 'bearer' }, { expiresIn: 0 }, { expiresIn: -1 }, { expiresIn: Infinity }, { expiresIn: NaN }, { expiresIn: '900' }, { deviceId: 1 }, { extra: true }]) assert.throws(() => validateAccountTokens({ ...valid, ...changes }), /ACCOUNT_INVALID_RESPONSE/);
+  for (const changes of [{ accessToken: 'a'.repeat(42) }, { accessToken: '!'.repeat(43) }, { refreshToken: 'a'.repeat(44) }, { refreshToken: null }, { tokenType: 'bearer' }, { expiresIn: 0 }, { expiresIn: 0.001 }, { expiresIn: 901 }, { expiresIn: -1 }, { expiresIn: Infinity }, { expiresIn: NaN }, { expiresIn: '900' }, { deviceId: 1 }, { extra: true }]) assert.throws(() => validateAccountTokens({ ...valid, ...changes }), /ACCOUNT_INVALID_RESPONSE/);
   for (const value of [null, [], {}, 'token']) assert.throws(() => validateAccountTokens(value), /ACCOUNT_INVALID_RESPONSE/);
 });
 
-test('account loopback rejects wrong methods, paths and malformed codes before accepting one callback with a script-free CSP', async t => {
+test('beta.2 desktop sign-in keeps appId-only loopback PKCE and accepts one callback with a script-free CSP', async t => {
   const fixture = await accountFixture(t), page = await fixture.start(), callback = page.searchParams.get('redirectUri');
-  assert.equal(fixture.account.state().status, 'signingIn'); assert.equal(page.pathname, '/authorize'); assert.equal(page.searchParams.get('appId'), 'horizon');
+  assert.equal(fixture.account.state().status, 'signingIn'); assert.equal(page.pathname, '/authorize/'); assert.equal(page.searchParams.get('appId'), 'horizon');
+  assert.deepEqual([...page.searchParams.keys()].sort(), ['appId', 'codeChallenge', 'computerId', 'deviceName', 'redirectUri']);
+  assert.match(callback, /^http:\/\/127\.0\.0\.1:[1-9]\d*\/callback$/);
   assert.match(page.searchParams.get('codeChallenge'), /^[A-Za-z0-9_-]{43}$/);
   assert.match(page.searchParams.get('computerId'), /^[A-Za-z0-9._:-]{1,128}$/);
   assert.ok(page.searchParams.get('deviceName').length > 0 && page.searchParams.get('deviceName').length <= 128);
@@ -7650,7 +7670,7 @@ test('account seals only the refresh token and restores me in a new profile cont
   const fixture = await accountFixture(t); await fixture.signIn();
   const path = join(fixture.host.directory, 'account.sealed'), bytes = readFileSync(path), saved = await require('../dist/electron/vault-storage.js').vaultTokenStore(path, fixture.protection).get();
   assert.ok(saved === fixture.token().refreshToken); assert.ok(!bytes.includes(Buffer.from(saved))); assert.ok(!bytes.includes(Buffer.from(fixture.token().accessToken)));
-  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
+  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', consent: 'accepted', managedSync: false, spaces: [], shared: [], spacesError: null });
   fixture.account.close(); const rotated = fixture.rotate();
   const next = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {} }); t.after(() => next.close());
   await next.retry(); assert.equal(next.state().status, 'signedIn');
@@ -7668,17 +7688,174 @@ test('account refreshes a rejected access token exactly once and persists the ro
     if (call.path === '/v1/me' && call.headers.authorization === `Bearer ${previous.accessToken}`) { rejected = true; return { status: 401, body: { error: 'unauthorized' } }; }
   });
   const before = fixture.requests.length; await Promise.all([fixture.account.me(), fixture.account.me(), fixture.account.me()]); assert.equal(rejected, true); assert.equal(fixture.account.state().status, 'signedIn');
-  assert.deepEqual(fixture.requests.slice(before).map(call => [call.method, call.path]), [['GET', '/v1/me'], ['POST', '/v1/oauth/token'], ['GET', '/v1/me']]);
+  assert.deepEqual(fixture.requests.slice(before).map(call => [call.method, call.path]), [['GET', '/v1/me'], ['POST', '/v1/oauth/token'], ['GET', '/v1/me'], ['GET', '/v1/entitlements']]);
   const refresh = fixture.requests.slice(before)[1]; assert.ok(refresh.body.refreshToken === previous.refreshToken);
   assert.ok(fixture.requests.at(-1).headers.authorization === `Bearer ${rotated.accessToken}`);
   assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
+});
+
+async function quantumAccountFixture(t) {
+  const material = new Uint8Array(32).fill(71), fixture = await accountFixture(t, { keyStore: { kind: 'session', async get() { return material.slice(); }, async set() { assert.fail('An existing key must not be replaced'); } } });
+  const handler = call => call.path === '/v1/me' ? { status: 200, body: { email: 'person@example.test', devices: [{ id: fixture.token().deviceId, userId: 'account-fixture', appId: 'horizon', computerId: readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8') }] } } : undefined;
+  fixture.handle(handler); await fixture.signIn();
+  return { ...fixture, material, handler };
+}
+
+test('Quantum account requests refresh a rejected bearer once, preserve bytes and bind the dataset key to the account', async t => {
+  const fixture = await quantumAccountFixture(t), profile = randomUUID(), dataset = randomUUID(), account = fixture.account.quantumSync([profile]);
+  assert.ok(account); assert.equal(fixture.account.accountId(), 'account-fixture'); assert.equal(account.accountId, 'account-fixture'); assert.deepEqual(account.profileIds, [profile]);
+  assert.equal(account.computerId, readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8'));
+  const key = await account.deriveSyncKey(dataset), expected = Buffer.from(require('node:crypto').hkdfSync('sha256', fixture.material, Buffer.alloc(0), `cosmic/account/horizon/sync/${dataset}`, 32));
+  assert.ok(key.equals(expected)); key.fill(0); expected.fill(0);
+  const previous = fixture.token(), rotated = fixture.rotate({ ...accountTokens(), deviceId: previous.deviceId }), route = `/v1/datasets/${dataset}/objects/dataset.hzs`, bytes = Buffer.from('Synthetic immutable descriptor');
+  fixture.handle(call => call.path === route && call.headers.authorization === `Bearer ${previous.accessToken}` ? { status: 401, body: { error: { code: 'unauthorized' } } } : fixture.handler(call));
+  const before = fixture.requests.length, transport = new (require('../dist/electron/sync-quantum.js').QuantumTransport)(account, dataset);
+  await transport.writeObject('dataset.hzs', bytes, 4096);
+  const calls = fixture.requests.slice(before); assert.deepEqual(calls.map(call => [call.method, call.path]), [['PUT', route], ['POST', '/v1/oauth/token'], ['PUT', route]]);
+  for (const call of [calls[0], calls[2]]) {
+    assert.ok(call.body.equals(bytes)); assert.equal(call.headers['content-type'], 'application/octet-stream');
+    assert.equal(call.headers['x-content-sha256'], require('node:crypto').createHash('sha256').update(bytes).digest('hex'));
+  }
+  assert.ok(calls[1].body.refreshToken === previous.refreshToken); assert.ok(calls[2].headers.authorization === `Bearer ${rotated.accessToken}`);
+  assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
+  fixture.handle(call => call.path === route ? { status: 401, body: { error: { code: 'unauthorized' } } } : fixture.handler(call));
+  const refused = fixture.requests.length; await assert.rejects(transport.writeObject('dataset.hzs', bytes, 4096), /SYNC_NOT_ALLOWED/);
+  assert.deepEqual(fixture.requests.slice(refused).map(call => [call.method, call.path]), [['PUT', route], ['POST', '/v1/oauth/token'], ['PUT', route]]);
+  fixture.handle(call => call.path === route ? { status: 200, body: Buffer.alloc(4097) } : fixture.handler(call));
+  await assert.rejects(new (require('../dist/electron/sync-quantum.js').QuantumTransport)(account, dataset).readDescriptor(), /SYNC_LIMIT/);
+  for (const path of ['/v1/keys', '/v1/datasets/../keys', '/v1/datasets/%2e%2e/keys']) await assert.rejects(account.request(path), /ACCOUNT_DENIED/);
+});
+
+test('Quantum canonical account identity ignores addresses, plan labels and the legacy device userId alias', async t => {
+  const fixture = await quantumAccountFixture(t), computerId = readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8');
+  fixture.handle(call => call.path === '/v1/me' ? { status: 200, body: { accountId: 'account-fixture', email: 'changed@example.test', plans: [{ key: 'nebula:dawn', product: 'nebula', tier: 'dawn', label: 'Insider' }], devices: [{ id: fixture.token().deviceId, accountId: 'account-fixture', userId: 'obsolete-alias', appId: 'horizon', computerId }] } } : undefined);
+  await fixture.account.me();
+  assert.equal(fixture.account.accountId(), 'account-fixture');
+  assert.equal(fixture.account.quantumSync([randomUUID()]).accountId, 'account-fixture');
+  assert.equal(fixture.account.state().email, 'changed@example.test'); assert.equal(fixture.account.state().plan, 'Insider');
+});
+
+test('concurrent Quantum 401 responses rotate one refresh chain and retry both requests with the same fresh bearer', async t => {
+  const fixture = await quantumAccountFixture(t), bound = fixture.account.quantumSync([randomUUID()]);
+  const previous = fixture.token(), rotated = fixture.rotate({ ...accountTokens(), deviceId: previous.deviceId }), route = `/v1/datasets/${randomUUID()}`;
+  let rejected = 0, refreshes = 0, release;
+  const simultaneous = new Promise(done => { release = done; });
+  fixture.handle(async call => {
+    if (call.path === route && call.headers.authorization === `Bearer ${previous.accessToken}`) {
+      if (++rejected === 2) release(); await simultaneous;
+      return { status: 401, body: { error: { code: 'unauthorized' } } };
+    }
+    if (call.path === '/v1/oauth/token' && call.body.grantType === 'refresh_token') {
+      assert.equal(++refreshes, 1, 'A rotating refresh token must never be replayed');
+      assert.ok(call.body.refreshToken === previous.refreshToken); return { status: 200, body: rotated };
+    }
+    if (call.path === route) { assert.ok(call.headers.authorization === `Bearer ${rotated.accessToken}`); return { status: 200, body: { id: route.split('/').at(-1), appId: 'horizon', createdAt: 1792627200000 } }; }
+    return fixture.handler(call);
+  });
+  const results = await Promise.all([bound.request(route), bound.request(route)]);
+  for (const result of results) { assert.equal(result.status, 200); await result.json(); }
+  assert.equal(rejected, 2); assert.equal(refreshes, 1); assert.equal(fixture.account.accountId(), 'account-fixture');
+});
+
+test('Quantum refuses mismatched canonical me or device identities without binding another account', async t => {
+  for (const change of [{ accountId: 'other-account' }, { accountId: 'account-fixture', deviceAccountId: 'other-account' }]) {
+    const fixture = await quantumAccountFixture(t), profiles = [randomUUID()], dataset = randomUUID();
+    fixture.handle(call => call.path === '/v1/entitlements' ? { status: 200, body: { capabilities: managedSyncCapabilities(true) } } : fixture.handler(call));
+    await fixture.account.me();
+    const previous = fixture.account.state(), bound = fixture.account.quantumSync(profiles), expected = await bound.deriveSyncKey(dataset);
+    fixture.handle(call => call.path === '/v1/me' ? { status: 200, body: { accountId: change.accountId, email: 'unverified@example.test', plans: [{ key: 'unverified', product: 'horizon', tier: 'other', label: 'Unverified plan' }], devices: [{ id: fixture.token().deviceId, accountId: change.deviceAccountId ?? 'account-fixture', userId: 'account-fixture', appId: 'horizon', computerId: randomUUID() }] } } : undefined);
+    await assert.rejects(fixture.account.me(), /ACCOUNT_INVALID_RESPONSE/);
+    assert.deepEqual(fixture.account.state(), { ...previous, spacesError: 'ACCOUNT_INVALID_RESPONSE' });
+    const retained = fixture.account.quantumSync(profiles), actual = await retained.deriveSyncKey(dataset);
+    assert.equal(fixture.account.accountId(), 'account-fixture'); assert.equal(retained.accountId, bound.accountId);
+    assert.equal(retained.computerId, bound.computerId); assert.equal(retained.revision, bound.revision);
+    assert.equal(fixture.account.managedSync(), true); assert.doesNotThrow(bound.assertActive);
+    assert.ok(actual.equals(expected), 'a rejected account response must not replace the verified sync key'); actual.fill(0); expected.fill(0);
+    fixture.account.cancel();
+    const page = await fixture.start(); await accountHTTP(`${page.searchParams.get('redirectUri')}?code=${'c'.repeat(43)}`);
+    await waitForAccount(fixture.account, 'error');
+    assert.deepEqual(fixture.account.state(), { status: 'error', code: 'ACCOUNT_INVALID_RESPONSE' }); assert.equal(fixture.account.accountId(), null);
+    assert.equal(fixture.account.quantumSync([randomUUID()]), undefined);
+  }
+});
+
+test('Quantum account sign-out rejects a late download and invalidates its bound requests and derived keys', async t => {
+  const fixture = await quantumAccountFixture(t); fixture.account.close();
+  let started, finish; const fetching = new Promise(done => { started = done; }), pending = new Promise(done => { finish = done; });
+  const account = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {}, fetch: async (url, init) => {
+    if (new URL(url).pathname.startsWith('/v1/datasets/')) { started(); return pending; }
+    return fixture.host.fetch(url, init);
+  } }); t.after(() => account.close());
+  await account.retry(); const bound = account.quantumSync([randomUUID()]), dataset = randomUUID(); assert.ok(bound);
+  const transport = new (require('../dist/electron/sync-quantum.js').QuantumTransport)(bound, dataset), download = transport.readDescriptor();
+  const rejected = assert.rejects(download, /SYNC_NOT_ALLOWED/); await fetching; await account.signOut();
+  const bytes = Buffer.from('Synthetic late response'); finish(new Response(bytes, { headers: { 'content-length': String(bytes.length), 'x-content-sha256': require('node:crypto').createHash('sha256').update(bytes).digest('hex') } }));
+  await rejected; assert.equal(account.accountId(), null); assert.equal(account.quantumSync([randomUUID()]), undefined);
+  await assert.rejects(bound.request('/v1/datasets?limit=100'), /ACCOUNT_DENIED/); await assert.rejects(bound.deriveSyncKey(dataset), /ACCOUNT_DENIED/);
+  assert.deepEqual(account.state(), { status: 'signedOut' });
+});
+
+function managedSyncCapabilities(horizon) {
+  return { managedSync: { nebula: true, horizon, nova: true, blueprint: true, vault: true, lyra: true, hivem1nd: false }, spaces: 2, seatsPerSpace: 5, privateBuilds: [], relayPlus: false, premiumAppFeatures: true, blueprintPublish: true, monthlyCredits: 500 };
+}
+
+test('account managed sync follows effective capabilities on every refresh and never the plan label', async t => {
+  const fixture = await quantumAccountFixture(t), computerId = readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8');
+  let answer = { status: 200, body: { entitlements: {}, capabilities: managedSyncCapabilities(true) } }, plans = [{ key: 'nebula:dawn', product: 'nebula', tier: 'dawn', label: 'Dawn' }];
+  fixture.handle(call => call.path === '/v1/entitlements' ? answer
+    : call.path === '/v1/me' ? { status: 200, body: { email: 'person@example.test', plans, devices: [{ id: fixture.token().deviceId, userId: 'account-fixture', appId: 'horizon', computerId }] } } : undefined);
+  await fixture.account.me(); assert.equal(fixture.account.state().managedSync, true); assert.equal(fixture.account.managedSync(), true); assert.equal(fixture.account.state().plan, 'Dawn');
+  // The same label with capabilities that leave Horizon out denies sync; a plan change applies on the next refresh.
+  answer = { status: 200, body: { entitlements: {}, capabilities: managedSyncCapabilities(false) } };
+  await fixture.account.me(); assert.equal(fixture.account.state().managedSync, false); assert.equal(fixture.account.managedSync(), false); assert.equal(fixture.account.state().plan, 'Dawn');
+  plans = [{ key: 'nebula:insider', product: 'nebula', tier: 'insider', label: 'Insider' }]; answer = { status: 200, body: { entitlements: {}, capabilities: managedSyncCapabilities(true) } };
+  await fixture.account.me(); assert.equal(fixture.account.managedSync(), true); assert.equal(fixture.account.state().plan, 'Insider');
+  // A failed or malformed capability read keeps the last answer; Quantum still checks every write.
+  for (const failure of [{ status: 500, body: { error: { code: 'internal_error' } } }, { status: 200, body: { capabilities: { managedSync: { horizon: 'yes' } } } }, { status: 200, body: {} }]) {
+    answer = failure; await fixture.account.me(); assert.equal(fixture.account.state().status, 'signedIn'); assert.equal(fixture.account.managedSync(), true);
+  }
+  plans = []; answer = { status: 200, body: { entitlements: {}, capabilities: managedSyncCapabilities(false) } };
+  await fixture.account.me(); assert.equal(fixture.account.managedSync(), false); assert.equal(fixture.account.state().plan, null);
+  await fixture.account.signOut(); assert.equal(fixture.account.managedSync(), false);
+});
+
+test('account consent required on me shows the consent state, sends no protected request and opens the Cosmic site', async t => {
+  const fixture = await accountFixture(t); fixture.me({ email: 'person@example.test', consentRequired: true });
+  await fixture.signIn();
+  assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', consent: 'required', managedSync: false, spaces: [], shared: [], spacesError: null });
+  assert.deepEqual(fixture.requests.map(call => call.path), ['/v1/oauth/token', '/v1/me']);
+  assert.equal(fixture.account.managedSync(), false); assert.equal(fixture.account.quantumSync([randomUUID()]), undefined);
+  await fixture.account.manage(); assert.equal(fixture.opened.at(-1), fixture.origin + '/');
+  fixture.me({ email: 'person@example.test', consentRequired: false }); fixture.handle(call => call.path === '/v1/entitlements' ? { status: 200, body: { entitlements: {}, capabilities: managedSyncCapabilities(true) } } : undefined);
+  await fixture.account.retry(); assert.equal(fixture.account.state().consent, 'accepted'); assert.equal(fixture.account.state().managedSync, true);
+});
+
+test('a protected route answering acceptance_required moves the account to consent and stops managed sync', async t => {
+  const fixture = await quantumAccountFixture(t), computerId = readFileSync(join(fixture.directory, 'account-computer-id'), 'utf8'), dataset = randomUUID();
+  let accepted = true;
+  const refusal = { status: 403, body: { error: { code: 'acceptance_required', fields: { policies: [{ id: 'terms', version: '2026-10-27', path: '/terms' }] } } } };
+  fixture.handle(call => call.path === '/v1/me' ? { status: 200, body: { email: 'person@example.test', consentRequired: !accepted, devices: [{ id: fixture.token().deviceId, userId: 'account-fixture', appId: 'horizon', computerId }] } }
+    : !accepted && call.path !== '/v1/oauth/token' ? refusal : call.path === '/v1/entitlements' ? { status: 200, body: { entitlements: {}, capabilities: managedSyncCapabilities(true) } } : undefined);
+  await fixture.account.me(); assert.equal(fixture.account.managedSync(), true);
+  const bound = fixture.account.quantumSync([randomUUID()]); assert.ok(bound);
+  // A new policy version is enforced on the next protected request, before me reports it.
+  accepted = false; fixture.handle(call => call.path === '/v1/me' ? { status: 200, body: { email: 'person@example.test', consentRequired: false, devices: [{ id: fixture.token().deviceId, userId: 'account-fixture', appId: 'horizon', computerId }] } }
+    : call.path !== '/v1/oauth/token' ? refusal : undefined);
+  const transport = new (require('../dist/electron/sync-quantum.js').QuantumTransport)(bound, dataset);
+  await assert.rejects(transport.readDescriptor(), /SYNC_CONSENT_REQUIRED/);
+  assert.equal(fixture.account.state().consent, 'required'); assert.equal(fixture.account.managedSync(), false);
+  // Later pulses stop in the main process: nothing reaches Quantum until consent is accepted again.
+  const sent = fixture.requests.length;
+  await assert.rejects(transport.readDescriptor(), /SYNC_CONSENT_REQUIRED/); assert.throws(() => bound.assertActive(), /ACCOUNT_CONSENT/);
+  assert.equal(fixture.requests.length, sent);
+  await fixture.account.me(); assert.equal(fixture.account.state().consent, 'required'); assert.equal(fixture.account.state().managedSync, false);
 });
 
 test('account invalid_grant signs out locally and sign-out removes the sealed file even when revocation fails', async t => {
   const fixture = await accountFixture(t); await fixture.signIn(); const path = join(fixture.host.directory, 'account.sealed');
   fixture.handle(call => call.path === '/v1/me' ? { status: 401, body: { error: { code: 'unauthorized' } } } : call.path === '/v1/oauth/token' ? { status: 400, body: { error: { code: 'invalid_grant' } } } : undefined);
   await fixture.account.me().catch(() => {}); assert.deepEqual(fixture.account.state(), { status: 'signedOut' }); assert.equal(existsSync(path), false);
-  fixture.handle(undefined); await fixture.signIn(); fixture.handle(call => call.path === '/v1/oauth/revoke' ? { status: 503, body: { error: 'unavailable' } } : undefined);
+  fixture.handle(undefined); await fixture.signIn(); fixture.handle(call => call.path === '/v1/oauth/revoke' ? { status: 503, body: { error: 'identity_unavailable' } } : undefined);
   await fixture.account.signOut(); assert.deepEqual(fixture.account.state(), { status: 'signedOut' }); assert.equal(existsSync(path), false);
   const revoke = fixture.requests.find(call => call.path === '/v1/oauth/revoke'); assert.equal(revoke.method, 'POST'); assert.ok(revoke.headers.authorization === `Bearer ${fixture.token().accessToken}`);
 });
@@ -7698,27 +7875,29 @@ test('account sign-out deletes the sealed file before remote work and retries a 
 });
 
 test('account retry preserves a stored token on a malformed me response and refuses redirects', async t => {
-  const fixture = await accountFixture(t); await fixture.signIn(); const path = join(fixture.host.directory, 'account.sealed');
-  fixture.me({ email: 123, displayName: null }); await fixture.account.me().catch(() => {});
-  assert.deepEqual(fixture.account.state(), { status: 'error', code: 'ACCOUNT_INVALID_RESPONSE' }); assert.equal(existsSync(path), true);
+  const fixture = await accountFixture(t); await fixture.signIn(); const path = join(fixture.host.directory, 'account.sealed'), previous = fixture.account.state();
+  fixture.me({ email: 123, displayName: null }); await assert.rejects(fixture.account.me(), /ACCOUNT_INVALID_RESPONSE/);
+  assert.deepEqual(fixture.account.state(), { ...previous, spacesError: 'ACCOUNT_INVALID_RESPONSE' }); assert.equal(existsSync(path), true);
   fixture.handle(call => call.path === '/v1/me' ? { status: 302, headers: { location: 'http://127.0.0.1:1/forbidden' }, body: {} } : undefined);
-  await fixture.account.retry().catch(() => {}); assert.deepEqual(fixture.account.state(), { status: 'error', code: 'ACCOUNT_INVALID_RESPONSE' }); assert.equal(existsSync(path), true);
+  await assert.rejects(fixture.account.retry(), /ACCOUNT_INVALID_RESPONSE/);
+  assert.deepEqual(fixture.account.state(), { ...previous, spacesError: 'ACCOUNT_INVALID_RESPONSE' }); assert.equal(existsSync(path), true);
 });
 
 test('account me accepts valid future names and plans and ignores invalid optional account fields', async t => {
   const fixture = await accountFixture(t); await fixture.signIn();
   fixture.me({ email: 'person@example.test', displayName: 'Account Name', plans: [{ key: 'nebula-dawn', product: 'nebula', tier: 'dawn', label: 'Nebula+ Alba' }], devices: [{ id: 'private-device' }] });
-  await fixture.account.me(); assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: 'Account Name', plan: 'Nebula+ Alba', phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
+  await fixture.account.me(); assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: 'Account Name', plan: 'Nebula+ Alba', phrase: 'needed', keyStore: 'session', consent: 'accepted', managedSync: false, spaces: [], shared: [], spacesError: null });
   for (const extra of [{ displayName: 42, plans: null }, { displayName: ' bad name ', plans: [{ key: 'key', product: 'nebula', tier: 'tier', label: 42 }] }, { displayName: 'bad\nname', plans: [{ product: 'nebula', label: 'Missing plan fields' }] }]) {
     fixture.me({ email: 'person@example.test', ...extra }); await fixture.account.me();
-    assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', spaces: [], shared: [], spacesError: null });
+    assert.deepEqual(fixture.account.state(), { status: 'signedIn', email: 'person@example.test', displayName: null, plan: null, phrase: 'needed', keyStore: 'session', consent: 'accepted', managedSync: false, spaces: [], shared: [], spacesError: null });
   }
 });
 
 test('account refreshes an expired access token before me and keeps refresh material after a network failure', async t => {
-  const fixture = await accountFixture(t); fixture.rotate({ ...accountTokens(), expiresIn: 0.001 }); await fixture.signIn();
-  await new Promise(done => setTimeout(done, 5)); const previous = fixture.token(), rotated = fixture.rotate(), before = fixture.requests.length;
-  await fixture.account.me(); assert.deepEqual(fixture.requests.slice(before).map(call => call.path), ['/v1/oauth/token', '/v1/me']);
+  const fixture = await accountFixture(t); fixture.rotate({ ...accountTokens(), expiresIn: 1 }); await fixture.signIn();
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 1001 }); t.after(() => t.mock.timers.reset());
+  const previous = fixture.token(), rotated = fixture.rotate(), before = fixture.requests.length;
+  await fixture.account.me(); assert.deepEqual(fixture.requests.slice(before).map(call => call.path), ['/v1/oauth/token', '/v1/me', '/v1/entitlements']);
   assert.ok(fixture.requests[before].body.refreshToken === previous.refreshToken);
   assert.ok((await require('../dist/electron/vault-storage.js').vaultTokenStore(join(fixture.host.directory, 'account.sealed'), fixture.protection).get()) === rotated.refreshToken);
   fixture.account.close(); const next = require('../dist/electron/account.js').createAccount({ ...fixture.host, changed() {}, fetch: async () => { throw new Error('Synthetic network refusal'); } }); t.after(() => next.close());
@@ -7942,10 +8121,10 @@ async function accountSpacesFixture(t, options = {}) {
   let memberKey = Buffer.from(pair.envelope.wrapped, 'base64').subarray(0, 33).toString('base64');
   const member = { accountId: 'member-a', displayName: null, role: 'member' }, owner = { accountId: 'account-fixture', displayName: 'Account Name', role: 'owner' };
   const spaces = [
-    { id: 'space-a', kind: 'shared', algorithm: profile.algorithm, sealedProfile: profile.wrapped, role: 'owner', members: [owner, member] },
-    { id: 'space-b', kind: 'shared', generation: 2, algorithm: invalidProfile.algorithm, sealedProfile: invalidProfile.wrapped, role: 'member', members: [member] },
-    { id: 'space-c', kind: 'shared', keyPending: true, role: 'member', members: [member] },
-    { id: 'space-d', kind: 'shared', algorithm: profile.algorithm, sealedProfile: profile.wrapped, role: 'member', members: [member] },
+    { id: 'space-a', kind: 'shared', currentGeneration: 1, rotationRequired: false, createdAt: 1792627200000, algorithm: profile.algorithm, sealedProfile: profile.wrapped, role: 'owner', members: [owner, member] },
+    { id: 'space-b', kind: 'shared', currentGeneration: 2, rotationRequired: false, createdAt: 1792627200000, algorithm: invalidProfile.algorithm, sealedProfile: invalidProfile.wrapped, role: 'member', members: [member, { ...owner, role: 'member' }] },
+    { id: 'space-c', kind: 'shared', currentGeneration: 1, rotationRequired: false, createdAt: 1792627200000, algorithm: null, sealedProfile: null, keyPending: true, role: 'member', members: [member, { ...owner, role: 'member' }] },
+    { id: 'space-d', kind: 'shared', currentGeneration: 1, rotationRequired: false, createdAt: 1792627200000, algorithm: profile.algorithm, sealedProfile: profile.wrapped, role: 'member', members: [member, { ...owner, role: 'member' }] },
   ];
   const fixture = await accountFixture(t, { ...options, keyStore: { kind: 'session', async get() { return base.key.slice(); }, async set() { assert.fail('An existing key must not be replaced'); } } });
   const spacesHandler = call => {
@@ -7953,23 +8132,23 @@ async function accountSpacesFixture(t, options = {}) {
     if (url.pathname === '/v1/keys') return { status: 200, body: { keys } };
     if (url.pathname === '/v1/spaces') { assert.equal(url.searchParams.get('limit'), '200'); return { status: 200, body: { spaces: url.searchParams.has('after') ? spaces.slice(1) : spaces.slice(0, 1), after: url.searchParams.has('after') ? null : 'space-a' } }; }
     if (url.pathname.endsWith('/public-key')) return { status: 200, body: { algorithm: pair.envelope.algorithm, wrapped: memberKey } };
-    if (url.pathname === '/v1/spaces/space-a/key') { assert.equal(url.search, ''); return { status: 200, body: keyA }; }
-    if (url.pathname === '/v1/spaces/space-b/key') { assert.equal(url.searchParams.get('generation'), '2'); return { status: 200, body: keyB }; }
-    if (url.pathname === '/v1/spaces/space-d/key') return { status: 200, body: keyA };
+    if (url.pathname === '/v1/spaces/space-a/key') { assert.ok(!url.search || url.searchParams.get('generation') === '1'); return { status: 200, body: { generation: 1, ...keyA } }; }
+    if (url.pathname === '/v1/spaces/space-b/key') { assert.ok(!url.search || url.searchParams.get('generation') === '2'); return { status: 200, body: { generation: 2, ...keyB } }; }
+    if (url.pathname === '/v1/spaces/space-d/key') return { status: 200, body: { generation: 1, ...keyA } };
     if (url.pathname.endsWith('/datasets')) {
       assert.equal(url.searchParams.get('app'), 'horizon'); assert.equal(url.searchParams.get('limit'), '200');
-      if (url.pathname.includes('space-a')) return { status: 200, body: { datasets: [{ id: url.searchParams.has('after') ? 'dataset-b' : 'dataset-a', appId: 'horizon', sharedBy: { accountId: 'member-a', displayName: null }, updatedAt: Date.parse('2026-10-22T00:00:00.000Z'), size: 45 }], after: url.searchParams.has('after') ? null : 'dataset-a' } };
+      if (url.pathname.includes('space-a')) return { status: 200, body: { datasets: [{ id: url.searchParams.has('after') ? 'dataset-b' : 'dataset-a', appId: 'horizon', createdAt: 1792627200000, sharedBy: { accountId: 'member-a', displayName: null }, updatedAt: Date.parse('2026-10-22T00:00:00.000Z'), size: 45 }], after: url.searchParams.has('after') ? null : 'dataset-a' } };
       return { status: 200, body: { datasets: [], after: null } };
     }
   };
   fixture.handle(spacesHandler);
-  return { ...fixture, base, pair, keys, spaceKey, spacesHandler, changeMemberKey: async () => { const next = await crypto.createAccountKeyPair(base.key, 'member-a'); memberKey = Buffer.from(next.envelope.wrapped, 'base64').subarray(0, 33).toString('base64'); } };
+  return { ...fixture, base, pair, keys, spaceKey, spaces, spacesHandler, changeMemberKey: async () => { const next = await crypto.createAccountKeyPair(base.key, 'member-a'); memberKey = Buffer.from(next.envelope.wrapped, 'base64').subarray(0, 33).toString('base64'); } };
 }
 
 test('account reads every Space and Horizon dataset page while isolating pending keys and invalid profiles', async t => {
   const fixture = await accountSpacesFixture(t); await fixture.signIn(); const state = fixture.account.state();
   assert.equal(state.phrase, 'ready'); assert.equal(state.keyStore, 'session'); assert.equal(state.spacesError, null); assert.equal(state.spaces.length, 4);
-  assert.deepEqual(state.spaces[0], { id: 'space-a', name: 'Shared team', code: 'ST', colour: '#abc123', icon: 'star', role: 'owner', pending: false, members: [{ accountId: 'account-fixture', displayName: 'Account Name', role: 'owner', keyChanged: false }, { accountId: 'member-a', displayName: null, role: 'member', keyChanged: false }] });
+  assert.deepEqual(state.spaces[0], { id: 'space-a', name: 'Shared team', code: 'ST', colour: '#abc123', icon: 'star', role: 'owner', currentGeneration: 1, rotationRequired: false, pending: false, members: [{ accountId: 'account-fixture', displayName: 'Account Name', role: 'owner', keyChanged: false }, { accountId: 'member-a', displayName: null, role: 'member', keyChanged: false }] });
   assert.equal(state.spaces[1].name, 'Shared Space'); assert.equal(state.spaces[1].colour, null); assert.equal(state.spaces[1].pending, false);
   assert.equal(state.spaces[2].pending, true); assert.equal(state.spaces[3].pending, true); assert.equal(fixture.requests.some(call => call.path === '/v1/spaces/space-c/key'), false);
   assert.equal(fixture.requests.some(call => /^\/v1\/spaces\/space-[cd]\/datasets/.test(call.path)), false);
@@ -7989,6 +8168,24 @@ test('account refresh throttles Nebula requests, retries on demand and reports c
   const realNow = Date.now; Date.now = () => realNow() + 30001;
   try { await fixture.account.refreshSpaces(); const count = fixture.requests.length; assert.ok(count > before); await fixture.account.refreshSpaces(); assert.equal(fixture.requests.length, count); }
   finally { Date.now = realNow; }
+});
+
+test('account refuses unordered Space pages, duplicate ids and cursors that differ from the last id', async t => {
+  const fixture = await accountSpacesFixture(t); await fixture.signIn();
+  for (const body of [{ spaces: [fixture.spaces[1], fixture.spaces[0]], after: null }, { spaces: [fixture.spaces[0], fixture.spaces[0]], after: null }, { spaces: [fixture.spaces[0]], after: 'other-space' }]) {
+    fixture.handle(call => new URL(call.path, fixture.origin).pathname === '/v1/spaces' ? { status: 200, body } : fixture.spacesHandler(call));
+    await fixture.account.retry(); assert.equal(fixture.account.state().spacesError, 'ACCOUNT_INVALID_RESPONSE');
+  }
+});
+
+test('account refuses a member public-key response containing the sealed private-key tail', async t => {
+  const fixture = await accountSpacesFixture(t);
+  assert.ok(Buffer.from(fixture.pair.envelope.wrapped, 'base64').length > 33);
+  fixture.handle(call => call.path.endsWith('/members/member-a/public-key') ? { status: 200, body: fixture.pair.envelope } : fixture.spacesHandler(call));
+  await fixture.signIn();
+  assert.equal(fixture.account.state().spacesError, 'ACCOUNT_INVALID_RESPONSE');
+  const pins = require('../dist/electron/vault-storage.js').readVaultFile(join(fixture.host.directory, 'spaces-pins.json'), fixture.protection);
+  assert.equal(Object.hasOwn(pins.accounts['account-fixture'], 'member-a'), false);
 });
 
 test('account phrase failures keep words out of state and requests and successful phrases store only the account key', async t => {
@@ -8058,7 +8255,7 @@ test('account keeps a Space pending without a page error when a member has no pu
   const fixture = await accountFixture(t, { keyStore: { kind: 'session', async get() { return base.key.slice(); }, async set() {} } });
   fixture.handle(call => {
     if (call.path === '/v1/keys') return { status: 200, body: { keys: [{ recipient: 'public', ...pair.envelope }] } };
-    if (call.path.startsWith('/v1/spaces?')) return { status: 200, body: { spaces: [{ id: 'pending-space', role: 'member', keyPending: true, members: [{ accountId: 'new-member', displayName: null, role: 'member' }] }], after: null } };
+    if (call.path.startsWith('/v1/spaces?')) return { status: 200, body: { spaces: [{ id: 'pending-space', kind: 'shared', algorithm: null, sealedProfile: null, currentGeneration: 1, rotationRequired: false, createdAt: 1792627200000, role: 'member', keyPending: true, members: [{ accountId: 'account-fixture', displayName: null, role: 'member' }, { accountId: 'new-member', displayName: null, role: 'member' }] }], after: null } };
     if (call.path.endsWith('/public-key')) return { status: 404, body: { error: { code: 'not_found' } } };
     if (call.path.startsWith('/v1/spaces/')) assert.fail('Pending Spaces must not request a member envelope or datasets');
   });
@@ -8085,7 +8282,7 @@ async function sharingAccountFixture(t) {
   fixture.handle(call => {
     const override = reply?.(call); if (override) return override;
     const url = new URL(call.path, fixture.origin);
-    if (/\/objects\/project\//.test(url.pathname) && call.method === 'PUT') {
+    if (/\/objects\/kg[1-9][0-9]*\/project\//.test(url.pathname) && call.method === 'PUT') {
       assert.ok(Buffer.isBuffer(call.body)); assert.equal(Number(call.headers['content-length']), call.body.length);
       assert.equal(call.headers['x-content-sha256'], require('node:crypto').createHash('sha256').update(call.body).digest('hex'));
       objects.set(url.pathname, call.body); return { status: 200, body: { success: true } };
@@ -8099,6 +8296,143 @@ async function waitForShare(predicate) {
   for (let attempt = 0; attempt < 10000; attempt++) { if (predicate()) return; await new Promise(setImmediate); }
   assert.equal(Boolean(predicate()), true);
 }
+
+test('Beta Space accounts propagate edits, rename and image replacement through aggregate changes, then revoke before rotation', async t => {
+  const { createSpaceSharing } = require('../dist/electron/space-sharing.js'), { createSharedProjects } = require('../dist/electron/space-reader.js');
+  const { fetchQuantumChanges } = require('../dist/electron/sync-quantum.js'), crypto = require('../dist/electron/cosmic-crypto.js');
+  const fixture = spaceProjectFixture(), ownerId = 'beta-owner', readerId = 'beta-reader', spaceId = 'beta-space';
+  const computers = new Map([[ownerId, randomUUID()], [readerId, randomUUID()]]), members = new Set([ownerId, readerId]);
+  const pairs = new Map(await Promise.all([...members].map(async id => [id, await crypto.createAccountKeyPair(new Uint8Array(32).fill(id === ownerId ? 91 : 92), id)])));
+  const material = new Map([[1, new Uint8Array(32).fill(93)]]), envelopes = new Map(), datasets = new Map(), events = [], calls = [];
+  let currentGeneration = 1, rotationRequired = false, tick = Date.parse('2026-10-22T00:00:00Z'), image = fixture.bytes;
+  const sha256 = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const append = (type, values = {}) => events.push({ seq: events.length + 1, type, ownerType: 'space', ownerId: spaceId, appId: null, datasetId: null, path: null, size: null, sha256: null, memberId: null, generation: null, createdAt: ++tick, ...values });
+  const putEnvelope = async (id, generation) => envelopes.set(`${id}:${generation}`, await crypto.wrap(pairs.get(id).publicKey, material.get(generation), `space-key:${spaceId}:${generation}:member:${id}`));
+  await Promise.all([...members].map(id => putEnvelope(id, 1)));
+  const error = (status, code, fields = {}) => { const requestId = randomUUID(); return new Response(JSON.stringify({ error: { code, message: 'Synthetic contract refusal', fields, requestId } }), { status, headers: { 'content-type': 'application/json', 'x-request-id': requestId, ...(status === 429 ? { 'retry-after': '1' } : {}) } }); };
+  const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json', 'x-request-id': randomUUID(), ...headers } });
+  const request = id => async (route, init = {}, app = 'horizon') => {
+    const url = new URL(route, 'https://quantum.example.test'), method = init.method ?? 'GET'; calls.push({ id, app, method, route });
+    if (url.pathname === '/v1/changes') {
+      assert.equal(method, 'GET'); assert.equal(url.searchParams.get('limit'), '1000');
+      const after = url.searchParams.get('after'), prefix = Buffer.from(`${id}:`).toString('base64url');
+      if (after !== null && !after.startsWith(prefix)) return error(410, 'cursor_expired', { bootstrap: true });
+      const sequence = after === null ? 0 : Number(after.slice(prefix.length));
+      const changes = events.filter(event => event.seq > sequence && (members.has(id) || event.type === 'member_removed' && event.memberId === id));
+      return json({ changes, cursor: prefix + events.length }, 200, changes.length ? {} : { 'retry-after': '1' });
+    }
+    if (!members.has(id)) return error(404, 'not_found');
+    const keyRoute = `/v1/spaces/${spaceId}/key`;
+    if (url.pathname === keyRoute) {
+      const generation = Number(url.searchParams.get('generation') ?? currentGeneration), envelope = envelopes.get(`${id}:${generation}`);
+      return envelope && (generation <= currentGeneration || id === ownerId && generation === currentGeneration + 1) ? json({ generation, ...envelope }) : error(404, 'not_found');
+    }
+    const recipient = new RegExp(`^/v1/spaces/${spaceId}/keys/member:([A-Za-z0-9_-]+):([0-9]+)$`).exec(url.pathname);
+    if (recipient && method === 'PUT') {
+      const generation = Number(recipient[2]);
+      if (id !== ownerId) return error(403, 'forbidden');
+      if (!members.has(recipient[1])) return error(404, 'not_found');
+      if (generation > currentGeneration + 1) return error(409, 'generation_conflict', { currentGeneration: String(currentGeneration) });
+      assert.equal(init.headers['content-type'], 'application/json');
+      const envelope = JSON.parse(init.body); assert.deepEqual(Object.keys(envelope).sort(), ['algorithm', 'wrapped']);
+      envelopes.set(`${recipient[1]}:${generation}`, envelope); return json({ success: true });
+    }
+    if (url.pathname === `/v1/spaces/${spaceId}/members/${readerId}` && method === 'DELETE') {
+      if (app !== 'nebula') return error(403, 'app_forbidden');
+      members.delete(readerId); for (const entry of envelopes.keys()) if (entry.startsWith(`${readerId}:`) || entry.endsWith(`:${currentGeneration + 1}`)) envelopes.delete(entry);
+      rotationRequired = true; append('member_removed', { memberId: readerId }); return json({ success: true });
+    }
+    const commit = new RegExp(`^/v1/spaces/${spaceId}/generations/([0-9]+)/commit$`).exec(url.pathname);
+    if (commit && method === 'POST') {
+      if (app !== 'nebula') return error(403, 'app_forbidden');
+      const generation = Number(commit[1]);
+      if (generation !== currentGeneration + 1 || [...members].some(member => !envelopes.has(`${member}:${generation}`))) return error(409, 'generation_conflict', { currentGeneration: String(currentGeneration) });
+      currentGeneration = generation; rotationRequired = false; append('key_generation_committed', { generation }); return json({ success: true });
+    }
+    const root = `/v1/spaces/${spaceId}/datasets`, match = new RegExp(`^${root}/([^/]+)(?:/objects(?:/(.+))?)?$`).exec(url.pathname);
+    if (!envelopes.has(`${id}:${currentGeneration}`)) return error(403, 'key_pending');
+    if (url.pathname === root) return json({ datasets: [...datasets].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([datasetId, dataset]) => ({ id: datasetId, appId: 'horizon', createdAt: dataset.createdAt, updatedAt: Math.max(dataset.createdAt, ...[...dataset.objects.values()].map(object => object.createdAt)), size: [...dataset.objects.values()].reduce((sum, object) => sum + object.body.length, 0), sharedBy: { accountId: ownerId, displayName: 'Owner' } })), after: null });
+    if (!match) return error(404, 'not_found');
+    const datasetId = match[1], path = match[2], isObjects = url.pathname.includes('/objects'), dataset = datasets.get(datasetId);
+    if (!isObjects && method === 'PUT') {
+      if (init.body !== undefined) return error(400, 'invalid_request');
+      if (!dataset) { datasets.set(datasetId, { createdAt: ++tick, objects: new Map() }); append('dataset_created', { datasetId, appId: 'horizon' }); }
+      return json({ id: datasetId, appId: 'horizon', createdAt: datasets.get(datasetId).createdAt }, dataset ? 200 : 201);
+    }
+    if (!dataset) return error(404, 'not_found');
+    if (!isObjects && method === 'DELETE') { datasets.delete(datasetId); append('dataset_deleted', { appId: 'horizon', datasetId }); return json({ success: true }); }
+    if (!path) {
+      assert.equal(url.searchParams.get('prefix'), 'kg');
+      return json({ objects: [...dataset.objects].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([path, value]) => ({ path, size: value.body.length, sha256: sha256(value.body), createdAt: value.createdAt })), after: null });
+    }
+    const segments = path.split('/'), generation = Number(segments[0].slice(2));
+    assert.match(path, /^kg[1-9][0-9]*\/project\/[0-9a-f-]{36}\/[0-9a-f-]{36}\//);
+    if (method === 'PUT') {
+      if (generation !== currentGeneration) return error(409, generation < currentGeneration ? 'stale_generation' : 'unknown_generation', { currentGeneration: String(currentGeneration) });
+      assert.equal(segments[2], computers.get(id)); assert.equal(init.headers['content-type'], 'application/octet-stream'); assert.equal(Number(init.headers['content-length']), init.body.length); assert.equal(init.headers['x-content-sha256'], sha256(init.body));
+      const previous = dataset.objects.get(path); if (previous && !previous.body.equals(init.body)) return error(409, 'object_conflict');
+      if (!previous) { dataset.objects.set(path, { body: Buffer.from(init.body), createdAt: ++tick }); append('object_added', { appId: 'horizon', datasetId, path, size: init.body.length, sha256: sha256(init.body) }); }
+      return json({ success: true }, previous ? 200 : 201);
+    }
+    const entry = dataset.objects.get(path);
+    return entry ? new Response(entry.body, { headers: { 'content-type': 'application/octet-stream', 'content-length': String(entry.body.length), 'x-content-sha256': sha256(entry.body), 'content-disposition': 'attachment', 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' } }) : error(404, 'not_found');
+  };
+  const sources = new Map([...computers].map(([id, computerId]) => [id, { accountId: id, computerId, profileIds: [randomUUID()], assertActive() {}, request: request(id) }]));
+  const response = async (id, route, method = 'GET', body) => {
+    const result = await request(id)(route, { method, ...(body ? { body, headers: { 'content-type': 'application/octet-stream', 'content-length': String(body.length), 'x-content-sha256': sha256(body) } } : {}) });
+    return { status: result.status, ok: result.ok, value: result.headers.get('content-type') === 'application/octet-stream' ? Buffer.from(await result.arrayBuffer()) : await result.json() };
+  };
+  const space = id => ({ id: spaceId, name: 'Team', code: null, colour: null, icon: null, role: id === ownerId ? 'owner' : 'member', pending: false, currentGeneration, rotationRequired, members: [...members].map(accountId => ({ accountId, displayName: null, role: accountId === ownerId ? 'owner' : 'member', keyChanged: false })) });
+  const ownerContext = { accountId: ownerId, computerId: computers.get(ownerId), session: 1, accessRevision: 1, spaces: [space(ownerId)] };
+  let readerContext = { accountId: readerId, session: 1, accessRevision: 1, spaces: [space(readerId)], shared: [] }, cursor;
+  const key = async (id, generation) => {
+    const result = await response(id, `/v1/spaces/${spaceId}/key${generation === undefined ? '' : `?generation=${generation}`}`);
+    assert.equal(result.status, 200); return { generation: result.value.generation, key: await crypto.unwrap(pairs.get(id), result.value, `space-key:${spaceId}:${result.value.generation}:member:${id}`) };
+  };
+  let publishes = 0;
+  const sharing = createSpaceSharing({ directory: temporaryDirectory(t, 'beta-space-owner'), cipher: authenticatedCipher(), changed() { publishes++; }, context: () => ownerContext, key: (_space, generation) => key(ownerId, generation), request: (route, method, body) => response(ownerId, route, method, body), project: fixture.desktop.get, image() { return image; } });
+  const reader = createSharedProjects({ context: () => readerContext, key: (_space, generation) => key(readerId, generation), request: route => response(readerId, route) });
+  t.after(() => { sharing.close(); reader.clear(); });
+  const applyFeed = async () => {
+    const page = await fetchQuantumChanges(sources.get(readerId), cursor); cursor = page.cursor;
+    if (page.changes.some(change => change.type === 'member_removed' && change.memberId === readerId)) { readerContext = { ...readerContext, accessRevision: readerContext.accessRevision + 1, spaces: [], shared: [] }; reader.clear(); }
+    else if (page.changes.length) {
+      const result = await response(readerId, `/v1/spaces/${spaceId}/datasets?app=horizon&limit=200`);
+      readerContext = { ...readerContext, accessRevision: readerContext.accessRevision + 1, spaces: [space(readerId)], shared: result.value.datasets.map(dataset => ({ spaceId, datasetId: dataset.id, sharedBy: dataset.sharedBy, updatedAt: new Date(dataset.updatedAt).toISOString(), size: dataset.size, title: null })) };
+      reader.clear();
+    }
+    return page;
+  };
+  await sharing.shareProject(fixture.project.id, spaceId); await applyFeed(); const datasetId = [...datasets.keys()][0];
+  const open = () => reader.openSharedProject(spaceId, datasetId);
+  let content = await open(); assert.equal(content.items[0].text, 'Chosen project text'); assert.deepEqual(await reader.image(null, content.items[1].id), image);
+  assert.equal(JSON.stringify(content).includes('OTHER_PROJECT_SECRET'), false); assert.equal(JSON.stringify(content).includes('cookies'), false); assert.equal(JSON.stringify(content).includes('privateWindow'), false);
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() }); t.after(() => t.mock.timers.reset());
+  const publish = async mutate => { const before = publishes; mutate(); fixture.project.updatedAt++; sharing.changed(); t.mock.timers.tick(30000); await waitForShare(() => publishes > before); await applyFeed(); return open(); };
+  content = await publish(() => { fixture.project.items[0].text = 'Edited through aggregate changes'; }); assert.equal(content.items[0].text, 'Edited through aggregate changes');
+  content = await publish(() => { fixture.project.name = 'Renamed through aggregate changes'; }); assert.equal(content.title, 'Renamed through aggregate changes');
+  content = await publish(() => { image = Buffer.from(fixture.bytes); image[image.length - 1] ^= 1; fixture.project.items[1].updatedAt++; fixture.project.items[1].image.bytes = image.length; });
+  assert.deepEqual(await reader.image(null, content.items[1].id), image);
+  const idle = calls.length; const empty = await applyFeed(); assert.equal(empty.changes.length, 0); assert.equal(calls.length, idle + 1); assert.equal(calls.at(-1).route.startsWith('/v1/changes?'), true);
+  await sharing.stopSharing(fixture.project.id); const stopped = await applyFeed(); assert.ok(stopped.changes.some(change => change.type === 'dataset_deleted')); await assert.rejects(open(), /SPACE_SHARED_UNAVAILABLE/);
+  await sharing.shareProject(fixture.project.id, spaceId); await applyFeed();
+  const horizonCommit = await request(ownerId)(`/v1/spaces/${spaceId}/generations/2/commit`, { method: 'POST' }); assert.equal(horizonCommit.status, 403);
+  assert.equal((await request(ownerId)(`/v1/spaces/${spaceId}/members/${readerId}`, { method: 'DELETE' }, 'nebula')).status, 200);
+  await applyFeed(); assert.deepEqual(readerContext.spaces, []); const removedAt = events.length;
+  material.set(2, new Uint8Array(32).fill(94));
+  const rotated = await crypto.wrap(pairs.get(ownerId).publicKey, material.get(2), `space-key:${spaceId}:2:member:${ownerId}`);
+  assert.equal((await request(ownerId)(`/v1/spaces/${spaceId}/keys/member:${ownerId}:2`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(rotated) })).status, 200);
+  assert.equal(currentGeneration, 1, 'Staging an envelope cannot commit the generation');
+  assert.equal((await request(ownerId)(`/v1/spaces/${spaceId}/generations/2/commit`, { method: 'POST' }, 'nebula')).status, 200);
+  ownerContext.accessRevision++; ownerContext.spaces = [space(ownerId)];
+  const before = publishes; fixture.project.items[0].text = 'After removal, owner only'; fixture.project.updatedAt++; sharing.changed(); t.mock.timers.tick(30000); await waitForShare(() => publishes > before);
+  assert.ok(events.slice(removedAt).some(change => change.type === 'object_added' && change.path.startsWith('kg2/')));
+  assert.equal((await applyFeed()).changes.length, 0); assert.equal((await request(readerId)(`/v1/spaces/${spaceId}/key?generation=2`)).status, 404);
+  const latestDataset = [...datasets.keys()][0], newer = [...datasets.get(latestDataset).objects.keys()].find(path => path.startsWith('kg2/'));
+  assert.equal((await request(readerId)(`/v1/spaces/${spaceId}/datasets/${latestDataset}/objects/${newer}`)).status, 404);
+  await assert.rejects(reader.openSharedProject(spaceId, latestDataset), /SPACE_SHARED_UNAVAILABLE/);
+  assert.equal(calls.some(call => /\/datasets\/[^/?]+\/changes(?:\?|$)/.test(call.route)), false);
+});
 
 test('Space manifests bind the Space, dataset and generation, enforce titles and open with another member key', async () => {
   const { sealProjectManifest, openProjectManifest } = require('../dist/electron/space-sharing.js');
@@ -8133,7 +8467,7 @@ test('account shares only the chosen project with blobs and checkpoint before it
   const writes = fixture.requests.slice(before).filter(call => call.method === 'PUT'); assert.equal(writes.length, 4);
   assert.match(writes[0].path, /^\/v1\/spaces\/space-a\/datasets\/[0-9a-f-]{36}$/);
   assert.match(writes[1].path, /\/blobs\/[^/]+\.hzs$/); assert.match(writes[2].path, /\/checkpoints\/1-[^/]+\.hzs$/); assert.match(writes[3].path, /\/dataset\.hzs$/);
-  const match = /^\/v1\/spaces\/space-a\/datasets\/([^/]+)\/objects\/project\/([^/]+)\/([^/]+)\/checkpoints\/(\d+)-([^/]+)\.hzs$/.exec(writes[2].path);
+  const match = /^\/v1\/spaces\/space-a\/datasets\/([^/]+)\/objects\/kg1\/project\/([^/]+)\/([^/]+)\/checkpoints\/(\d+)-([^/]+)\.hzs$/.exec(writes[2].path);
   assert.equal(match[2], new URL(fixture.opened[0]).searchParams.get('computerId'));
   const identity = { spaceId: 'space-a', dataset: match[1], device: match[2], generation: match[3], sequence: Number(match[4]), id: match[5], kind: 'checkpoint', keyGeneration: 1 };
   const checkpoint = openSpacePackage(spaceKey.slice(), identity, writes[2].body); validateSpaceCheckpoint(checkpoint, identity);
@@ -8178,26 +8512,26 @@ test('account opens the newest shared manifest with its generation, caches title
   const dataset = randomUUID(), bad = randomUUID(), mine = randomUUID(), writer = randomUUID(), oldest = randomUUID(), newest = randomUUID();
   const key = await crypto.wrap(fixture.pair.publicKey, fixture.spaceKey, 'space-key:space-a:2:member:account-fixture');
   let updatedAt = '2026-10-22T00:00:00.000Z', manifest = await sealProjectManifest(fixture.spaceKey, 'space-a', dataset, 2, 'Newest shared title', updatedAt);
-  const manifestPath = `project/${writer}/${newest}/dataset.hzs`;
+  const manifestPath = `kg2/project/${writer}/${newest}/dataset.hzs`;
   fixture.handle(call => {
     const url = new URL(call.path, fixture.origin);
-    if (url.pathname === '/v1/spaces/space-a/key' && url.searchParams.get('generation') === '2') return { status: 200, body: key };
-    if (url.pathname === '/v1/spaces/space-a/datasets') return { status: 200, body: { datasets: [dataset, bad, mine].map(id => ({ id, appId: 'horizon', sharedBy: { accountId: id === mine ? 'account-fixture' : 'member-a', displayName: null }, updatedAt, size: 500 })), after: null } };
+    if (url.pathname === '/v1/spaces/space-a/key' && url.searchParams.get('generation') === '2') return { status: 200, body: { generation: 2, ...key } };
+    if (url.pathname === '/v1/spaces/space-a/datasets') return { status: 200, body: { datasets: [dataset, bad, mine].sort().map(id => ({ id, appId: 'horizon', createdAt: 1792627200000, sharedBy: { accountId: id === mine ? 'account-fixture' : 'member-a', displayName: null }, updatedAt: Date.parse(updatedAt), size: 500 })), after: null } };
     if (url.pathname === `/v1/spaces/space-a/datasets/${dataset}/objects`) {
-      assert.equal(url.searchParams.get('prefix'), 'project/');
-      return { status: 200, body: { objects: [{ path: `project/${writer}/${oldest}/dataset.hzs`, createdAt: '2026-10-21T00:00:00.000Z' }, { path: manifestPath, createdAt: '2026-10-22T00:00:00.000Z' }], after: null } };
+      assert.equal(url.searchParams.get('prefix'), 'kg');
+      return { status: 200, body: { objects: [{ path: `kg2/project/${writer}/${oldest}/dataset.hzs`, size: manifest.length, sha256: require('node:crypto').createHash('sha256').update(manifest).digest('hex'), createdAt: Date.parse('2026-10-21T00:00:00.000Z') }, { path: manifestPath, size: manifest.length, sha256: require('node:crypto').createHash('sha256').update(manifest).digest('hex'), createdAt: Date.parse('2026-10-22T00:00:00.000Z') }].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0), after: null } };
     }
     if (url.pathname === `/v1/spaces/space-a/datasets/${dataset}/objects/${manifestPath}`) return { status: 200, body: manifest };
-    if (url.pathname === `/v1/spaces/space-a/datasets/${bad}/objects`) return { status: 503, body: { error: { code: 'unavailable' } } };
+    if (url.pathname === `/v1/spaces/space-a/datasets/${bad}/objects`) return { status: 503, body: { error: { code: 'identity_unavailable' } } };
     if (url.pathname.includes(`/datasets/${mine}/objects`) || url.pathname.includes(oldest)) assert.fail('Only other accounts newest manifests may be read');
     return fixture.spacesHandler(call);
   });
   await fixture.signIn();
-  assert.deepEqual(fixture.account.state().shared.map(row => [row.datasetId, row.title]), [[dataset, 'Newest shared title'], [bad, null]]);
+  assert.deepEqual(fixture.account.state().shared.map(row => [row.datasetId, row.title]), [[dataset, 'Newest shared title'], [bad, null]].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
   const count = fixture.requests.filter(call => call.path.includes('/objects')).length;
   await fixture.account.retry(); assert.equal(fixture.requests.filter(call => call.path.includes('/objects')).length, count);
   updatedAt = '2026-10-22T00:01:00.000Z'; manifest = await sealProjectManifest(fixture.spaceKey, 'space-a', dataset, 2, 'Renamed shared title', updatedAt);
-  await fixture.account.retry(); assert.equal(fixture.account.state().shared[0].title, 'Renamed shared title'); assert.ok(fixture.requests.filter(call => call.path.includes('/objects')).length > count);
+  await fixture.account.retry(); assert.equal(fixture.account.state().shared.find(row => row.datasetId === dataset).title, 'Renamed shared title'); assert.ok(fixture.requests.filter(call => call.path.includes('/objects')).length > count);
 });
 
 test('account debounces shared Desktop changes for 30 seconds and sends only a new checkpoint for existing blobs', async t => {
@@ -8213,7 +8547,7 @@ test('account debounces shared Desktop changes for 30 seconds and sends only a n
   await waitForShare(() => fixture.states.length > statesBefore && account.projectState(project.id).shareError === null);
   const writes = fixture.requests.slice(before).filter(call => call.method === 'PUT'); assert.equal(writes.length, 1); assert.match(writes[0].path, /\/checkpoints\/2-/);
   const { openSpacePackage } = require('../dist/electron/space-sharing.js'), parts = writes[0].path.split('/'), name = parts.at(-1);
-  const checkpoint = openSpacePackage(fixture.spaceKey, { spaceId: 'space-a', dataset: parts[5], device: parts[8], generation: parts[9], keyGeneration: 1, sequence: 2, id: name.slice(2, -4), kind: 'checkpoint' }, writes[0].body);
+  const checkpoint = openSpacePackage(fixture.spaceKey, { spaceId: 'space-a', dataset: parts[5], device: parts[9], generation: parts[10], keyGeneration: 1, sequence: 2, id: name.slice(2, -4), kind: 'checkpoint' }, writes[0].body);
   assert.equal(checkpoint.project.items[0].text, 'Second local edit'); assert.equal(fixture.images.length, 1);
 });
 
@@ -8247,12 +8581,12 @@ test('account permits at most 30 dataset PUT attempts per hour even when all sha
 test('Space sharing discards queued commands after account switches and renewed sessions and cannot share one project twice across accounts', async t => {
   const { createSpaceSharing } = require('../dist/electron/space-sharing.js');
   for (const change of ['account', 'session']) {
-    const fixture = spaceProjectFixture(), directory = temporaryDirectory(t, 'space-queue'), requests = [], original = { accountId: randomUUID(), computerId: randomUUID(), session: 1, spaces: [{ id: 'space-a', name: 'Team', pending: false }] };
+    const fixture = spaceProjectFixture(), directory = temporaryDirectory(t, 'space-queue'), requests = [], original = { accountId: randomUUID(), computerId: randomUUID(), session: 1, spaces: [{ id: 'space-a', name: 'Team', pending: false, currentGeneration: 1, rotationRequired: false }] };
     let context = original, release, entered;
     const waiting = new Promise(done => { release = done; }), started = new Promise(done => { entered = done; });
     const manager = createSpaceSharing({ directory, cipher: authenticatedCipher(), context: () => context, changed() {}, project: fixture.desktop.get, image: fixture.desktop.image,
       async key() { entered(); await waiting; return { generation: 1, key: new Uint8Array(32).fill(72) }; },
-      async request(route, method) { requests.push([method, route]); return { status: 200, ok: true, value: { success: true } }; } });
+      async request(route, method) { requests.push([method, route]); return { status: 200, ok: true, value: method === 'PUT' && !route.includes('/objects/') ? { id: route.split('/').at(-1), appId: 'horizon', createdAt: 1792627200000 } : { success: true } }; } });
     t.after(() => manager.close());
     const first = assert.rejects(manager.shareProject(fixture.project.id, 'space-a'), /SPACE_SHARE_FAILED/); await started;
     const queued = assert.rejects(manager.shareProject(fixture.other.id, 'space-a'), /SPACE_SHARE_FAILED/), stopped = assert.rejects(manager.stopSharing(fixture.project.id), /SPACE_SHARE_FAILED/);
@@ -8267,14 +8601,14 @@ test('Space sharing discards queued commands after account switches and renewed 
 
 test('Space sharing resumes its sealed record after restart and uses new create-only object paths after renaming and key rotation', async t => {
   const { createSpaceSharing, openProjectManifest } = require('../dist/electron/space-sharing.js'), fixture = spaceProjectFixture(), directory = temporaryDirectory(t, 'space-resume'), cipher = authenticatedCipher();
-  const context = { accountId: randomUUID(), computerId: randomUUID(), spaces: [{ id: 'space-a', name: 'Team', pending: false }] }, objects = new Map(), requests = [], key = new Uint8Array(32).fill(73);
+  const context = { accountId: randomUUID(), computerId: randomUUID(), spaces: [{ id: 'space-a', name: 'Team', pending: false, currentGeneration: 1, rotationRequired: false }] }, objects = new Map(), requests = [], key = new Uint8Array(32).fill(73);
   let generation = 1, changes = 0;
   const options = { directory, cipher, context: () => context, changed() { changes++; }, project: fixture.desktop.get, image: fixture.desktop.image,
     async key() { return { generation, key: key.slice() }; },
     async request(route, method, body) {
       requests.push([method, route]);
       if (body) { assert.equal(objects.has(route), false, 'Shared objects must use unused paths'); objects.set(route, body); }
-      return { status: 200, ok: true, value: { success: true } };
+      return { status: 200, ok: true, value: method === 'PUT' && !route.includes('/objects/') ? { id: route.split('/').at(-1), appId: 'horizon', createdAt: 1792627200000 } : { success: true } };
     } };
   let manager = createSpaceSharing(options); t.after(() => manager.close());
   try { await manager.shareProject(fixture.project.id, 'space-a'); } catch (error) { assert.fail(`Initial share: ${error.message}; requests ${JSON.stringify(requests)}`); }
@@ -8284,8 +8618,8 @@ test('Space sharing resumes its sealed record after restart and uses new create-
   const before = changes; manager = createSpaceSharing(options); await new Promise(setImmediate); t.mock.timers.tick(30000); await waitForShare(() => changes > before);
   assert.equal([...objects.keys()].filter(path => path.endsWith('/dataset.hzs')).length, 1);
   assert.ok([...objects.keys()].some(path => /\/checkpoints\/2-/.test(path)));
-  generation = 2; fixture.project.name = 'Renamed project'; fixture.project.updatedAt++; const renamed = changes; manager.changed(); t.mock.timers.tick(30000); await waitForShare(() => changes > renamed);
-  const manifests = [...objects.keys()].filter(path => path.endsWith('/dataset.hzs')); assert.equal(manifests.length, 2); assert.notEqual(manifests[0].split('/')[9], manifests[1].split('/')[9]);
+  generation = 2; context.spaces[0].currentGeneration = 2; fixture.project.name = 'Renamed project'; fixture.project.updatedAt++; const renamed = changes; manager.changed(); t.mock.timers.tick(30000); await waitForShare(() => changes > renamed);
+  const manifests = [...objects.keys()].filter(path => path.endsWith('/dataset.hzs')); assert.equal(manifests.length, 2); assert.notEqual(manifests[0].split('/')[10], manifests[1].split('/')[10]);
   assert.deepEqual(await openProjectManifest(key, 'space-a', dataset, objects.get(manifests[1])), { title: 'Renamed project', sharedAt: first.sharedAt, keyGeneration: 2 });
   assert.equal(requests.filter(([method, route]) => method === 'PUT' && !route.includes('/objects/')).length, 1);
   assert.equal([...objects.keys()].filter(path => path.includes('/blobs/')).length, 2);
@@ -8300,18 +8634,18 @@ async function sharedReaderFixture(t) {
   const fixture = await accountSpacesFixture(t, { desktop }), objects = new Map(), keys = new Map([[1, fixture.spaceKey.slice()]]);
   const wrongSpaceKey = await require('../dist/electron/cosmic-crypto.js').wrap(fixture.pair.publicKey, fixture.spaceKey, 'space-key:space-b:1:member:account-fixture');
   let tick = Date.parse('2026-10-22T00:00:00Z'), dataset, listed = true, sharedBy = 'member-a', listedSpace = 'space-a', reply;
-  const writerContext = { accountId: 'member-a', computerId: randomUUID(), session: 1, spaces: [{ id: 'space-a', name: 'Shared team', pending: false }] };
+  const writerContext = { accountId: 'member-a', computerId: randomUUID(), session: 1, spaces: [{ id: 'space-a', name: 'Shared team', pending: false, currentGeneration: 1, rotationRequired: false }] };
   fixture.handle(call => {
     const override = reply?.(call); if (override) return override;
     const url = new URL(call.path, fixture.origin);
     if (url.pathname === '/v1/spaces/space-a/key' && url.searchParams.get('generation') === '1') return fixture.spacesHandler({ ...call, path: url.pathname });
-    if (url.pathname === '/v1/spaces/space-b/key' && url.searchParams.get('generation') === '1') return { status: 200, body: wrongSpaceKey };
-    if (url.pathname.endsWith('/datasets') && call.method === 'GET') return { status: 200, body: { datasets: listed && url.pathname === `/v1/spaces/${listedSpace}/datasets` ? [{ id: dataset, sharedBy: { accountId: sharedBy, displayName: 'Alex' }, updatedAt: new Date(tick).toISOString(), size: 1000 }] : [], after: null } };
-    if (/\/datasets\/[^/]+$/.test(url.pathname) && call.method === 'PUT') { dataset = url.pathname.split('/').at(-1); return { status: 200, body: { success: true } }; }
+    if (url.pathname === '/v1/spaces/space-b/key' && url.searchParams.get('generation') === '1') return { status: 200, body: { generation: 1, ...wrongSpaceKey } };
+    if (url.pathname.endsWith('/datasets') && call.method === 'GET') return { status: 200, body: { datasets: listed && url.pathname === `/v1/spaces/${listedSpace}/datasets` ? [{ id: dataset, appId: 'horizon', createdAt: 1792627200000, sharedBy: { accountId: sharedBy, displayName: 'Alex' }, updatedAt: tick, size: 1000 }] : [], after: null } };
+    if (/\/datasets\/[^/]+$/.test(url.pathname) && call.method === 'PUT') { dataset = url.pathname.split('/').at(-1); return { status: 200, body: { id: dataset, appId: 'horizon', createdAt: tick } }; }
     if (url.pathname.includes('/objects')) {
       if (call.method === 'PUT') { objects.set(url.pathname, { body: call.body, createdAt: ++tick }); return { status: 200, body: { success: true } }; }
       if (url.pathname.endsWith('/objects')) {
-        const prefix = `${url.pathname}/`, rows = [...objects].filter(([path]) => path.startsWith(prefix)).map(([path, value]) => ({ path: path.slice(prefix.length), createdAt: value.createdAt, size: value.body.length }));
+        const prefix = `${url.pathname}/`, rows = [...objects].filter(([path]) => path.startsWith(prefix)).map(([path, value]) => ({ path: path.slice(prefix.length), createdAt: value.createdAt, size: value.body.length, sha256: require('node:crypto').createHash('sha256').update(value.body).digest('hex') })).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
         return { status: 200, body: { objects: rows, after: null } };
       }
       const entry = objects.get(url.pathname); return entry ? { status: 200, body: entry.body } : { status: 404, body: { error: { code: 'not_found' } } };
@@ -8326,13 +8660,13 @@ async function sharedReaderFixture(t) {
     } });
   t.after(() => writer.close()); await writer.shareProject(source.project.id, 'space-a');
   const checkpointPath = [...objects.keys()].find(path => path.includes('/checkpoints/')), parts = checkpointPath.split('/');
-  const identity = { spaceId: 'space-a', dataset, device: parts[8], generation: parts[9], keyGeneration: 1, sequence: 1, id: parts.at(-1).slice(2, -4), kind: 'checkpoint' };
+  const identity = { spaceId: 'space-a', dataset, device: parts[9], generation: parts[10], keyGeneration: 1, sequence: 1, id: parts.at(-1).slice(2, -4), kind: 'checkpoint' };
   const snapshot = openSpacePackage(fixture.spaceKey.slice(), identity, objects.get(checkpointPath).body);
   await fixture.signIn(); const before = readFileSync(desktopPath);
   const publish = async ({ generation = identity.generation, keyGeneration = 1, sequence = 2, mutate = () => {}, manifest = false, aad = {} } = {}) => {
     const current = { ...identity, generation, keyGeneration, sequence, id: randomUUID(), ...aad }, value = structuredClone(snapshot);
     value.sequence = sequence; value.keyGeneration = keyGeneration; mutate(value);
-    const base = `/v1/spaces/space-a/datasets/${dataset}/objects/project/${identity.device}/${generation}`;
+    const base = `/v1/spaces/space-a/datasets/${dataset}/objects/kg${keyGeneration}/project/${identity.device}/${generation}`;
     const path = `${base}/checkpoints/${sequence}-${current.id}.hzs`;
     objects.set(path, { body: sealSpacePackage(keys.get(keyGeneration).slice(), current, value), createdAt: ++tick });
     if (manifest) objects.set(`${base}/dataset.hzs`, { body: await sealProjectManifest(keys.get(keyGeneration).slice(), 'space-a', dataset, keyGeneration, value.project.name, new Date(tick).toISOString()), createdAt: ++tick });
@@ -8343,8 +8677,10 @@ async function sharedReaderFixture(t) {
     respond(value) { reply = value; }, listing(value) { if ('listed' in value) listed = value.listed; if ('sharedBy' in value) sharedBy = value.sharedBy; if ('space' in value) listedSpace = value.space; },
     async generation(number) {
       const key = new Uint8Array(32).fill(80 + number); keys.set(number, key);
+      fixture.spaces[0].currentGeneration = number;
       const envelope = await require('../dist/electron/cosmic-crypto.js').wrap(fixture.pair.publicKey, key, `space-key:space-a:${number}:member:account-fixture`);
-      reply = call => call.path === `/v1/spaces/space-a/key?generation=${number}` ? { status: 200, body: envelope } : undefined;
+      reply = call => call.path === `/v1/spaces/space-a/key?generation=${number}` || call.path === '/v1/spaces/space-a/key' ? { status: 200, body: { generation: number, ...envelope } } : undefined;
+      await fixture.account.retry();
     },
   };
 }
@@ -8377,15 +8713,23 @@ test('Shared project reader chooses the newest writer generation and then its hi
   assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
 });
 
+test('Shared project reader resolves same-millisecond rename descriptors by their checkpoint sequence', async t => {
+  const fixture = await sharedReaderFixture(t), generation = '00000000-0000-4000-8000-000000000000';
+  assert.ok(generation.localeCompare(fixture.identity.generation) < 0);
+  await fixture.publish({ generation, sequence: 2, manifest: true, mutate: value => { value.project.name = 'Rename in the same millisecond'; } });
+  for (const entry of fixture.objects.values()) entry.createdAt = 1792627200000;
+  assert.equal((await fixture.open()).title, 'Rename in the same millisecond');
+});
+
 test('Shared project reader refuses tampered checkpoints, mismatched AAD and snapshots invalid under Desktop rules', async t => {
   const fixture = await sharedReaderFixture(t);
   const bad = await fixture.publish(); const valid = Buffer.from(fixture.objects.get(bad.path).body);
   fixture.objects.get(bad.path).body[valid.length - 1] ^= 1;
-  await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  await assert.rejects(fixture.open(), /ACCOUNT_INVALID_RESPONSE/);
   fixture.objects.get(bad.path).body = valid;
-  await fixture.publish({ sequence: 3, aad: { dataset: randomUUID() } }); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
-  await fixture.publish({ sequence: 4, mutate: value => { value.project.items[0].folder = randomUUID(); } }); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
-  await fixture.publish({ sequence: 5, mutate: value => { value.project.items[0].source = { url: 'file:///local-secret', title: 'Unsafe' }; } }); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  await fixture.publish({ sequence: 3, aad: { dataset: randomUUID() } }); await assert.rejects(fixture.open(), /ACCOUNT_INVALID_RESPONSE/);
+  await fixture.publish({ sequence: 4, mutate: value => { value.project.items[0].folder = randomUUID(); } }); await assert.rejects(fixture.open(), /ACCOUNT_INVALID_RESPONSE/);
+  await fixture.publish({ sequence: 5, mutate: value => { value.project.items[0].source = { url: 'file:///local-secret', title: 'Unsafe' }; } }); await assert.rejects(fixture.open(), /ACCOUNT_INVALID_RESPONSE/);
   assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
 });
 
@@ -8396,17 +8740,17 @@ test('Shared project reader refuses own, unlisted, pending and wrong-Space datas
   assert.throws(() => fixture.account.sharedItem(null, fixture.source.project.items[0].id));
   await assert.rejects(fixture.account.openSharedProject('space-a', randomUUID()), /SPACE_SHARED_UNAVAILABLE/);
   await assert.rejects(fixture.account.openSharedProject('space-c', fixture.dataset), /SPACE_SHARED_UNAVAILABLE/);
-  fixture.listing({ sharedBy: 'former-member' }); await fixture.account.retry(); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  fixture.listing({ sharedBy: 'former-member' }); await fixture.account.retry(); assert.equal((await fixture.open()).items[0].text, 'Chosen project text');
   fixture.listing({ sharedBy: 'account-fixture' }); await fixture.account.retry();
   await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/); assert.throws(() => fixture.account.sharedItem(null, item.id));
   fixture.listing({ sharedBy: 'member-a', listed: false }); await fixture.account.retry(); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
   fixture.listing({ listed: true, space: 'space-b' });
   for (const [path, value] of [...fixture.objects]) fixture.objects.set(path.replace('/spaces/space-a/', '/spaces/space-b/'), value);
-  await fixture.account.retry(); await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+  await fixture.account.retry(); await assert.rejects(fixture.open(), /ACCOUNT_INVALID_RESPONSE/);
   assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
 });
 
-test('Shared capture bytes are fetched on demand only for their scoped item ids and cleared when the account refreshes', async t => {
+test('Shared capture bytes are scoped and remain cached across unchanged account refreshes', async t => {
   const fixture = await sharedReaderFixture(t), content = await fixture.open(), capture = content.items[1], count = () => fixture.requests.filter(call => call.method === 'GET' && call.path.includes('/blobs/')).length;
   assert.equal(count(), 0); assert.deepEqual(await fixture.account.sharedImage(null, capture.id), fixture.source.bytes); assert.equal(count(), 1);
   const copy = await fixture.account.sharedImage(null, capture.id); copy.fill(0);
@@ -8415,7 +8759,7 @@ test('Shared capture bytes are fetched on demand only for their scoped item ids 
     const result = await fixture.account.sharedImage(project, id).catch(() => null); assert.equal(result, null);
   }
   assert.equal(count(), 1); await fixture.account.refreshSpaces();
-  assert.equal(await fixture.account.sharedImage(null, capture.id).catch(() => null), null);
+  assert.deepEqual(await fixture.account.sharedImage(null, capture.id), fixture.source.bytes); assert.equal(count(), 1);
   const refreshed = await fixture.open(); assert.deepEqual(await fixture.account.sharedImage(null, refreshed.items[1].id), fixture.source.bytes); assert.equal(count(), 2);
   assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
 });
@@ -8442,7 +8786,7 @@ test('Shared capture memory cache drops the least recently used bytes when its t
     image: { ...fixture.snapshot.project.items[1].image, bytes: bytes.length, blob: { id: randomUUID(), keyGeneration: 1 } } }));
   for (const item of images) {
     const identity = { ...fixture.identity, sequence: 0, kind: 'blob', id: item.image.blob.id };
-    const path = `/v1/spaces/space-a/datasets/${fixture.dataset}/objects/project/${identity.device}/${identity.generation}/blobs/${identity.id}.hzs`;
+    const path = `/v1/spaces/space-a/datasets/${fixture.dataset}/objects/kg${identity.keyGeneration}/project/${identity.device}/${identity.generation}/blobs/${identity.id}.hzs`;
     fixture.objects.set(path, { body: sealSpacePackage(fixture.spaceKey.slice(), identity, bytes), createdAt: Date.now() });
   }
   await fixture.publish({ mutate: value => { value.project.items = images; } }); const content = await fixture.open();
@@ -8496,22 +8840,22 @@ test('Shared project browser commands route images through the capture bridge an
 
 test('Shared project reader follows every object page and refuses repeated cursors, duplicate paths and malformed metadata', async t => {
   const fixture = await sharedReaderFixture(t); await fixture.publish({ mutate: value => { value.project.items[0].text = 'Checkpoint from next page'; } });
-  const prefix = `/v1/spaces/space-a/datasets/${fixture.dataset}/objects`, rows = [...fixture.objects].map(([path, value]) => ({ path: path.slice(prefix.length + 1), createdAt: value.createdAt }));
+  const prefix = `/v1/spaces/space-a/datasets/${fixture.dataset}/objects`, rows = [...fixture.objects].map(([path, value]) => ({ path: path.slice(prefix.length + 1), createdAt: value.createdAt, size: value.body.length, sha256: require('node:crypto').createHash('sha256').update(value.body).digest('hex') })).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   fixture.respond(call => {
     const url = new URL(call.path, fixture.origin); if (url.pathname !== prefix) return;
-    assert.equal(url.searchParams.get('prefix'), 'project/'); assert.equal(url.searchParams.get('limit'), '1000');
-    return { status: 200, body: { objects: url.searchParams.has('after') ? rows.slice(2) : rows.slice(0, 2), after: url.searchParams.has('after') ? null : 'next-page' } };
+    assert.equal(url.searchParams.get('prefix'), 'kg'); assert.equal(url.searchParams.get('limit'), '1000');
+    return { status: 200, body: { objects: url.searchParams.has('after') ? rows.slice(2) : rows.slice(0, 2), after: url.searchParams.has('after') ? null : rows[1].path } };
   });
   assert.equal((await fixture.open()).items[0].text, 'Checkpoint from next page');
-  assert.ok(fixture.requests.some(call => call.path.includes('/objects?') && new URL(call.path, fixture.origin).searchParams.get('after') === 'next-page'));
-  for (const body of [{ objects: [], after: 'same-page' }, { objects: [rows[0], rows[0]], after: null }, { objects: [{ ...rows[0], createdAt: -1 }], after: null }, { objects: [{ ...rows[0], path: '../local?secret' }], after: null }, { objects: Array(1001).fill(rows[0]), after: null }]) {
+  assert.ok(fixture.requests.some(call => call.path.includes('/objects?') && new URL(call.path, fixture.origin).searchParams.get('after') === rows[1].path));
+  for (const body of [{ objects: [], after: 'same-page' }, { objects: [rows[0]], after: 'wrong-path' }, { objects: [rows[1], rows[0]], after: null }, { objects: [rows[0], rows[0]], after: null }, { objects: [{ ...rows[0], createdAt: -1 }], after: null }, { objects: [{ ...rows[0], path: '../local?secret' }], after: null }, { objects: Array(1001).fill(rows[0]), after: null }]) {
     fixture.respond(call => new URL(call.path, fixture.origin).pathname === prefix ? { status: 200, body } : undefined);
-    await assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/);
+    await assert.rejects(fixture.open(), /ACCOUNT_INVALID_RESPONSE/);
   }
   assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);
 });
 
-test('Shared project reader discards stale opens after another open, a Nebula refresh or account cancellation', async t => {
+test('Shared project reader preserves opens across unchanged refreshes and discards replaced or cancelled opens', async t => {
   const fixture = await sharedReaderFixture(t), fetch = fixture.host.fetch;
   for (const action of ['open', 'refresh', 'cancel']) {
     const previous = await fixture.open();
@@ -8522,13 +8866,15 @@ test('Shared project reader discards stale opens after another open, a Nebula re
       if (!held && new URL(url).pathname.includes('/checkpoints/')) { held = true; enter(); await waiting; }
       return response;
     };
-    const stale = assert.rejects(fixture.open(), /SPACE_SHARED_UNAVAILABLE/); await entered;
+    const opening = fixture.open();
+    const stale = action === 'refresh' ? assert.doesNotReject(opening) : assert.rejects(opening, /SPACE_SHARED_UNAVAILABLE/); await entered;
     let latest;
     if (action === 'open') latest = await fixture.open();
     else if (action === 'refresh') await fixture.account.retry();
     else fixture.account.cancel();
     release(); await stale; fixture.host.fetch = fetch;
-    if (latest) assert.equal(fixture.account.sharedItem(null, latest.items[0].id).text, 'Chosen project text');
+    if (action === 'refresh') assert.equal(fixture.account.sharedItem(null, previous.items[0].id).text, 'Chosen project text');
+    else if (latest) assert.equal(fixture.account.sharedItem(null, latest.items[0].id).text, 'Chosen project text');
     else assert.throws(() => fixture.account.sharedItem(null, previous.items[0].id), /SPACE_SHARED_UNAVAILABLE/);
   }
   assert.deepEqual(readFileSync(fixture.desktopPath), fixture.before);

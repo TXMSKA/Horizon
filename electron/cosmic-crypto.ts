@@ -35,6 +35,14 @@ export async function deriveKey(key: Uint8Array, info: string): Promise<CryptoKe
     return await hkdf(key, new Uint8Array(), info);
   } catch { throw invalid(); }
 }
+export async function deriveAccountSyncKey(key: Uint8Array, datasetId: string): Promise<Buffer> {
+  try {
+    if (key.length !== 32 || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw invalid();
+    const material = await subtle.importKey('raw', bytes(key), 'HKDF', false, ['deriveBits']);
+    return Buffer.from(await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(),
+      info: encoder.encode(`cosmic/account/horizon/sync/${datasetId}`) }, material, 256));
+  } catch { throw invalid(); }
+}
 export async function openPhrase(phrase: string, value: KeyEnvelope): Promise<Uint8Array<ArrayBuffer>> {
   let plain: Uint8Array<ArrayBuffer> | undefined;
   let password: Uint8Array<ArrayBuffer> | undefined;
