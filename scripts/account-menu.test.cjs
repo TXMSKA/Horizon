@@ -44,7 +44,7 @@ const flat = value => [value].flat(Infinity).filter(value => value !== null && v
 const find = (tree, predicate) => flat(tree).flatMap(node => typeof node === 'object' ? [...(predicate(node) ? [node] : []), ...find(node.props?.children, predicate)] : []);
 const textOf = node => flat(node).map(child => typeof child === 'object' ? textOf(child.props?.children) : String(child)).join('');
 const describe = reason => `described:${reason instanceof Error ? reason.message : reason}`;
-const signedIn = (extra = {}) => ({ status: 'signedIn', email: 'alex.rivera@example.test', displayName: 'Alex Rivera', plan: 'Founder', phrase: 'ready', keyStore: 'shared', spaces: [], shared: [], spacesError: null, ...extra });
+const signedIn = (extra = {}) => ({ status: 'signedIn', email: 'alex.rivera@example.test', displayName: 'Alex Rivera', plan: 'Founder', phrase: 'ready', keyStore: 'shared', consent: 'accepted', managedSync: false, spaces: [], shared: [], spacesError: null, ...extra });
 const commands = (extra = {}) => { const ran = [], phrases = []; return { ran, phrases, value: { pending: { current: false }, busy: false, error: '', retry: null, phrase: '', setPhrase: value => phrases.push(value), run: async value => { ran.push(JSON.parse(JSON.stringify(value))); }, ...extra } }; };
 const buttons = tree => find(tree, node => node.type === 'button');
 const profiles = [{ id: 'personal', name: 'Personal', color: 'amber', tabCount: 4 }, { id: 'work', name: 'Work', color: 'blue', tabCount: 1 }, { id: 'studio', name: 'Studio', color: 'green', tabCount: 0 }];
@@ -101,6 +101,11 @@ test('the account card offers each status with its own commands and never sends 
   tree = h.render('AccountCard', { account: signedIn({ displayName: null, plan: null }), language: 'en', commands: c.value, card, describe });
   assert.equal(find(tree, node => node.props?.className === 'account-card-plan').length, 0);
   assert.equal(find(tree, node => node.type === 'small').length, 0, 'An email shown as the name is not repeated');
+
+  c = commands(); tree = h.render('AccountCard', { account: signedIn({ consent: 'required', phrase: 'needed' }), language: 'en', commands: c.value, card, describe });
+  assert.match(textOf(tree), new RegExp(copy.nebulaConsentTitle.en)); assert.equal(find(tree, node => node.type === 'textarea').length, 0, 'The words wait for the terms');
+  for (const button of buttons(tree)) button.props.onClick();
+  assert.deepEqual(c.ran, [{ type: 'account-manage' }, { type: 'account-retry' }, { type: 'account-sign-out' }]);
 
   c = commands({ busy: true }); tree = h.render('AccountCard', { account: { status: 'error', code: 'ACCOUNT_NETWORK' }, language: 'en', commands: c.value, card, describe });
   assert.equal(tree.props['aria-busy'], true); assert.ok(buttons(tree).every(button => button.props['aria-disabled'] === true));

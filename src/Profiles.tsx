@@ -127,7 +127,14 @@ export function AccountCard({ account, language, commands, card, describe }: {
       <div className="account-card-stack"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-reopen' }); }}><ExternalLink aria-hidden="true" />{t('nebulaReopen')}</button>
         <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-cancel' }); }}>{t('cancel')}</button></div>
     </>}
-    {account.status === 'signedIn' && account.phrase !== 'ready' && <form className="account-card-phrase" onSubmit={event => { event.preventDefault(); if (busy || !phrase.trim()) return; const value = phrase; setPhrase(''); void run({ type: 'account-phrase', phrase: value }); }}>
+    {account.status === 'signedIn' && account.consent === 'required' && <>
+      {identity}
+      <p className="account-card-heading">{t('nebulaConsentTitle')}</p><p className="account-card-text">{t('nebulaConsentText')}</p>
+      <div className="account-card-stack"><button className="desktop-action primary" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-manage' }); }}><ExternalLink aria-hidden="true" />{t('nebulaConsentOpen')}</button></div>
+      <div className="account-card-buttons equal"><button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-retry' }); }}>{t('retry')}</button>
+        <button className="desktop-action" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-sign-out' }); }}><LogOut aria-hidden="true" />{t('signOut')}</button></div>
+    </>}
+    {account.status === 'signedIn' && account.consent === 'accepted' && account.phrase !== 'ready' && <form className="account-card-phrase" onSubmit={event => { event.preventDefault(); if (busy || !phrase.trim()) return; const value = phrase; setPhrase(''); void run({ type: 'account-phrase', phrase: value }); }}>
       {identity}
       <p className="account-card-heading">{t('nebulaPhraseTitle')}</p><p className="account-card-text">{t('nebulaPhraseHint')}</p>
       <textarea className="account-card-words" aria-label={t('nebulaPhraseTitle')} value={phrase} maxLength={1000} spellCheck={false} autoComplete="off" autoCapitalize="off" onChange={event => setPhrase(event.target.value)} />
@@ -136,7 +143,7 @@ export function AccountCard({ account, language, commands, card, describe }: {
       <div className="account-card-buttons equal"><button className="desktop-action primary" type="submit" aria-disabled={busy || !phrase.trim()}>{t('phraseContinue')}</button>
         <button className="desktop-action outline" type="button" aria-disabled={busy} onClick={() => { setPhrase(''); void run({ type: 'account-sign-out' }); }}>{t('cancel')}</button></div>
     </form>}
-    {account.status === 'signedIn' && account.phrase === 'ready' && <>
+    {account.status === 'signedIn' && account.consent === 'accepted' && account.phrase === 'ready' && <>
       {identity}
       <div className="account-card-buttons"><button className="desktop-action outline account-card-manage" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-manage' }); }}><ExternalLink aria-hidden="true" />{t('nebulaManage')}</button>
         <button className="desktop-action" type="button" aria-disabled={busy} onClick={() => { void run({ type: 'account-sign-out' }); }}><LogOut aria-hidden="true" />{t('signOut')}</button></div>
@@ -182,8 +189,8 @@ export function ProfilesPopover({ account, language, describe, gate, profileCoun
     return () => rows.removeEventListener('scroll', measure);
   }, [profileCount]);
   // A command that replaces the focused control keeps focus inside the card instead of losing it to the page.
-  const status = account.status, phraseState = account.status === 'signedIn' ? account.phrase : null;
-  useEffect(() => { if (!document.activeElement || document.activeElement === document.body) cardStops(card.current)[0]?.focus(); }, [status, phraseState]);
+  const status = account.status, phraseState = account.status === 'signedIn' ? account.phrase : null, consent = account.status === 'signedIn' ? account.consent : null;
+  useEffect(() => { if (!document.activeElement || document.activeElement === document.body) cardStops(card.current)[0]?.focus(); }, [status, phraseState, consent]);
   const menuEntry = () => popover.current?.querySelector<HTMLElement>('#profiles-menu [aria-checked=true]') ?? popover.current?.querySelector<HTMLElement>('#profiles-menu [role^=menuitem]');
   return <div className="profiles-popover" ref={popover} onKeyDown={event => {
     if (!card.current?.contains(event.target as Node)) return;
